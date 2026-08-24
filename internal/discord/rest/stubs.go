@@ -14,8 +14,10 @@ import (
 func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/experiments", s.handleExperiments)
 	mux.HandleFunc("POST /api/v9/science", s.handleNoContent)
+	mux.HandleFunc("POST /api/v9/metrics", s.handleNoContent)
 	mux.HandleFunc("POST /api/v9/flurgergson", s.handleNoContent)
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
+	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
 	mux.HandleFunc("GET /api/v9/gateway/bot", s.handleGatewayBot)
 	mux.HandleFunc("GET /api/v9/applications/detectable", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/users/@me/connections", s.requireAuth(s.handleEmptyArray))
@@ -24,6 +26,19 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/@me/relationships", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleEmptyMap))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/users", s.requireAuth(s.handleAffinities))
+}
+
+// handleLocationMetadata answers the login screen's geo/consent probe with
+// safe defaults: no GDPR consent wall, no promotions.
+func (s *Server) handleLocationMetadata(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"consent_required":        false,
+		"country_code":            "US",
+		"promotional_body":        nil,
+		"promo_flags":             0,
+		"samsung_client_id":       nil,
+		"samsung_sdk_initialized": false,
+	})
 }
 
 // registerUnknown installs the catch-all handler last so every unmatched

@@ -94,6 +94,28 @@ func TestStubAffinities(t *testing.T) {
 	}
 }
 
+func TestStubLocationMetadata(t *testing.T) {
+	h := newServer(t, "open")
+	rec, out := do(t, h, "GET", "/api/v9/auth/location-metadata", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d", rec.Code)
+	}
+	if out["consent_required"] != false {
+		t.Fatalf("consent_required: %v", out["consent_required"])
+	}
+	if _, has := out["country_code"]; !has {
+		t.Fatal("missing country_code")
+	}
+}
+
+func TestStubMetrics(t *testing.T) {
+	h := newServer(t, "open")
+	rec, _ := do(t, h, "POST", "/api/v9/metrics", "", []any{map[string]any{"x": 1}})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("metrics: %d", rec.Code)
+	}
+}
+
 func TestUnknownPathIs404JSON(t *testing.T) {
 	h := newServer(t, "open")
 	rec, out := do(t, h, "GET", "/api/v9/definitely/not/implemented", "", nil)
