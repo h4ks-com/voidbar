@@ -166,7 +166,7 @@ func TestHelloIdentifyReadyHeartbeat(t *testing.T) {
 	}
 	// The client's READY reducer iterates users/private_channels/presences/
 	// relationships/sessions with .forEach - they must be arrays, never absent.
-	for _, key := range []string{"users", "private_channels", "presences", "relationships", "sessions"} {
+	for _, key := range []string{"users", "private_channels", "presences", "relationships", "sessions", "experiments", "guild_experiments"} {
 		if _, ok := d[key].([]any); !ok {
 			t.Fatalf("ready.%s must be an array, got %v", key, d[key])
 		}

@@ -298,6 +298,8 @@ return &ReadyData{
 		GeoOrderedRTCRegions: []any{},
 		SessionType:         "normal",
 		UserSettings:        map[string]any{},
+		Experiments:         []any{},
+		GuildExperiments:    []any{},
 	}
 }
 
