@@ -28,19 +28,21 @@ import (
 // For Wayback upstreams, files missing from the primary snapshot are
 // recovered from any other snapshot via the CDX API.
 type cdnProxy struct {
-	base     string
-	cacheDir string
-	client   *http.Client
-	log      *slog.Logger
+	base      string
+	mirrorDir string
+	cacheDir  string
+	client    *http.Client
+	log       *slog.Logger
 }
 
 func newCDNProxy(cfg *config.Config, log *slog.Logger) *cdnProxy {
 	sum := sha256.Sum256([]byte(cfg.Client.CdnBase))
 	return &cdnProxy{
-		base:     strings.TrimSuffix(cfg.Client.CdnBase, "/"),
-		cacheDir: filepath.Join(cfg.Storage.Path, "cdn-cache", hex.EncodeToString(sum[:6])),
-		client:   &http.Client{Timeout: 120 * time.Second},
-		log:      log,
+		base:      strings.TrimSuffix(cfg.Client.CdnBase, "/"),
+		mirrorDir: cfg.Client.MirrorDir,
+		cacheDir:  filepath.Join(cfg.Storage.Path, "cdn-cache", hex.EncodeToString(sum[:6])),
+		client:    &http.Client{Timeout: 120 * time.Second},
+		log:       log,
 	}
 }
 
@@ -85,11 +87,24 @@ func (p *cdnProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. Local mirror directory (as produced by `voidbar mirror`): fastest
+	//    path, and the only one that works fully offline.
+	if p.mirrorDir != "" {
+		if mp, ok := p.mirrorPath(rel); ok {
+			if b, err := os.ReadFile(mp); err == nil {
+				p.serve(w, r, rel, b)
+				return
+			}
+		}
+	}
+
+	// 2. On-disk cache of previously fetched upstream responses.
 	if b, err := os.ReadFile(cp); err == nil {
 		p.serve(w, r, rel, b)
 		return
 	}
 
+	// 3. Upstream mirror (+ CDX recovery for Wayback).
 	body, status := p.fetchUpstream(r.Context(), rel)
 	if status != 0 {
 		// Pass 404/429/5xx through: the loader has its own retry and
@@ -101,6 +116,18 @@ func (p *cdnProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = os.WriteFile(cp, body, 0o644)
 	}
 	p.serve(w, r, rel, body)
+}
+
+func (p *cdnProxy) mirrorPath(rel string) (string, bool) {
+	clean := path.Clean("/" + rel)
+	if strings.Contains(clean, "..") {
+		return "", false
+	}
+	local := filepath.Join(p.mirrorDir, filepath.FromSlash(clean))
+	if _, err := os.Stat(local); err != nil {
+		return "", false
+	}
+	return local, true
 }
 
 // fetchUpstream tries, in order: the plain path, the path without the

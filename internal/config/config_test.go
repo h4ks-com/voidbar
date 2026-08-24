@@ -146,6 +146,29 @@ enabled = true
 	}
 }
 
+func TestMirrorDirValidation(t *testing.T) {
+	good := writeConfig(t, `
+[client]
+enabled = true
+cdn_base = "https://example.invalid"
+proxy_cdn = true
+mirror_dir = "`+filepath.ToSlash(t.TempDir())+`"
+`)
+	if _, err := Load(good); err != nil {
+		t.Fatalf("valid mirror_dir rejected: %v", err)
+	}
+
+	bad := writeConfig(t, `
+[client]
+enabled = true
+cdn_base = "https://example.invalid"
+mirror_dir = "C:/definitely/not/here"
+`)
+	if _, err := Load(bad); err == nil {
+		t.Fatal("expected validation error for missing mirror_dir")
+	}
+}
+
 func TestProxyCDNRequiresEnabled(t *testing.T) {
 	bad := writeConfig(t, `
 [client]

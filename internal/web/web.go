@@ -27,6 +27,13 @@ func Handler(cfg *config.Config, log *slog.Logger) http.Handler {
 	if cfg.Client.ProxyCDN {
 		proxy := newCDNProxy(cfg, log)
 		mux.Handle("GET "+ProxyBasePath+"/{path...}", proxy)
+		// Client bundles request some assets relative to the app origin
+		// (e.g. /assets/locales/en.json); in proxy mode those must be
+		// served by the proxy too, not by the catch-all below.
+		mux.HandleFunc("GET /assets/{path...}", func(w http.ResponseWriter, r *http.Request) {
+			r.SetPathValue("path", "assets/"+r.PathValue("path"))
+			proxy.ServeHTTP(w, r)
+		})
 	}
 	mux.HandleFunc("GET /loader.js", serveStatic("static/loader.js", "application/javascript"))
 	mux.HandleFunc("GET /loading.css", serveStatic("static/loading.css", "text/css"))

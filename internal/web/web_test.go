@@ -122,6 +122,62 @@ func TestConfigEndpointWithProxy(t *testing.T) {
 	}
 }
 
+func TestProxyPrefersMirrorDir(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("from-upstream"))
+	}))
+	defer upstream.Close()
+
+	mirror := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mirror, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "assets", "app.js"), []byte("from-mirror"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Client.Enabled = true
+	cfg.Client.CdnBase = upstream.URL
+	cfg.Client.ProxyCDN = true
+	cfg.Client.MirrorDir = mirror
+	cfg.Storage.Path = t.TempDir()
+
+	srv := httptest.NewServer(Handler(cfg, testLogger()))
+	defer srv.Close()
+
+	for _, path := range []string{ProxyBasePath + "/assets/app.js", "/assets/app.js"} {
+		res, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d", path, res.StatusCode)
+		}
+		if string(body) != "from-mirror" {
+			t.Fatalf("%s: body %q", path, body)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("upstream hit %d times, expected 0 (mirror_dir must win)", hits.Load())
+	}
+
+	// A file missing from the mirror still falls through to upstream.
+	res, err := http.Get(srv.URL + ProxyBasePath + "/assets/other.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if string(body) != "from-upstream" {
+		t.Fatalf("fallback body: %q", body)
+	}
+}
+
 func TestProxyServesAndCaches(t *testing.T) {
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

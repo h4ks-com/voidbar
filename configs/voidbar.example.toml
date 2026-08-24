@@ -45,3 +45,7 @@ cdn_base = ""
 # ONLY enable this on personal instances that are NOT reachable from the
 # internet (localhost / LAN / VPN). Default: false.
 proxy_cdn = false
+# Local directory with a pre-downloaded build (see: voidbar mirror). When
+# set, the proxy serves assets from disk - instant, offline, no mirror
+# rate limits. Files missing on disk still fall back to cdn_base.
+# mirror_dir = "./mirror-2022-06"
