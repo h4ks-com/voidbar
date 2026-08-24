@@ -6,11 +6,15 @@
 package web
 
 import (
+	"bufio"
 	"embed"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/h4ks-com/voidbar/internal/config"
 )
@@ -38,7 +42,39 @@ func Handler(cfg *config.Config, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /loader.js", serveStatic("static/loader.js", "application/javascript"))
 	mux.HandleFunc("GET /loading.css", serveStatic("static/loading.css", "text/css"))
 	mux.HandleFunc("GET /", serveStatic("static/index.html", "text/html"))
-	return mux
+	return withLogging(mux, log)
+}
+
+func withLogging(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		if rw.status == http.StatusNotFound {
+			log.Warn("web_unknown", "method", r.Method, "path", r.URL.Path, "dur", time.Since(start).String())
+			return
+		}
+		log.Info("web", "method", r.Method, "path", r.URL.Path, "status", rw.status, "dur", time.Since(start).String())
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not implement http.Hijacker")
+	}
+	w.status = http.StatusSwitchingProtocols
+	return h.Hijack()
 }
 
 type clientConfig struct {

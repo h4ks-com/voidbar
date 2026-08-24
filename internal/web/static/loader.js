@@ -267,7 +267,7 @@ async function fetchCDN(path, opts = {}) {
     }
     if (res.status === 404 && path.startsWith('/assets/')) {
       // Mirrors use slightly different layouts; retry without the prefix.
-      return fetchRaw(`${state.cfg.cdn_base}${path.slice('/assets/'.length)}`, opts);
+      return fetchCDN(path.slice('/assets/'.length), opts);
     }
     if (res.status === 429 || res.status >= 500) {
       const retryAfter = parseInt(res.headers.get('retry-after') || '', 10);
@@ -631,7 +631,7 @@ function installInterceptor() {
             log('uncached dynamic chunk, loading:', normalized);
             loadResource(normalized, 'script')
               .then((e) => elem.setAttribute('src', e.blob))
-              .catch(() => elem.setAttribute('src', `${state.cfg.cdn_base}${normalized}`));
+              .catch(() => elem.setAttribute('src', `${assetBase()}${normalized}`));
           }
         },
         configurable: true,
