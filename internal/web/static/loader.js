@@ -167,15 +167,13 @@ function patchCSS(text, cfg) {
 // ---------------------------------------------------------------------------
 // OPFS asset cache
 //
-// After a resource is fetched and patched it is persisted in Origin Private
-// File System; subsequent boots load from the local cache without touching
-// the mirror. Cache key includes the mirror, build and instance origin, so
-// switching any of them starts a fresh cache.
+// Stores the RAW (unpatched) upstream bytes; patchJS/patchCSS are applied in
+// memory at read time. This means loader patch changes never invalidate the
+// cache - a new patcher version just re-patches instantly. The cache key
+// covers the mirror, build and instance origin; switching any of them starts
+// a fresh cache. v2 = raw-content format (v1 stored patched bytes).
 
-const CACHE_VERSION = 'v1';
-// Bump when patchJS/patchCSS semantics change: OPFS entries hold already
-// patched content, so a new patcher must invalidate the whole cache.
-const PATCH_VERSION = 'p4';
+const CACHE_VERSION = 'v2';
 
 function hashString(s) {
   let h = 2166136261;
@@ -197,7 +195,7 @@ const opfs = {
     }
     try {
       const key = hashString(
-        `${CACHE_VERSION}|${PATCH_VERSION}|${state.cfg.proxy_base ? 'proxy' : 'direct'}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
+        `${CACHE_VERSION}|${state.cfg.proxy_base ? 'proxy' : 'direct'}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
       );
       let dir = await navigator.storage.getDirectory();
       for (const part of ['voidbar', CACHE_VERSION, key]) {
@@ -404,33 +402,31 @@ function makeBlob(normalized, body, type) {
   return entry;
 }
 
-// Download one file (with retry), patch it, cache the blob, persist to OPFS,
-// and enqueue discovered chunks/assets. Used by the boot-time pool.
+// Download one file (with retry), persist the RAW bytes to OPFS, patch in
+// memory, cache the blob, and enqueue discovered chunks/assets. Raw content
+// is always available (from OPFS or the network), so chunk discovery also
+// runs on resumed boots.
 function enqueueFile(path, type) {
   const normalized = normalizePath(path);
   if (scheduler.seen.has(normalized)) return;
   scheduler.seen.add(normalized);
   scheduler.enqueue(async () => {
-    let body = await opfs.read(normalized);
-    let content = null;
-    if (body == null) {
+    let raw = await opfs.read(normalized);
+    if (raw == null) {
       const res = await fetchCDN(normalized);
       if (!res.ok) {
         scheduler.missing.add(normalized);
         log('missing:', normalized);
         return;
       }
-      content = await res.text();
-      body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
-      opfs.write(normalized, body); // fire-and-forget persistence
+      raw = await res.text();
+      opfs.write(normalized, raw); // fire-and-forget persistence of raw bytes
     }
-    makeBlob(normalized, body, type);
-    if (content != null && type === 'script') {
-      for (const [hash, variants] of chunkVariants(content)) enqueueChunk(hash, variants);
+    makeBlob(normalized, type === 'script' ? patchJS(raw, state.cfg) : patchCSS(raw, state.cfg), type);
+    if (type === 'script') {
+      for (const [hash, variants] of chunkVariants(raw)) enqueueChunk(hash, variants);
     }
-    if (content != null) {
-      for (const asset of assetURLs(content)) enqueueAsset(asset);
-    }
+    for (const asset of assetURLs(raw)) enqueueAsset(asset);
   });
 }
 
@@ -459,26 +455,22 @@ function enqueueChunk(hash, variants) {
       const normalized = normalizePath(candidate);
       if (cache.has(normalized)) return;
 
-      let body = await opfs.read(normalized);
-      let content = null;
-      if (body == null) {
+      let raw = await opfs.read(normalized);
+      if (raw == null) {
         const res = await fetchCDN(normalized);
         if (res.status === 404) continue; // try next variant
         if (!res.ok) {
           log('chunk fetch failed:', normalized, res.status);
           return;
         }
-        content = await res.text();
-        const type = normalized.endsWith('.css') ? 'style' : 'script';
-        body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
-        opfs.write(normalized, body);
-        makeBlob(normalized, body, type);
-      } else {
-        makeBlob(normalized, body, normalized.endsWith('.css') ? 'style' : 'script');
+        raw = await res.text();
+        opfs.write(normalized, raw);
       }
-      if (content != null && !normalized.endsWith('.css')) {
-        for (const [h, v] of chunkVariants(content)) enqueueChunk(h, v);
-        for (const asset of assetURLs(content)) enqueueAsset(asset);
+      const type = normalized.endsWith('.css') ? 'style' : 'script';
+      makeBlob(normalized, type === 'script' ? patchJS(raw, state.cfg) : patchCSS(raw, state.cfg), type);
+      if (type === 'script') {
+        for (const [h, v] of chunkVariants(raw)) enqueueChunk(h, v);
+        for (const asset of assetURLs(raw)) enqueueAsset(asset);
       }
       return;
     }
@@ -487,24 +479,23 @@ function enqueueChunk(hash, variants) {
 }
 
 // Load a resource outside of boot (dynamic chunk interception). Uses the
-// same retry logic; OPFS and blob caches are consulted first.
+// same retry logic; OPFS (raw) and blob caches are consulted first.
 async function loadResource(path, type) {
   const normalized = normalizePath(path);
   if (cache.has(normalized)) return cache.get(normalized);
   if (scheduler.missing.has(normalized)) throw new Error(`known missing: ${normalized}`);
 
-  let body = await opfs.read(normalized);
-  if (body == null) {
+  let raw = await opfs.read(normalized);
+  if (raw == null) {
     const res = await fetchCDN(normalized);
     if (!res.ok) {
       if (res.status === 404) scheduler.missing.add(normalized);
       throw new Error(`HTTP ${res.status} for ${normalized}`);
     }
-    const content = await res.text();
-    body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
-    opfs.write(normalized, body);
+    raw = await res.text();
+    opfs.write(normalized, raw);
   }
-  return makeBlob(normalized, body, type);
+  return makeBlob(normalized, type === 'script' ? patchJS(raw, state.cfg) : patchCSS(raw, state.cfg), type);
 }
 
 // ---------------------------------------------------------------------------
