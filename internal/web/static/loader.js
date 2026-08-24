@@ -252,7 +252,9 @@ const opfs = {
 
 const FETCH_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 5;
-const POOL_SIZE = 4;
+// Concurrency: small against remote mirrors (they rate-limit), larger when
+// every request hits the instance's own proxy backed by a local mirror.
+let POOL_SIZE = 4;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -686,6 +688,12 @@ async function boot() {
   window.GLOBAL_ENV = buildGlobalEnv(state.cfg);
   document.title = state.cfg.instance_name || 'Voidbar';
   log('instance:', state.cfg.instance_name, 'build:', state.cfg.build);
+
+  // Same-origin proxy backed by a local mirror serves files at disk speed -
+  // widen the download pool for it. Remote mirrors keep the small pool.
+  if (state.cfg.proxy_base) {
+    POOL_SIZE = 12;
+  }
 
   await opfs.init();
 

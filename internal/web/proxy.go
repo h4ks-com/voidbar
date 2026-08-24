@@ -139,7 +139,15 @@ func (p *cdnProxy) mirrorPath(rel string) (string, bool) {
 // fetchUpstream tries, in order: the plain path, the path without the
 // /assets/ prefix (mirror layout differences), and — for Wayback upstreams —
 // any other snapshot via the CDX API. A non-zero status means give up.
+//
+// When a local mirror_dir is configured, network fallback is skipped
+// entirely: the mirror was produced by the same discovery process, so
+// anything missing from it is a lacuna, and hitting the upstream for it
+// only turns fast 404s into multi-second ones on the client's first boot.
 func (p *cdnProxy) fetchUpstream(ctx context.Context, rel string) ([]byte, int) {
+	if p.mirrorDir != "" {
+		return nil, http.StatusNotFound
+	}
 	urls := []string{p.base + "/" + strings.TrimPrefix(rel, "/")}
 	if strings.HasPrefix(rel, "/assets/") || strings.HasPrefix(rel, "assets/") {
 		urls = append(urls, p.base+"/"+strings.TrimPrefix(rel, "/assets/"))

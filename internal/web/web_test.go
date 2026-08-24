@@ -166,15 +166,17 @@ func TestProxyPrefersMirrorDir(t *testing.T) {
 		t.Fatalf("upstream hit %d times, expected 0 (mirror_dir must win)", hits.Load())
 	}
 
-	// A file missing from the mirror still falls through to upstream.
+	// A file missing from the mirror 404s fast: with a local mirror_dir the
+	// proxy never falls back to the network (the mirror already encodes
+	// whatever the discovery process could find).
 	res, err := http.Get(srv.URL + ProxyBasePath + "/assets/other.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(res.Body)
+	io.Copy(io.Discard, res.Body)
 	res.Body.Close()
-	if string(body) != "from-upstream" {
-		t.Fatalf("fallback body: %q", body)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("mirror miss should 404, got %d", res.StatusCode)
 	}
 }
 
