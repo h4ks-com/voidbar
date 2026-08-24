@@ -244,6 +244,15 @@ func (s *Server) handleUserSettings(w http.ResponseWriter, r *http.Request, u *s
 }
 
 func (s *Server) handleUserGuilds(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net != nil {
+		guilds, err := s.net.GuildsForUser(u.ID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "failed to list guilds")
+			return
+		}
+		writeJSON(w, http.StatusOK, guilds)
+		return
+	}
 	writeJSON(w, http.StatusOK, []any{})
 }
 
