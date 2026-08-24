@@ -106,6 +106,21 @@ function assetBase() {
 function patchJS(text, cfg) {
   const host = location.host;
 
+  // --- client diagnostics: null-safe store comparator -------------------
+  // The client's shallow-equal comparator does Object.keys() on both args
+  // with no null guard; a store selector returning undefined during a
+  // dispatch crashes the whole gateway connection. Make it null-safe and
+  // log the offending values instead of crashing.
+  text = text.replaceAll(
+    't.default=function(e,t,n){if(e===t)return!0;var r=Object.keys(e),i=Object.keys(t);',
+    't.default=function(e,t,n){if(e===t)return!0;if(null==e||null==t){console.warn("[voidbar] shallowEqual null:",e,t);return!1}var r=Object.keys(e),i=Object.keys(t);',
+  );
+  // Log which component selector returns undefined (useStateFromStores).
+  text = text.replaceAll(
+    'var e=u.current();if(!i(f.current,e)){f.current=e;p({})}',
+    'var e=u.current();if(null==e)console.warn("[voidbar] selector undefined:",String(u.current).slice(0,400));if(!i(f.current,e)){f.current=e;p({})}',
+  );
+
   // Kill Sentry at the source: replace the DSN *contents* with an empty
   // string (the quotes stay from the original literal), which the SDK
   // treats as "disabled". Never inject quotes here - the DSN appears as
@@ -160,7 +175,7 @@ function patchCSS(text, cfg) {
 const CACHE_VERSION = 'v1';
 // Bump when patchJS/patchCSS semantics change: OPFS entries hold already
 // patched content, so a new patcher must invalidate the whole cache.
-const PATCH_VERSION = 'p3';
+const PATCH_VERSION = 'p4';
 
 function hashString(s) {
   let h = 2166136261;

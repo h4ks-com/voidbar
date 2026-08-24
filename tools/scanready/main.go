@@ -13,28 +13,12 @@ func main() {
 		panic(err)
 	}
 	c := string(b)
-	fields := []string{"guildJoinRequests", "consents", "analyticsToken", "users", "presences", "relationships", "privateChannels", "sessions", "experiments", "connectedAccounts", "userGuildSettings", "readState", "guilds", "notes", "linkedUsers", "mergedPresences", "mergedMembers", "gameRelationships", "geoOrderedRtcRegions", "friendSuggestionCount"}
-	for _, f := range fields {
-		re := regexp.MustCompile(`\be\.` + f + `\.(map|forEach|filter)\b`)
-		ms := re.FindAllStringIndex(c, -1)
-		unguarded := 0
-		for _, m := range ms {
-			s := m[0] - 80
-			if s < 0 {
-				s = 0
-			}
-			end := m[1] + 40
-			if end > len(c) {
-				end = len(c)
-			}
-			ctx := c[s:end]
-			if !strings.Contains(ctx, "null!=") && !strings.Contains(ctx, "||[]") && !strings.Contains(ctx, "||[]") && !strings.Contains(ctx, "!=null") {
-				unguarded++
-				fmt.Printf("%s: UNGUARDED ctx=...%s...\n", f, ctx)
-			}
-		}
-		if len(ms) > 0 {
-			fmt.Printf("%s: total=%d unguarded=%d\n", f, len(ms), unguarded)
-		}
+	// Find all imports of module 389726 (the shallow-equal comparator) and
+	// show how the imported symbol is used (comparator call sites).
+	re := regexp.MustCompile(`.{0,300}=([a-zA-Z_$][\w$]*)\(n\(389726\)\).{0,300}`)
+	for _, m := range re.FindAllString(c, -1) {
+		fmt.Println(">>>", m)
+		fmt.Println()
 	}
+	_ = strings.TrimSpace
 }
