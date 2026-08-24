@@ -51,6 +51,7 @@ type ReadyData struct {
 	Users                []any              `json:"users"`
 	Presences            []any              `json:"presences"`
 	Relationships        []any              `json:"relationships"`
+	Sessions             []any              `json:"sessions"`
 	GeoOrderedRTCRegions []any              `json:"geo_ordered_rtc_regions"`
 	SessionType          string             `json:"session_type"`
 	UserSettings         map[string]any     `json:"user_settings"`

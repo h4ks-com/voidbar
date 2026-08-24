@@ -294,6 +294,7 @@ return &ReadyData{
 		Users:               []any{},
 		Presences:           []any{},
 		Relationships:       []any{},
+		Sessions:            []any{},
 		GeoOrderedRTCRegions: []any{},
 		SessionType:         "normal",
 		UserSettings:        map[string]any{},
