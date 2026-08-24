@@ -32,10 +32,11 @@ type Auth struct {
 }
 
 type Client struct {
-	Enabled bool   `toml:"enabled"`
-	CdnBase string `toml:"cdn_base"`
-	Build   string `toml:"build"`
-	Html    string `toml:"html"`
+	Enabled  bool   `toml:"enabled"`
+	CdnBase  string `toml:"cdn_base"`
+	Build    string `toml:"build"`
+	Html     string `toml:"html"`
+	ProxyCDN bool   `toml:"proxy_cdn"`
 }
 
 func Default() *Config {
@@ -80,6 +81,9 @@ func applyEnv(cfg *Config) {
 	set(&cfg.Client.CdnBase, "VOIDBAR_CLIENT_CDN_BASE")
 	set(&cfg.Client.Build, "VOIDBAR_CLIENT_BUILD")
 	set(&cfg.Client.Html, "VOIDBAR_CLIENT_HTML")
+	if v, ok := os.LookupEnv("VOIDBAR_CLIENT_PROXY_CDN"); ok && v != "" {
+		cfg.Client.ProxyCDN = v == "true" || v == "1"
+	}
 }
 
 func (c *Config) Validate() error {
@@ -104,6 +108,9 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(c.Client.CdnBase, "http://") && !strings.HasPrefix(c.Client.CdnBase, "https://") {
 			return errors.New("client.cdn_base must start with http:// or https://")
 		}
+	}
+	if c.Client.ProxyCDN && !c.Client.Enabled {
+		return errors.New("client.proxy_cdn requires client.enabled")
 	}
 	return nil
 }

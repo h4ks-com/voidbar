@@ -37,3 +37,11 @@ cdn_base = ""
 # build = ""
 # Name of the HTML entry when it is not "app.html".
 # html = "app"
+# OPT-IN: serve client assets through this instance (transparent disk cache)
+# instead of the browser fetching them from cdn_base. This removes CORS
+# issues entirely and lets the server recover files missing from a Wayback
+# snapshot via the CDX API. However, the instance then distributes
+# Discord-owned assets itself — the exposure that drew a C&D onto Fosscord.
+# ONLY enable this on personal instances that are NOT reachable from the
+# internet (localhost / LAN / VPN). Default: false.
+proxy_cdn = false

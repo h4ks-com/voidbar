@@ -1,11 +1,14 @@
 // Package web serves Voidbar's own client loader. It deliberately contains no
 // Discord assets: the loader downloads a frozen client build from a configured
-// CDN mirror at runtime and patches it in the browser.
+// CDN mirror at runtime and patches it in the browser. The optional, opt-in
+// proxy mode (client.proxy_cdn) serves assets through the instance instead —
+// intended strictly for instances not reachable from the public internet.
 package web
 
 import (
 	"embed"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -15,9 +18,16 @@ import (
 //go:embed static/index.html static/loader.js static/loading.css
 var files embed.FS
 
-func Handler(cfg *config.Config) http.Handler {
+// ProxyBasePath is the mount point of the optional CDN proxy.
+const ProxyBasePath = "/voidbar/cdn"
+
+func Handler(cfg *config.Config, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /voidbar/config", handleConfig(cfg))
+	if cfg.Client.ProxyCDN {
+		proxy := newCDNProxy(cfg, log)
+		mux.Handle("GET "+ProxyBasePath+"/{path...}", proxy)
+	}
 	mux.HandleFunc("GET /loader.js", serveStatic("static/loader.js", "application/javascript"))
 	mux.HandleFunc("GET /loading.css", serveStatic("static/loading.css", "text/css"))
 	mux.HandleFunc("GET /", serveStatic("static/index.html", "text/html"))
@@ -28,6 +38,7 @@ type clientConfig struct {
 	InstanceName string `json:"instance_name"`
 	Gateway      string `json:"gateway"`
 	CdnBase      string `json:"cdn_base"`
+	ProxyBase    string `json:"proxy_base"`
 	Build        string `json:"build"`
 	Html         string `json:"html"`
 }
@@ -44,10 +55,15 @@ func handleConfig(cfg *config.Config) http.HandlerFunc {
 		if html == "" {
 			html = "app.html"
 		}
+		proxyBase := ""
+		if cfg.Client.ProxyCDN {
+			proxyBase = ProxyBasePath
+		}
 		writeJSON(w, http.StatusOK, clientConfig{
 			InstanceName: "Voidbar",
 			Gateway:      cfg.GatewayWSURL(),
 			CdnBase:      strings.TrimSuffix(cfg.Client.CdnBase, "/"),
+			ProxyBase:    proxyBase,
 			Build:        cfg.Client.Build,
 			Html:         html,
 		})

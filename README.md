@@ -15,6 +15,20 @@ IRC networks on the other, so a real Discord client can be used to chat on IRC.
 - **Bouncer semantics.** Upstream connections persist independently of client
   sessions; message history is buffered and replayed on reconnect.
 
+## Client assets & legal notes
+
+Voidbar stores and serves **no Discord assets**. The bundled web loader
+downloads a frozen client build from a mirror you configure (e.g. an
+archive.org item, which sends CORS headers) and patches it in the browser;
+patched assets are cached client-side in OPFS.
+
+`client.proxy_cdn = true` is an **opt-in** mode where the instance proxies and
+caches the assets itself (removes CORS issues, enables Wayback CDX recovery of
+missing files). This means the instance distributes Discord-owned assets — the
+exposure that drew a cease & desist onto Fosscord. **Only use it on instances
+that are not reachable from the public internet** (localhost / LAN / VPN) and
+at your own risk.
+
 ## Status
 
 Work in progress — initial scaffolding only.

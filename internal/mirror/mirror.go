@@ -12,6 +12,7 @@
 package mirror
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -161,6 +162,8 @@ func Run(opts Options) error {
 	styles, scripts := ExtractEntryResources(string(html))
 	opts.Log("entry html references %d styles, %d scripts", len(styles), len(scripts))
 
+	// When fetching a script (local or remote), always parse it so a resumed
+	// run still discovers chunk groups from previously downloaded files.
 	enqueueAsset := func(p, ftype string) {
 		d.enqueue(func() {
 			content, err := d.fetchLocalOrRemote(p)
@@ -300,7 +303,10 @@ func (d *downloader) markMissing(p string) {
 }
 
 // fetchLocalOrRemote returns the file content, preferring an existing local
-// copy (resume support).
+// copy (resume support). Wayback bases additionally fall back to the CDX API
+// when the snapshot is missing the file entirely: lazy webpack chunks are
+// frequently absent from one capture but present in another, and chunk files
+// are content-addressed so any snapshot serves.
 func (d *downloader) fetchLocalOrRemote(p string) ([]byte, error) {
 	if b, err := os.ReadFile(d.localPath(p)); err == nil {
 		return b, nil
@@ -310,7 +316,35 @@ func (d *downloader) fetchLocalOrRemote(p string) ([]byte, error) {
 		alt := strings.TrimPrefix(p, "/assets/")
 		b, err = d.fetchWithRetry(d.opts.Base + "/" + alt)
 	}
+	if errors.Is(err, errNotFound) {
+		if b2, ok := d.fetchViaCDX(p); ok {
+			return b2, nil
+		}
+	}
 	return b, err
+}
+
+// fetchViaCDX tries to recover a Wayback-missing file from any other
+// snapshot via the CDX API. It is best-effort: failures are swallowed and
+// reported through the logger only.
+func (d *downloader) fetchViaCDX(p string) ([]byte, bool) {
+	original, ok := SplitWayback(d.opts.Base)
+	if !ok {
+		return nil, false
+	}
+	ctx := context.Background()
+	target, err := CDXLookup(ctx, d.client, original+p)
+	if err != nil {
+		d.opts.Log("cdx: no snapshot for %s: %v", p, err)
+		return nil, false
+	}
+	b, err := d.fetchWithRetry(target)
+	if err != nil {
+		d.opts.Log("cdx: fetch failed for %s: %v", p, err)
+		return nil, false
+	}
+	d.opts.Log("cdx: rescued %s from %s", p, target)
+	return b, true
 }
 
 func (d *downloader) fetchWithRetry(url string) ([]byte, error) {

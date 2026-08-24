@@ -121,7 +121,10 @@ func serveCmd(args []string, log *slog.Logger) error {
 	root.Handle("/health", restHandler)
 	root.Handle("/gateway", restHandler)
 	if cfg.Client.Enabled {
-		root.Handle("/", web.Handler(cfg))
+		if cfg.Client.ProxyCDN {
+			log.Warn("client.proxy_cdn is enabled: this instance proxies and caches Discord client assets itself; use only on instances NOT reachable from the public internet")
+		}
+		root.Handle("/", web.Handler(cfg, log))
 	} else {
 		root.Handle("/", restHandler)
 	}

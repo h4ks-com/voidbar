@@ -146,6 +146,40 @@ enabled = true
 	}
 }
 
+func TestProxyCDNRequiresEnabled(t *testing.T) {
+	bad := writeConfig(t, `
+[client]
+enabled = false
+cdn_base = "https://example.invalid"
+proxy_cdn = true
+`)
+	if _, err := Load(bad); err == nil {
+		t.Fatal("expected validation error for proxy_cdn without enabled")
+	}
+
+	ok := writeConfig(t, `
+[client]
+enabled = true
+cdn_base = "https://example.invalid"
+proxy_cdn = true
+`)
+	cfg, err := Load(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Client.ProxyCDN {
+		t.Fatal("proxy_cdn should be true")
+	}
+	t.Setenv("VOIDBAR_CLIENT_PROXY_CDN", "false")
+	cfg, err = Load(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Client.ProxyCDN {
+		t.Fatal("env override should disable proxy_cdn")
+	}
+}
+
 func TestMissingFileExplicit(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "nope.toml")); err == nil {
 		t.Fatal("expected error for missing explicit config")

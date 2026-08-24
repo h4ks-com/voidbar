@@ -59,7 +59,7 @@ function buildGlobalEnv(cfg) {
     GATEWAY_ENDPOINT: cfg.gateway,
     WEBAPP_ENDPOINT: host,
     CDN_HOST: host,
-    ASSET_ENDPOINT: cfg.cdn_base,
+    ASSET_ENDPOINT: assetBase(),
     MEDIA_PROXY_ENDPOINT: host,
     WIDGET_ENDPOINT: '',
     INVITE_HOST: location.host,
@@ -80,6 +80,15 @@ function buildGlobalEnv(cfg) {
     HTML_TIMESTAMP: Date.now(),
     ALGOLIA_KEY: '',
   };
+}
+
+// All asset fetches and patched asset references go through either the
+// configured mirror directly, or - when the instance runs its opt-in CDN
+// proxy - through same-origin paths (no CORS involved at all).
+function assetBase() {
+  return state.cfg.proxy_base
+    ? `${location.origin}${state.cfg.proxy_base}`
+    : state.cfg.cdn_base;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +119,9 @@ function patchJS(text, cfg) {
   text = text.replaceAll(/([a-z]+\.)?discord\.com/g, host);
   text = text.replaceAll(/([a-z]+\.)?discord\.media/g, host);
 
-  // Webpack asset manifest base: point media/asset lookups at the CDN.
-  text = text.replaceAll(/e\.exports=n\.p/g, `e.exports="${cfg.cdn_base}/assets/"`);
+  // Webpack asset manifest base: point media/asset lookups at the CDN (or
+  // the instance's opt-in proxy).
+  text = text.replaceAll(/e\.exports=n\.p/g, `e.exports="${assetBase()}/assets/"`);
 
   // When the instance itself is plain http (local dev), downgrade embedded
   // https URLs so browsers do not block mixed content.
@@ -123,7 +133,7 @@ function patchJS(text, cfg) {
 }
 
 function patchCSS(text, cfg) {
-  text = text.replaceAll(/url\(\/assets\//g, `url(${cfg.cdn_base}/assets/`);
+  text = text.replaceAll(/url\(\/assets\//g, `url(${assetBase()}/assets/`);
   text = text.replaceAll('d3dsisomax34re.cloudfront.net', location.host);
   return text;
 }
@@ -161,7 +171,7 @@ const opfs = {
     }
     try {
       const key = hashString(
-        `${CACHE_VERSION}|${PATCH_VERSION}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
+        `${CACHE_VERSION}|${PATCH_VERSION}|${state.cfg.proxy_base ? 'proxy' : 'direct'}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
       );
       let dir = await navigator.storage.getDirectory();
       for (const part of ['voidbar', CACHE_VERSION, key]) {
@@ -238,7 +248,7 @@ async function fetchRaw(url, opts = {}) {
 // load (5xx, refused streams), so patience is required on the first boot.
 // Returns the Response: 404 is returned as-is, everything else is retried.
 async function fetchCDN(path, opts = {}) {
-  const url = `${state.cfg.cdn_base}${path}`;
+  const url = `${assetBase()}${path}`;
   let backoff = 1000;
   let lastError = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
