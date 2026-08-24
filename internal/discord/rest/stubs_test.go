@@ -2,7 +2,12 @@ package rest
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestStubExperiments(t *testing.T) {
@@ -113,6 +118,51 @@ func TestStubMetrics(t *testing.T) {
 	rec, _ := do(t, h, "POST", "/api/v9/metrics", "", []any{map[string]any{"x": 1}})
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("metrics: %d", rec.Code)
+	}
+}
+
+func TestStubStatuspageAndTrialOffer(t *testing.T) {
+	h := newServer(t, "open")
+	token := registerAndLogin(t, h)
+
+	for _, path := range []string{
+		"/api/v2/incidents/unresolved.json",
+		"/api/v2/scheduled-maintenances/active.json",
+	} {
+		rec, out := doAny(t, h, "GET", path, "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+		if arr, ok := out.([]any); !ok || len(arr) != 0 {
+			t.Fatalf("%s: %v", path, out)
+		}
+	}
+
+	rec, out := do(t, h, "GET", "/api/v9/users/@me/billing/user-trial-offer", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("trial-offer: %d", rec.Code)
+	}
+	if out != nil && len(out) != 0 {
+		t.Fatalf("trial-offer should be null, got %v", out)
+	}
+}
+
+func TestRemoteAuthStubCloses(t *testing.T) {
+	h := newServer(t, "open")
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/remote-auth/?v=1"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+		t.Fatalf("expected normal close, got %v", err)
 	}
 }
 

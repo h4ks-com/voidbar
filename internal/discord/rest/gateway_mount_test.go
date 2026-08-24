@@ -36,7 +36,9 @@ func TestGatewayThroughRESTRouter(t *testing.T) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway?v=9&encoding=json"
+	// Match how real clients connect: GATEWAY_ENDPOINT + "/?v=9&encoding=json"
+	// (zlib-stream compression is covered by the gateway package tests).
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway/?v=9&encoding=json"
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)

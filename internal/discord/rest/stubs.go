@@ -3,6 +3,9 @@ package rest
 import (
 	"io"
 	"net/http"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/h4ks-com/voidbar/internal/storage"
 )
@@ -18,6 +21,9 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v9/flurgergson", s.handleNoContent)
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
+	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
+	mux.HandleFunc("GET /api/v2/incidents/unresolved.json", s.handleEmptyArrayPublic)
+	mux.HandleFunc("GET /api/v2/scheduled-maintenances/active.json", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/gateway/bot", s.handleGatewayBot)
 	mux.HandleFunc("GET /api/v9/applications/detectable", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/users/@me/connections", s.requireAuth(s.handleEmptyArray))
@@ -75,6 +81,30 @@ func (s *Server) handleGatewayBot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEmptyArrayPublic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []any{})
+}
+
+// handleNull answers 200 with JSON null - Discord's "no trial offer" reply.
+func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, nil)
+}
+
+// remoteAuthStub accepts the QR-login websocket and closes it immediately.
+// Voidbar has no QR login; a clean close stops the client's reconnect loop
+// and the login screen falls back to the email/password form.
+func remoteAuthStub() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "remote auth not supported"),
+			time.Now().Add(5*time.Second),
+		)
+		_ = conn.Close()
+	})
 }
 
 func (s *Server) handleEmptyArray(w http.ResponseWriter, r *http.Request, _ *storage.User) {

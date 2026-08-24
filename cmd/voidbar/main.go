@@ -120,6 +120,11 @@ func serveCmd(args []string, log *slog.Logger) error {
 	root.Handle("/api/", restHandler)
 	root.Handle("/health", restHandler)
 	root.Handle("/gateway", restHandler)
+	// Discord clients append "/?v=9&encoding=json" to GATEWAY_ENDPOINT,
+	// producing /gateway/ - must reach the WS handler, not the web catch-all.
+	root.Handle("/gateway/", restHandler)
+	root.Handle("/remote-auth", restHandler)
+	root.Handle("/remote-auth/", restHandler)
 	if cfg.Client.Enabled {
 		if cfg.Client.ProxyCDN {
 			log.Warn("client.proxy_cdn is enabled: this instance proxies and caches Discord client assets itself; use only on instances NOT reachable from the public internet")

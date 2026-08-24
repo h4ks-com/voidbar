@@ -36,6 +36,11 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.H
 	mux.HandleFunc("GET /api/v9/gateway", s.handleGateway)
 	if gatewayWS != nil {
 		mux.Handle("GET /gateway", gatewayWS)
+		// Clients connect to GATEWAY_ENDPOINT+"/?v=..&encoding=json",
+		// which lands on the trailing-slash path.
+		mux.Handle("GET /gateway/", gatewayWS)
+		mux.Handle("GET /remote-auth", remoteAuthStub())
+		mux.Handle("GET /remote-auth/", remoteAuthStub())
 	}
 	mux.HandleFunc("POST /api/v9/auth/register", s.handleRegister)
 	mux.HandleFunc("POST /api/v9/auth/login", s.handleLogin)

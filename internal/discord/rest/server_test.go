@@ -12,6 +12,7 @@ import (
 
 	"github.com/h4ks-com/voidbar/internal/config"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
+	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
 )
@@ -24,8 +25,10 @@ func newServer(t *testing.T, registration string) http.Handler {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), registration)
-	return New(svc, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	gw := gateway.New(svc, cfg, logger)
+	return New(svc, cfg, logger, gw)
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string, body any) (*httptest.ResponseRecorder, map[string]any) {
