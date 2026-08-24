@@ -677,6 +677,116 @@ function installInterceptor() {
 }
 
 // ---------------------------------------------------------------------------
+// Client console telemetry
+//
+// console.error/warn, window.onerror and unhandledrejections are captured,
+// deduplicated (reconnect loops repeat the same message endlessly) and
+// streamed to POST /voidbar/client-log, which writes them into the same
+// instance log as the server-side diagnostics. No more DevTools copy-paste.
+
+const clientLog = {
+  entries: new Map(),
+  dirty: false,
+
+  record(level, message, stack) {
+    const msg = String(message);
+    const key = level + '|' + msg.slice(0, 500);
+    const existing = this.entries.get(key);
+    if (existing) {
+      existing.count++;
+    } else {
+      if (this.entries.size >= 50) return; // cap distinct messages per flush
+      this.entries.set(key, {
+        level,
+        message: msg.slice(0, 2000),
+        stack: stack ? String(stack).slice(0, 2000) : '',
+        href: location.href,
+        count: 1,
+      });
+    }
+    this.dirty = true;
+  },
+
+  payload() {
+    return { entries: [...this.entries.values()] };
+  },
+
+  async flush() {
+    if (!this.dirty) return;
+    const body = JSON.stringify(this.payload());
+    this.dirty = false;
+    try {
+      const res = await fetch('/voidbar/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+      });
+      if (res.ok) this.entries.clear();
+      else this.dirty = true;
+    } catch {
+      this.dirty = true; // retried on the next tick
+    }
+  },
+
+  start() {
+    const fmt = (args) =>
+      args
+        .map((a) => {
+          if (a instanceof Error) return a.stack || String(a);
+          if (typeof a === 'object' && a !== null) {
+            try {
+              return JSON.stringify(a);
+            } catch {
+              return String(a);
+            }
+          }
+          return String(a);
+        })
+        .join(' ');
+
+    const nativeError = console.error.bind(console);
+    const nativeWarn = console.warn.bind(console);
+    console.error = (...args) => {
+      this.record('error', fmt(args));
+      nativeError(...args);
+    };
+    console.warn = (...args) => {
+      this.record('warn', fmt(args));
+      nativeWarn(...args);
+    };
+
+    window.addEventListener('error', (e) => {
+      const stack = e.error && e.error.stack ? e.error.stack : `${e.filename}:${e.lineno}:${e.colno}`;
+      this.record('error', e.message || 'script error', stack);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const reason = e.reason;
+      this.record('error', `unhandledrejection: ${reason && reason.stack ? reason.stack : String(reason)}`);
+    });
+
+    setInterval(() => this.flush(), 3000);
+
+    const beacon = () => {
+      if (!this.dirty) return;
+      try {
+        navigator.sendBeacon?.(
+          '/voidbar/client-log',
+          new Blob([JSON.stringify(this.payload())], { type: 'application/json' }),
+        );
+      } catch {
+        // best effort
+      }
+    };
+    window.addEventListener('pagehide', beacon);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') beacon();
+    });
+  },
+};
+clientLog.start();
+
+// ---------------------------------------------------------------------------
 // Boot
 
 const state = { cfg: null };

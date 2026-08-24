@@ -28,6 +28,7 @@ const ProxyBasePath = "/voidbar/cdn"
 func Handler(cfg *config.Config, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /voidbar/config", handleConfig(cfg))
+	mux.HandleFunc("POST /voidbar/client-log", handleClientLog(log))
 	if cfg.Client.ProxyCDN {
 		proxy := newCDNProxy(cfg, log)
 		mux.Handle("GET "+ProxyBasePath+"/{path...}", proxy)
