@@ -158,8 +158,18 @@ func TestHelloIdentifyReadyHeartbeat(t *testing.T) {
 	if !strings.HasSuffix(d["resume_url"].(string), "/gateway") {
 		t.Fatalf("resume_url: %v", d["resume_url"])
 	}
+	if !strings.HasSuffix(d["resume_gateway_url"].(string), "/gateway") {
+		t.Fatalf("resume_gateway_url: %v", d["resume_gateway_url"])
+	}
 	if _, ok := d["user_settings"].(map[string]any); !ok {
 		t.Fatal("missing user_settings")
+	}
+	// The client's READY reducer iterates users/private_channels/presences
+	// with .forEach - they must be arrays, never absent.
+	for _, key := range []string{"users", "private_channels", "presences", "relationships"} {
+		if _, ok := d[key].([]any); !ok {
+			t.Fatalf("ready.%s must be an array, got %v", key, d[key])
+		}
 	}
 
 	send(t, conn, map[string]any{"op": OpHeartbeat, "d": nil})

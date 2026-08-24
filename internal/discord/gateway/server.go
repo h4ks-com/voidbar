@@ -283,18 +283,20 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			}
 		}
 	}
-	return &ReadyData{
-		V:                    9,
-		User:                 model.ToUser(user),
-		Guilds:               guilds,
-		SessionID:            sess.ID,
-		ResumeURL:            s.cfg.GatewayWSURL(),
-		PrivateChannels:      []any{},
-		Presences:            []any{},
-		Relationships:        []any{},
+return &ReadyData{
+		V:                   9,
+		User:                model.ToUser(user),
+		Guilds:              guilds,
+		SessionID:           sess.ID,
+		ResumeURL:           s.cfg.GatewayWSURL(),
+		ResumeGatewayURL:    s.cfg.GatewayWSURL(),
+		PrivateChannels:     []any{},
+		Users:               []any{},
+		Presences:           []any{},
+		Relationships:       []any{},
 		GeoOrderedRTCRegions: []any{},
-		SessionType:          "normal",
-		UserSettings:         map[string]any{},
+		SessionType:         "normal",
+		UserSettings:        map[string]any{},
 	}
 }
 

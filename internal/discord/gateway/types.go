@@ -46,7 +46,9 @@ type ReadyData struct {
 	Guilds               []guildUnavailable `json:"guilds"`
 	SessionID            string             `json:"session_id"`
 	ResumeURL            string             `json:"resume_url"`
+	ResumeGatewayURL     string             `json:"resume_gateway_url"`
 	PrivateChannels      []any              `json:"private_channels"`
+	Users                []any              `json:"users"`
 	Presences            []any              `json:"presences"`
 	Relationships        []any              `json:"relationships"`
 	GeoOrderedRTCRegions []any              `json:"geo_ordered_rtc_regions"`
