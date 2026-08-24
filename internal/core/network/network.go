@@ -124,37 +124,11 @@ func (s *Service) GuildCreatePayloads(userID string) []any {
 }
 
 // ReadyGuildPayloads returns the READY guild entries for every network the
-// user belongs to. Unlike GUILD_CREATE, READY guilds carry the versioned
-// channels object and guild_hashes that the client's ClientStateStore and
-// related stores read on CONNECTION_OPEN. Marking them unavailable:false and
-// including the full structure lets every CONNECTION_OPEN reducer run.
+// user belongs to. Per the Gateway Guild Object spec the wire format carries
+// channels as a flat array - the client's hydrateReadyPayloadPrioritized
+// wraps them into its internal {channels, wasCached} structure itself.
 func (s *Service) ReadyGuildPayloads(userID string) []any {
-	memberships, err := s.store.ListMembershipsForUser(userID)
-	if err != nil {
-		return nil
-	}
-	var out []any
-	for _, m := range memberships {
-		net, err := s.store.GetNetwork(m.NetworkID)
-		if err != nil {
-			continue
-		}
-		g := s.buildGuild(m, net)
-		gm := g.(map[string]any)
-		channels := gm["channels"]
-		gm["channels"] = map[string]any{
-			"channels":  channels,
-			"wasCached": false,
-			"updates":   []any{},
-		}
-		gm["guild_hashes"] = map[string]any{
-			"version":  0,
-			"hashes":   map[string]any{},
-			"guild_id": net.ID,
-		}
-		out = append(out, gm)
-	}
-	return out
+	return s.GuildCreatePayloads(userID)
 }
 
 func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {

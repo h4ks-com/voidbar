@@ -140,11 +140,10 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 	if u := rg["unavailable"]; u != false {
 		t.Fatalf("ready guild should be available: %v", rg)
 	}
-	// READY channels are versioned {channels, wasCached, updates} for the
-	// client's ClientStateStore; the flat channel list sits inside.
-	vc := rg["channels"].(map[string]any)
-	if _, ok := vc["channels"].([]any); !ok {
-		t.Fatalf("ready guild channels must be versioned object: %v", rg["channels"])
+	// Wire format: channels is a flat array (Gateway Guild Object spec);
+	// the client hydrates it into its internal versioned structure itself.
+	if _, ok := rg["channels"].([]any); !ok {
+		t.Fatalf("ready guild channels must be a flat array: %v", rg["channels"])
 	}
 	if _, ok := rg["guild_hashes"].(map[string]any); !ok {
 		t.Fatalf("ready guild must carry guild_hashes: %v", rg)
