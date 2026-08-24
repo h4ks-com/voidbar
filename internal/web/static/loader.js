@@ -97,10 +97,12 @@ function assetBase() {
 function patchJS(text, cfg) {
   const host = location.host;
 
-  // Kill Sentry at the source: an empty DSN disables the SDK entirely, so it
-  // never queues or posts events (redirecting the host alone still produced
-  // noisy requests to 0.0.0.0).
-  text = text.replace(/https?:\/\/[0-9a-f]{16,}@sentry\.io\/\d+/g, '""');
+  // Kill Sentry at the source: replace the DSN *contents* with an empty
+  // string (the quotes stay from the original literal), which the SDK
+  // treats as "disabled". Never inject quotes here - the DSN appears as
+  // "https://key@sentry.io/id" in the source, and substituting '""' for
+  // the URL would produce """" and a SyntaxError.
+  text = text.replace(/https?:\/\/[0-9a-f]{16,}@sentry\.io\/\d+/g, '');
 
   // Kill telemetry transport before it can phone home.
   text = text.replaceAll('sentry.io', '0.0.0.0');
@@ -149,7 +151,7 @@ function patchCSS(text, cfg) {
 const CACHE_VERSION = 'v1';
 // Bump when patchJS/patchCSS semantics change: OPFS entries hold already
 // patched content, so a new patcher must invalidate the whole cache.
-const PATCH_VERSION = 'p2';
+const PATCH_VERSION = 'p3';
 
 function hashString(s) {
   let h = 2166136261;
