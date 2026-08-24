@@ -243,6 +243,20 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 }
 
+// JoinChannel makes the user's upstream connection join an IRC channel
+// (used when a re-join merges new channels into an existing membership).
+// No-op when the connection is not up; EnsureConn callers get the channel
+// via auto-join on (re)connect.
+func (m *Manager) JoinChannel(userID, networkID, channel string) {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	c.client.Cmd.Join(channel)
+}
+
 // SendChannel relays a Discord message into an IRC channel.
 func (m *Manager) SendChannel(userID, networkID, channel, content string) error {
 	m.mu.Lock()

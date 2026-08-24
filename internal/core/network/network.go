@@ -7,6 +7,7 @@ package network
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
@@ -18,6 +19,12 @@ import (
 
 var ErrBadConnString = errors.New("invalid connection string")
 
+// ParseConnString re-exports the connection-string parser so REST handlers
+// can validate invite inputs without importing the irc package.
+func ParseConnString(raw string) (*connstr.Conn, error) {
+	return connstr.Parse(raw)
+}
+
 type Service struct {
 	store   *storage.Storage
 	gw      *gateway.Server
@@ -27,6 +34,30 @@ type Service struct {
 
 func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, manager *ircmanage.Manager) *Service {
 	return &Service{store: store, gw: gw, sf: sf, manager: manager}
+}
+
+// mergeChannels merges new IRC channel names into the member's auto-join
+// list (case-insensitive dedup, original order kept).
+func mergeChannels(existing, add []string) ([]string, bool) {
+	seen := make(map[string]bool, len(existing)+len(add))
+	out := make([]string, 0, len(existing)+len(add))
+	for _, ch := range existing {
+		k := strings.ToLower(ch)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, ch)
+		}
+	}
+	changed := false
+	for _, ch := range add {
+		k := strings.ToLower(ch)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, ch)
+			changed = true
+		}
+	}
+	return out, changed
 }
 
 // Join parses a connection string (the invite), creates the network if it
@@ -83,6 +114,23 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 		}
 	} else if err != nil {
 		return nil, err
+	} else {
+		// Re-joining the same network with new channels (a fresh connection
+		// string for a network already joined) merges the channels into the
+		// membership, like accepting another invite to the same server.
+		if merged, changed := mergeChannels(mem.AutoJoin, conn.Channels); changed {
+			mem.AutoJoin = merged
+			if err := s.store.UpsertMembership(mem); err != nil {
+				return nil, err
+			}
+			if s.manager != nil {
+				// The upstream connection is already up: join the new IRC
+				// channels on it right away.
+				for _, ch := range conn.Channels {
+					s.manager.JoinChannel(userID, net.ID, ch)
+				}
+			}
+		}
 	}
 
 	if s.manager != nil {
@@ -112,6 +160,29 @@ func (s *Service) NewMessageID() string { return s.sf.New() }
 // ChannelsFor resolves (registers if needed) the network's IRC channels.
 func (s *Service) ChannelsFor(netID string, ircNames []string) ([]*storage.Channel, error) {
 	return s.store.ChannelsByIRC(netID, ircNames, s.sf.New)
+}
+
+// FindByChannelName resolves the fragment the Discord client extracts from
+// a pasted connection string (e.g. "#vbtest2" out of
+// irc://host:port/#vbtest2) back to the network the preview GET already
+// joined, by matching it against the member's auto-join channels.
+func (s *Service) FindByChannelName(userID, ircName string) (*storage.Network, *storage.Membership, error) {
+	mems, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, mem := range mems {
+		for _, ch := range mem.AutoJoin {
+			if strings.EqualFold(ch, ircName) {
+				net, err := s.store.GetNetwork(mem.NetworkID)
+				if err != nil {
+					continue
+				}
+				return net, mem, nil
+			}
+		}
+	}
+	return nil, nil, storage.ErrNotFound
 }
 
 // GuildCreatePayloads returns full GUILD_CREATE payloads for every network

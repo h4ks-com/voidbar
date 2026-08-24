@@ -42,6 +42,102 @@ func (s *Server) handleCreateGuild(w http.ResponseWriter, r *http.Request, u *st
 	})
 }
 
+// invitePayload builds a Discord-shaped Invite object for an IRC network
+// the member has joined. The client renders the join-preview card from
+// this (guild name, channel, member counts).
+func (s *Server) invitePayload(code string, net *storage.Network, mem *storage.Membership, chans []*storage.Channel, u *storage.User) map[string]any {
+	channel := map[string]any{"id": "0", "name": "irc", "type": 0}
+	if len(chans) > 0 {
+		channel = map[string]any{"id": chans[0].ID, "name": chans[0].Name, "type": 0}
+		// Prefer the channel the user pasted (the invite code carries its
+		// IRC name): the client navigates into invite.channel after joining.
+		for _, ch := range chans {
+			if strings.EqualFold(strings.TrimPrefix(ch.Name, "#"), strings.TrimPrefix(code, "#")) {
+				channel = map[string]any{"id": ch.ID, "name": ch.Name, "type": 0}
+				break
+			}
+		}
+	}
+	count := len(chans)
+	if count == 0 {
+		count = 1
+	}
+	return map[string]any{
+		"type":                       0,
+		"code":                       code,
+		"guild":                      map[string]any{"id": net.ID, "name": net.Name, "splash": nil, "banner": nil, "description": nil, "icon": nil, "features": []any{}, "verification_level": 0, "vanity_url_code": nil, "nsfw_level": 0, "premium_subscription_count": 0},
+		"guild_id":                   net.ID,
+		"channel":                    channel,
+		"inviter":                    map[string]any{"id": u.ID, "username": u.Username, "avatar": nil, "discriminator": "0", "public_flags": 0, "bot": false},
+		"target_type":                nil,
+		"target_user":                nil,
+		"target_application":         nil,
+		"expires_at":                 nil,
+		"uses":                       0,
+		"max_uses":                   0,
+		"max_age":                    0,
+		"temporary":                  false,
+		"created_at":                 net.CreatedAt.UTC().Format(time.RFC3339),
+		"member_count":               count,
+		"presence_count":             count,
+		"approximate_member_count":   count,
+		"approximate_presence_count": count,
+	}
+}
+
+// handleGetInvite answers the join-preview request the client fires while
+// typing into the "join a server" field. Voidbar connection strings
+// (irc://host:port/#chan?name=) are not Discord invite codes: the client
+// extracts the last path segment as the "code" and passes the full string
+// in inputValue - that query parameter carries the real request.
+func (s *Server) handleGetInvite(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	code := r.PathValue("code")
+	inputValue := r.URL.Query().Get("inputValue")
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	// Plain invite codes (no connection string in inputValue) are not part
+	// of the Voidbar model: unknown invite.
+	if _, err := network.ParseConnString(inputValue); err != nil {
+		jsonError(w, http.StatusNotFound, "Unknown Invite")
+		return
+	}
+	net, err := s.net.Join(u.ID, inputValue)
+	if err != nil {
+		if errors.Is(err, network.ErrBadConnString) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "failed to join network")
+		return
+	}
+	mem, err := s.net.MembershipFor(u.ID, net.ID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "membership missing")
+		return
+	}
+	chans, err := s.net.ChannelsFor(net.ID, mem.AutoJoin)
+	if err != nil {
+		chans = nil
+	}
+	// The guild rail updates from GUILD_CREATE, not from this response.
+	if s.gw != nil {
+		for _, payload := range s.net.GuildCreateForUser(u.ID) {
+			if g, ok := payload.(map[string]any); ok && g["id"] == net.ID {
+				s.gw.Dispatch(u.ID, "GUILD_CREATE", g)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, s.invitePayload(code, net, mem, chans, u))
+}
+
+// handleJoinInvite completes the join started by the preview GET: the
+// client submits the fragment it parsed out of the pasted connection
+// string (e.g. "#vbtest2") as the invite code. The preview GET has already
+// created the network and membership, so the code resolves back through
+// the member's auto-join channels; a full connection string as the code
+// works too.
 func (s *Server) handleJoinInvite(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	code := r.PathValue("code")
 	if code == "" {
@@ -52,21 +148,31 @@ func (s *Server) handleJoinInvite(w http.ResponseWriter, r *http.Request, u *sto
 		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
 		return
 	}
-	net, err := s.net.Join(u.ID, code)
-	if err != nil {
-		if errors.Is(err, network.ErrBadConnString) {
-			jsonError(w, http.StatusBadRequest, err.Error())
+	var (
+		net *storage.Network
+		mem *storage.Membership
+		err error
+	)
+	if _, perr := network.ParseConnString(code); perr == nil {
+		// The raw connection string itself was submitted as the code.
+		net, err = s.net.Join(u.ID, code)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid connection string")
 			return
 		}
-		jsonError(w, http.StatusInternalServerError, "failed to join network")
+		mem, err = s.net.MembershipFor(u.ID, net.ID)
+	} else {
+		// A parsed fragment: find the network the preview already joined.
+		net, mem, err = s.net.FindByChannelName(u.ID, code)
+	}
+	var chans []*storage.Channel
+	if err == nil {
+		chans, _ = s.net.ChannelsFor(net.ID, mem.AutoJoin)
+	} else {
+		jsonError(w, http.StatusNotFound, "Unknown Invite")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"guild": map[string]any{
-			"id":   net.ID,
-			"name": net.Name,
-		},
-	})
+	writeJSON(w, http.StatusOK, s.invitePayload(code, net, mem, chans, u))
 }
 
 // handleGuildDetail answers GET /guilds/:id with the channel list assembled

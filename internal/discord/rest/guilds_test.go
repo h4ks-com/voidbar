@@ -59,17 +59,21 @@ func TestCreateGuildAndGuildDetail(t *testing.T) {
 		t.Fatalf("bad string: %d %v", rec.Code, out)
 	}
 
-	// Guild detail shows auto-join channels as Discord channels.
+	// Guild detail shows auto-join channels as Discord channels. The
+	// re-join above merged #other into the same membership.
 	rec, out = do(t, h, "GET", "/api/v9/guilds/"+guildID, token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("guild detail: %d %v", rec.Code, out)
 	}
 	channels, _ := out["channels"].([]any)
-	if len(channels) != 2 {
+	if len(channels) != 3 {
 		t.Fatalf("channels: %v", channels)
 	}
 	if name := channels[0].(map[string]any)["name"]; name != "go" {
 		t.Fatalf("channel[0] name: %v", name)
+	}
+	if name := channels[2].(map[string]any)["name"]; name != "other" {
+		t.Fatalf("merged channel name: %v", name)
 	}
 }
 

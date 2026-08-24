@@ -12,6 +12,8 @@
 package mirror
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 var (
@@ -120,6 +124,88 @@ func (o *Options) defaults() {
 
 var errNotFound = errors.New("404")
 
+// textAsset reports whether the path is expected to hold textual content.
+// Fonts/images are legitimately binary and must never be "fixed".
+func textAsset(p string) bool {
+	switch filepath.Ext(p) {
+	case ".js", ".css", ".html", ".json", ".map", ".txt", ".svg":
+		return true
+	}
+	return false
+}
+
+// asciiHead reports whether the first bytes are printable source: webpack
+// chunk wrappers and license banners are always plain ASCII, while
+// compressed bodies start with arbitrary binary within bytes.
+func asciiHead(b []byte) bool {
+	head := b
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	for _, c := range head {
+		if c < 0x20 && c != '\n' && c != '\r' && c != '\t' {
+			return false
+		}
+		if c > 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// looksTextual validates that b is already source and needs no decoding:
+// ASCII head plus a high-byte fraction small enough that b cannot be a
+// compressed stream (those are ~50% high bytes).
+func looksTextual(b []byte) bool {
+	if !asciiHead(b) {
+		return false
+	}
+	sample := b
+	if len(sample) > 64<<10 {
+		sample = sample[:64<<10]
+	}
+	high := 0
+	for _, c := range sample {
+		if c > 0x7f {
+			high++
+		}
+	}
+	return high*20 < len(sample) // <5% high bytes
+}
+
+// DecodeCompressed repairs bodies saved in a compressed transfer encoding:
+// Wayback replays the ARCHIVED Content-Encoding header (frequently brotli
+// for discord.com assets), and Go's transport only transparently inflates
+// gzip it requested itself - brotli always arrives raw. For textual assets
+// that do not look textual, gzip (magic) and then brotli are attempted.
+// A successful DECODE is validated by asciiHead only (localization chunks
+// legitimately carry tens of percent of high bytes, so the strict
+// looksTextual ratio would reject valid output); a decode that errors out
+// or yields a binary head is refused. ok is true when the content is
+// usable as-is (already textual or successfully decoded).
+func DecodeCompressed(p string, b []byte) (out []byte, ok bool) {
+	if !textAsset(p) || looksTextual(b) {
+		return b, true
+	}
+	// gzip magic
+	if len(b) > 2 && b[0] == 0x1f && b[1] == 0x8b {
+		zr, err := gzip.NewReader(bytes.NewReader(b))
+		if err == nil {
+			if dec, err := io.ReadAll(zr); err == nil && asciiHead(dec) {
+				return dec, true
+			}
+		}
+	}
+	// brotli has no magic number: try decoding; a wrong input errors out
+	// with high probability (CRC + Huffman structure), and the asciiHead
+	// check catches accidental decodes of garbage.
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, brotli.NewReader(bytes.NewReader(b))); err == nil && asciiHead(buf.Bytes()) {
+		return buf.Bytes(), true
+	}
+	return b, false
+}
+
 type downloader struct {
 	opts    Options
 	client  *http.Client
@@ -149,6 +235,16 @@ func Run(opts Options) error {
 		client:  &http.Client{Timeout: 120 * time.Second},
 		tasks:   make(chan func(), 64),
 		missing: map[string]bool{},
+	}
+
+	// First, repair everything already on disk: older runs may have stored
+	// bodies in their archived transfer encoding (Wayback replays the
+	// original Content-Encoding, frequently brotli, which the downloader
+	// used to save verbatim). This pass needs no network and makes resumed
+	// runs self-healing regardless of what discovery reaches.
+	revalidated := d.revalidateExisting()
+	if revalidated > 0 {
+		opts.Log("revalidated %d compressed files from a previous run", revalidated)
 	}
 
 	html, err := d.fetchLocalOrRemote("/" + strings.TrimPrefix(opts.HTML, "/"))
@@ -229,6 +325,38 @@ func Run(opts Options) error {
 	return nil
 }
 
+// revalidateExisting walks the output tree and repairs any text asset
+// stored in a compressed transfer encoding, returning the repair count.
+func (d *downloader) revalidateExisting() int {
+	n := 0
+	_ = filepath.WalkDir(d.opts.Out, func(p string, e os.DirEntry, err error) error {
+		if err != nil || e.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(d.opts.Out, p)
+		if rerr != nil {
+			return nil
+		}
+		webPath := "/" + filepath.ToSlash(rel)
+		if !textAsset(webPath) {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		dec, ok := DecodeCompressed(webPath, b)
+		if !ok || bytes.Equal(dec, b) {
+			return nil
+		}
+		if werr := os.WriteFile(p, dec, 0o644); werr == nil {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
 func (d *downloader) enqueue(task func()) {
 	d.wg.Add(1)
 	go func() {
@@ -250,8 +378,15 @@ func (d *downloader) enqueueChunk(hash string, candidates []string) {
 	d.mu.Unlock()
 	d.enqueue(func() {
 		for _, cand := range candidates {
-			if _, err := os.Stat(d.localPath(cand)); err == nil {
-				return // already have it from a previous run
+			if b, err := os.ReadFile(d.localPath(cand)); err == nil {
+				// Revalidate: an earlier run may have saved the chunk still
+				// compressed; repair it in place instead of trusting it.
+				if dec, ok := DecodeCompressed(cand, b); ok {
+					if !bytes.Equal(dec, b) {
+						_ = d.save(cand, dec)
+					}
+					return // already have it from a previous run
+				}
 			}
 			content, err := d.fetchLocalOrRemote(cand)
 			if errors.Is(err, errNotFound) {
@@ -309,15 +444,31 @@ func (d *downloader) markMissing(p string) {
 // are content-addressed so any snapshot serves.
 func (d *downloader) fetchLocalOrRemote(p string) ([]byte, error) {
 	if b, err := os.ReadFile(d.localPath(p)); err == nil {
-		return b, nil
+		// Resume support, with revalidation: a previous run may have stored
+		// the body still compressed (Wayback replayed the archived
+		// Content-Encoding). Repair it in place so the mirror self-heals on
+		// the next `voidbar mirror` pass without any network traffic.
+		if dec, ok := DecodeCompressed(p, b); ok {
+			if !bytes.Equal(dec, b) {
+				_ = d.save(p, dec)
+			}
+			return dec, nil
+		}
+		// Unusable as-is (undecodable): fall through and re-fetch.
 	}
 	b, err := d.fetchWithRetry(d.opts.Base + p)
 	if errors.Is(err, errNotFound) && strings.HasPrefix(p, "/assets/") {
 		alt := strings.TrimPrefix(p, "/assets/")
 		b, err = d.fetchWithRetry(d.opts.Base + "/" + alt)
 	}
+	if err == nil {
+		b, _ = DecodeCompressed(p, b)
+	}
 	if errors.Is(err, errNotFound) {
 		if b2, ok := d.fetchViaCDX(p); ok {
+			if dec, ok := DecodeCompressed(p, b2); ok {
+				return dec, nil
+			}
 			return b2, nil
 		}
 	}

@@ -26,6 +26,16 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
 	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoPatch))
 	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
+	// The legacy (non-proto) settings store: the client PATCHes e.g. the
+	// last opened channel on navigation. Persisted settings are a later
+	// phase; acknowledging the write keeps navigation clean.
+	// Billing: the client probes payment sources/country after joining a
+	// guild (gift/boost upsells). No billing on a bouncer.
+	mux.HandleFunc("GET /api/v9/users/@me/billing/payment-sources", s.requireAuth(s.handleEmptyArray))
+	mux.HandleFunc("GET /api/v9/users/@me/billing/country-code", s.requireAuth(func(w http.ResponseWriter, r *http.Request, u *storage.User) {
+		writeJSON(w, http.StatusOK, map[string]any{"country_code": "US"})
+	}))
+	mux.HandleFunc("PATCH /api/v9/users/@me/settings", s.requireAuth(s.handleNoContentAuthed))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/guilds", s.requireAuth(s.handleGuildAffinities))
 	mux.HandleFunc("GET /api/v9/users/@me/library", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
