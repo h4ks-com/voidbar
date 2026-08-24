@@ -60,6 +60,10 @@ type ReadyData struct {
 	UserGuildSettings    *VersionedArray    `json:"user_guild_settings"`
 	ReadState            *VersionedArray    `json:"read_state"`
 	UserSettingsProto    *UserSettingsProto `json:"user_settings_proto"`
+	ConnectedAccounts    []any              `json:"connected_accounts"`
+	GuildJoinRequests    []any              `json:"guild_join_requests"`
+	Consents             map[string]any     `json:"consents"`
+	AnalyticsToken       string             `json:"analytics_token"`
 }
 
 // VersionedArray is Discord's {entries, partial, version} wrapper used by

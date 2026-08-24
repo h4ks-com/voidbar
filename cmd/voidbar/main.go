@@ -118,7 +118,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	gw := gateway.New(authSvc, cfg, log, nil, nil)
 	manager := ircmanage.New(store, gw, log)
 	netSvc := network.NewService(store, gw, sf, manager)
-	gw = gateway.New(authSvc, cfg, log, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
+	gw = gateway.New(authSvc, cfg, log, func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil }, netSvc.GuildCreateForUser)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

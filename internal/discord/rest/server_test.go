@@ -32,7 +32,7 @@ func newServer(t *testing.T, registration string) http.Handler {
 	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger)
 	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
-	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
+	gw = gateway.New(svc, cfg, logger, func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil }, netSvc.GuildCreateForUser)
 	return New(svc, cfg, logger, gw, netSvc, manager)
 }
 

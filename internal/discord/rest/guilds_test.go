@@ -91,7 +91,7 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger)
 	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
-	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
+	gw = gateway.New(svc, cfg, logger, func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil }, netSvc.GuildCreateForUser)
 
 	// Join a network first (no real IRC connection happens - the host has no
 	// listener; EnsureConn just spawns a goroutine that fails to connect).
@@ -134,10 +134,20 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 	}
 	readyGuilds := rdy["d"].(map[string]any)["guilds"].([]any)
 	if len(readyGuilds) != 1 {
-		t.Fatalf("expected 1 ready guild stub, got %v", readyGuilds)
+		t.Fatalf("expected 1 ready guild, got %v", readyGuilds)
 	}
-	if u := readyGuilds[0].(map[string]any)["unavailable"]; u != true {
-		t.Fatalf("ready guild should be unavailable stub: %v", readyGuilds[0])
+	rg := readyGuilds[0].(map[string]any)
+	if u := rg["unavailable"]; u != false {
+		t.Fatalf("ready guild should be available: %v", rg)
+	}
+	// READY channels are versioned {channels, wasCached, updates} for the
+	// client's ClientStateStore; the flat channel list sits inside.
+	vc := rg["channels"].(map[string]any)
+	if _, ok := vc["channels"].([]any); !ok {
+		t.Fatalf("ready guild channels must be versioned object: %v", rg["channels"])
+	}
+	if _, ok := rg["guild_hashes"].(map[string]any); !ok {
+		t.Fatalf("ready guild must carry guild_hashes: %v", rg)
 	}
 
 	create := recvJSON()

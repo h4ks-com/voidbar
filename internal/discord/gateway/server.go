@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -274,30 +273,7 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 	guilds := []any{}
 	if s.guildsForUser != nil {
 		if raw, err := s.guildsForUser(user.ID); err == nil {
-			for _, g := range raw {
-				if m, ok := g.(map[string]any); ok {
-					id := fmt.Sprintf("%v", m["id"])
-					// READY always carries guilds as unavailable stubs; the
-					// real data arrives via GUILD_CREATE after READY. The
-					// stub must still include the versioned channels object
-					// and guild_hashes: ClientStateStore reads
-					// guild.channels.wasCached / .channels on CONNECTION_OPEN.
-					guilds = append(guilds, map[string]any{
-						"id":          id,
-						"unavailable": true,
-						"channels": map[string]any{
-							"channels":  []any{},
-							"wasCached": false,
-							"updates":   []any{},
-						},
-						"guild_hashes": map[string]any{
-							"version":  0,
-							"hashes":   map[string]any{},
-							"guild_id": id,
-						},
-					})
-				}
-			}
+			guilds = append(guilds, raw...)
 		}
 	}
 	return &ReadyData{
@@ -328,6 +304,10 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			Version: 0,
 		},
 		UserSettingsProto: &UserSettingsProto{},
+		ConnectedAccounts: []any{},
+		GuildJoinRequests: []any{},
+		Consents:          map[string]any{},
+		AnalyticsToken:    "",
 	}
 }
 

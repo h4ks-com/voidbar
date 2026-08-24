@@ -106,7 +106,7 @@ func (s *Service) MembershipFor(userID, netID string) (*storage.Membership, erro
 // the user belongs to, dispatched by the gateway right after READY. Channels
 // come from the member's auto-join list (live IRC channel state follows in
 // later phases); members are the network's memberships with synthesized
-// Discord-shaped users and IRC-operator-ish roles.
+// Discord-shaped users.
 func (s *Service) GuildCreatePayloads(userID string) []any {
 	memberships, err := s.store.ListMembershipsForUser(userID)
 	if err != nil {
@@ -118,64 +118,102 @@ func (s *Service) GuildCreatePayloads(userID string) []any {
 		if err != nil {
 			continue
 		}
-		all, err := s.store.ListMemberships(net.ID)
+		out = append(out, s.buildGuild(m, net))
+	}
+	return out
+}
+
+// ReadyGuildPayloads returns the READY guild entries for every network the
+// user belongs to. Unlike GUILD_CREATE, READY guilds carry the versioned
+// channels object and guild_hashes that the client's ClientStateStore and
+// related stores read on CONNECTION_OPEN. Marking them unavailable:false and
+// including the full structure lets every CONNECTION_OPEN reducer run.
+func (s *Service) ReadyGuildPayloads(userID string) []any {
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil
+	}
+	var out []any
+	for _, m := range memberships {
+		net, err := s.store.GetNetwork(m.NetworkID)
 		if err != nil {
 			continue
 		}
-
-		channels := make([]any, 0, len(m.AutoJoin))
-		for i, ch := range m.AutoJoin {
-			channels = append(channels, map[string]any{
-				"id":              net.ID + ":" + ch,
-				"guild_id":        net.ID,
-				"name":            strings.TrimPrefix(ch, "#"),
-				"type":            0,
-				"position":        i,
-				"topic":           nil,
-				"last_message_id": nil,
-			})
+		g := s.buildGuild(m, net)
+		gm := g.(map[string]any)
+		channels := gm["channels"]
+		gm["channels"] = map[string]any{
+			"channels":  channels,
+			"wasCached": false,
+			"updates":   []any{},
 		}
-
-		members := make([]any, 0, len(all))
-		for _, mem := range all {
-			members = append(members, map[string]any{
-				"user": map[string]any{
-					"id":            mem.UserID,
-					"username":      mem.Nick,
-					"discriminator": "0",
-					"bot":           false,
-				},
-				"roles":     []any{},
-				"joined_at": mem.JoinedAt.Format(time.RFC3339),
-			})
+		gm["guild_hashes"] = map[string]any{
+			"version":  0,
+			"hashes":   map[string]any{},
+			"guild_id": net.ID,
 		}
-
-		out = append(out, map[string]any{
-			"id":                     net.ID,
-			"name":                   net.Name,
-			"icon":                   nil,
-			"owner_id":               net.CreatedBy,
-			"joined_at":              m.JoinedAt.Format(time.RFC3339),
-			"channels":               channels,
-			"members":                members,
-			"roles":                  []any{},
-			"presences":              []any{},
-			"voice_states":           []any{},
-			"threads":                []any{},
-			"emojis":                 []any{},
-			"stickers":               []any{},
-			"stage_instances":        []any{},
-			"guild_scheduled_events": []any{},
-			"embedded_activities":    []any{},
-			"guild_hashes": map[string]any{
-				"version":  0,
-				"hashes":   map[string]any{},
-				"guild_id": net.ID,
-			},
-			"unavailable": false,
-		})
+		out = append(out, gm)
 	}
 	return out
+}
+
+func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
+	all, err := s.store.ListMemberships(net.ID)
+	if err != nil {
+		all = nil
+	}
+
+	channels := make([]any, 0, len(m.AutoJoin))
+	for i, ch := range m.AutoJoin {
+		channels = append(channels, map[string]any{
+			"id":              net.ID + ":" + ch,
+			"guild_id":        net.ID,
+			"name":            strings.TrimPrefix(ch, "#"),
+			"type":            0,
+			"position":        i,
+			"topic":           nil,
+			"last_message_id": nil,
+		})
+	}
+
+	members := make([]any, 0, len(all))
+	for _, mem := range all {
+		members = append(members, map[string]any{
+			"user": map[string]any{
+				"id":            mem.UserID,
+				"username":      mem.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			},
+			"roles":     []any{},
+			"joined_at": mem.JoinedAt.Format(time.RFC3339),
+		})
+	}
+
+	return map[string]any{
+		"id":                     net.ID,
+		"name":                   net.Name,
+		"icon":                   nil,
+		"owner_id":               net.CreatedBy,
+		"joined_at":              m.JoinedAt.Format(time.RFC3339),
+		"channels":               channels,
+		"members":                members,
+		"roles":                  []any{},
+		"presences":              []any{},
+		"voice_states":           []any{},
+		"threads":                []any{},
+		"emojis":                 []any{},
+		"stickers":               []any{},
+		"stage_instances":        []any{},
+		"guild_scheduled_events": []any{},
+		"embedded_activities":    []any{},
+		"guild_hashes": map[string]any{
+			"version":  0,
+			"hashes":   map[string]any{},
+			"guild_id": net.ID,
+		},
+		"unavailable": false,
+	}
 }
 
 // GuildCreateForUser is the gateway hook for the above.
