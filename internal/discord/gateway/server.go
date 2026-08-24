@@ -271,40 +271,63 @@ func (s *Server) findSession(id string) *Session {
 }
 
 func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
-	guilds := []guildUnavailable{}
+	guilds := []any{}
 	if s.guildsForUser != nil {
 		if raw, err := s.guildsForUser(user.ID); err == nil {
 			for _, g := range raw {
 				if m, ok := g.(map[string]any); ok {
+					id := fmt.Sprintf("%v", m["id"])
 					// READY always carries guilds as unavailable stubs; the
-					// real data arrives via GUILD_CREATE after READY.
-					guilds = append(guilds, guildUnavailable{ID: fmt.Sprintf("%v", m["id"]), Unavailable: true})
+					// real data arrives via GUILD_CREATE after READY. The
+					// stub must still include the versioned channels object
+					// and guild_hashes: ClientStateStore reads
+					// guild.channels.wasCached / .channels on CONNECTION_OPEN.
+					guilds = append(guilds, map[string]any{
+						"id":          id,
+						"unavailable": true,
+						"channels": map[string]any{
+							"channels":  []any{},
+							"wasCached": false,
+							"updates":   []any{},
+						},
+						"guild_hashes": map[string]any{
+							"version":  0,
+							"hashes":   map[string]any{},
+							"guild_id": id,
+						},
+					})
 				}
 			}
 		}
 	}
-return &ReadyData{
-		V:                   9,
-		User:                model.ToUser(user),
-		Guilds:              guilds,
-		SessionID:           sess.ID,
-		ResumeURL:           s.cfg.GatewayWSURL(),
-		ResumeGatewayURL:    s.cfg.GatewayWSURL(),
-		PrivateChannels:     []any{},
-		Users:               []any{},
-		Presences:           []any{},
-		Relationships:       []any{},
-		Sessions:            []any{},
+	return &ReadyData{
+		V:                    9,
+		User:                 model.ToUser(user),
+		Guilds:               guilds,
+		SessionID:            sess.ID,
+		ResumeURL:            s.cfg.GatewayWSURL(),
+		ResumeGatewayURL:     s.cfg.GatewayWSURL(),
+		PrivateChannels:      []any{},
+		Users:                []any{},
+		Presences:            []any{},
+		Relationships:        []any{},
+		Sessions:             []any{},
 		GeoOrderedRTCRegions: []any{},
-		SessionType:         "normal",
-		UserSettings:        map[string]any{},
-		Experiments:         []any{},
-		GuildExperiments:    []any{},
+		SessionType:          "normal",
+		UserSettings:         map[string]any{},
+		Experiments:          []any{},
+		GuildExperiments:     []any{},
 		UserGuildSettings: &VersionedArray{
 			Entries: []any{},
 			Partial: false,
 			Version: 0,
 		},
+		ReadState: &VersionedArray{
+			Entries: []any{},
+			Partial: false,
+			Version: 0,
+		},
+		UserSettingsProto: &UserSettingsProto{},
 	}
 }
 

@@ -167,7 +167,12 @@ func (s *Service) GuildCreatePayloads(userID string) []any {
 			"stage_instances":        []any{},
 			"guild_scheduled_events": []any{},
 			"embedded_activities":    []any{},
-			"unavailable":            false,
+			"guild_hashes": map[string]any{
+				"version":  0,
+				"hashes":   map[string]any{},
+				"guild_id": net.ID,
+			},
+			"unavailable": false,
 		})
 	}
 	return out

@@ -43,7 +43,7 @@ type guildUnavailable struct {
 type ReadyData struct {
 	V                    int                `json:"v"`
 	User                 *model.User        `json:"user"`
-	Guilds               []guildUnavailable `json:"guilds"`
+	Guilds               []any              `json:"guilds"`
 	SessionID            string             `json:"session_id"`
 	ResumeURL            string             `json:"resume_url"`
 	ResumeGatewayURL     string             `json:"resume_gateway_url"`
@@ -58,12 +58,22 @@ type ReadyData struct {
 	Experiments          []any              `json:"experiments"`
 	GuildExperiments     []any              `json:"guild_experiments"`
 	UserGuildSettings    *VersionedArray    `json:"user_guild_settings"`
+	ReadState            *VersionedArray    `json:"read_state"`
+	UserSettingsProto    *UserSettingsProto `json:"user_settings_proto"`
 }
 
 // VersionedArray is Discord's {entries, partial, version} wrapper used by
-// READY fields such as user_guild_settings. Entries must always be present.
+// READY fields such as user_guild_settings and read_state. Entries must
+// always be present.
 type VersionedArray struct {
 	Entries []any `json:"entries"`
 	Partial bool  `json:"partial"`
 	Version int   `json:"version"`
+}
+
+// UserSettingsProto mirrors the preloaded user settings protobuf.
+type UserSettingsProto struct {
+	Versions struct {
+		DataVersion int `json:"dataVersion"`
+	} `json:"versions"`
 }
