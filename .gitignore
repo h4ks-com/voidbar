@@ -1,0 +1,33 @@
+# Binaries
+/voidbar
+/voidbar.exe
+*.exe
+
+# Build output
+/dist/
+/build/
+/bin/
+
+# Data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Go workspace files
+go.work
+go.work.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
+configs/voidbar.toml
