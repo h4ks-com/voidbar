@@ -1,0 +1,78 @@
+:root {
+  --bg: #0d0f14;
+  --fg: #d7dbe4;
+  --accent: #7289da;
+  --error: #f04747;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "gg sans", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+}
+
+#voidbar-loading {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+
+#voidbar-loading-logo {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--accent);
+  user-select: none;
+}
+
+#voidbar-loading-status {
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  opacity: 0.7;
+  min-height: 16px;
+}
+
+#voidbar-loading-bar {
+  width: 260px;
+  height: 4px;
+  border-radius: 2px;
+  background: #232733;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+#voidbar-loading-bar.active {
+  opacity: 1;
+}
+
+#voidbar-loading-bar-inner {
+  width: 0%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+#voidbar-loading-error {
+  max-width: 480px;
+  padding: 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--error);
+  text-align: center;
+  white-space: pre-wrap;
+  display: none;
+}
+
+#voidbar-loading-error.visible {
+  display: block;
+}

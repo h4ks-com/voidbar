@@ -19,3 +19,14 @@ registration = "closed"
 # Optional explicit path for the master encryption key.
 # Default: <storage.path>/master.key (auto-generated on first run).
 # master_key_path = "./data/master.key"
+
+[client]
+# Serve Voidbar's own loader page at "/". The loader downloads the frozen
+# Discord web build from cdn_base at runtime and patches it in the browser;
+# Voidbar itself stores and serves no Discord assets.
+enabled = false
+# Base URL of a CORS-enabled mirror that hosts the build, e.g. an archive.org
+# item. Must not have a trailing slash.
+cdn_base = ""
+# Build directory under cdn_base containing app.html and /assets.
+# build = "january_15_2022"

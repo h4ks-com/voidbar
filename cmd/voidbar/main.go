@@ -20,6 +20,7 @@ import (
 	"github.com/h4ks-com/voidbar/internal/discord/rest"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
+	"github.com/h4ks-com/voidbar/internal/web"
 )
 
 func main() {
@@ -82,7 +83,18 @@ func serveCmd(args []string, log *slog.Logger) error {
 	sf := util.NewSnowflake(0, 0)
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
 	gw := gateway.New(authSvc, cfg, log)
-	handler := rest.New(authSvc, cfg, log, gw)
+	restHandler := rest.New(authSvc, cfg, log, gw)
+
+	root := http.NewServeMux()
+	root.Handle("/api/", restHandler)
+	root.Handle("/health", restHandler)
+	root.Handle("/gateway", restHandler)
+	if cfg.Client.Enabled {
+		root.Handle("/", web.Handler(cfg))
+	} else {
+		root.Handle("/", restHandler)
+	}
+	handler := root
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
 		Handler:           handler,

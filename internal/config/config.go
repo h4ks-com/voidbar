@@ -14,6 +14,7 @@ type Config struct {
 	Server  Server  `toml:"server"`
 	Storage Storage `toml:"storage"`
 	Auth    Auth    `toml:"auth"`
+	Client  Client  `toml:"client"`
 }
 
 type Server struct {
@@ -28,6 +29,12 @@ type Storage struct {
 type Auth struct {
 	Registration  string `toml:"registration"`
 	MasterKeyPath string `toml:"master_key_path"`
+}
+
+type Client struct {
+	Enabled bool   `toml:"enabled"`
+	CdnBase string `toml:"cdn_base"`
+	Build   string `toml:"build"`
 }
 
 func Default() *Config {
@@ -66,6 +73,11 @@ func applyEnv(cfg *Config) {
 	set(&cfg.Storage.Path, "VOIDBAR_STORAGE_PATH")
 	set(&cfg.Auth.Registration, "VOIDBAR_AUTH_REGISTRATION")
 	set(&cfg.Auth.MasterKeyPath, "VOIDBAR_AUTH_MASTER_KEY_PATH")
+	if v, ok := os.LookupEnv("VOIDBAR_CLIENT_ENABLED"); ok && v != "" {
+		cfg.Client.Enabled = v == "true" || v == "1"
+	}
+	set(&cfg.Client.CdnBase, "VOIDBAR_CLIENT_CDN_BASE")
+	set(&cfg.Client.Build, "VOIDBAR_CLIENT_BUILD")
 }
 
 func (c *Config) Validate() error {
@@ -82,6 +94,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.Path == "" {
 		return errors.New("storage.path must not be empty")
+	}
+	if c.Client.Enabled {
+		if c.Client.CdnBase == "" || c.Client.Build == "" {
+			return errors.New("client.cdn_base and client.build are required when client is enabled")
+		}
+		if !strings.HasPrefix(c.Client.CdnBase, "http://") && !strings.HasPrefix(c.Client.CdnBase, "https://") {
+			return errors.New("client.cdn_base must start with http:// or https://")
+		}
 	}
 	return nil
 }
