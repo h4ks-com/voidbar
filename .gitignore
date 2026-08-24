@@ -31,3 +31,5 @@ Thumbs.db
 .env
 .env.local
 configs/voidbar.toml
+# Editor backup
+*~
