@@ -74,11 +74,15 @@ function buildGlobalEnv(cfg) {
     MARKETING_ENDPOINT: rel(location.origin),
     BRAINTREE_KEY: '',
     STRIPE_KEY: '',
-    NETWORKING_ENDPOINT: '',
-    RTC_LATENCY_ENDPOINT: '',
+    // Empty strings are dangerous here: the client concatenates
+    // "wss:"+REMOTE_AUTH_ENDPOINT+"/?v=1" and location.protocol+
+    // RTC_LATENCY_ENDPOINT / NETWORKING_ENDPOINT, and an empty value
+    // produces invalid URLs that crash React rendering (QR login screen).
+    NETWORKING_ENDPOINT: rel(location.origin),
+    RTC_LATENCY_ENDPOINT: rel(`${location.origin}/rtc`),
     ACTIVITY_APPLICATION_HOST: '',
     PROJECT_ENV: 'production',
-    REMOTE_AUTH_ENDPOINT: '',
+    REMOTE_AUTH_ENDPOINT: rel(`${location.origin}/remote-auth`),
     SENTRY_TAGS: { buildId: 'voidbar', buildType: '' },
     MIGRATION_SOURCE_ORIGIN: '',
     MIGRATION_DESTINATION_ORIGIN: '',
