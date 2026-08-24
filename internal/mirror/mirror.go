@@ -267,6 +267,9 @@ func (d *downloader) enqueueChunk(hash string, candidates []string) {
 			}
 			return
 		}
+		// All candidates 404: the mirror never archived this lazy chunk.
+		// Harmless for core boot, but record it so gaps are visible.
+		d.markMissing("chunk " + hash + " (" + candidates[0] + ")")
 	})
 }
 

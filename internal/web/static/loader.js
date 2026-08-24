@@ -514,14 +514,9 @@ async function loadAll(resources) {
 
 function injectDOM(doc, styles, scripts) {
   const styleMap = new Map(styles.map((s) => [s.url, s.blob]));
-  const scriptMap = new Map(scripts.map((s) => [s.url, s.blob]));
 
   const rewrite = (elem) => {
     if (elem.hasAttribute('integrity')) elem.removeAttribute('integrity');
-    if (elem.tagName === 'SCRIPT' && elem.hasAttribute('src')) {
-      const blob = scriptMap.get(normalizePath(elem.getAttribute('src')));
-      if (blob) elem.setAttribute('src', blob);
-    }
     if (elem.tagName === 'LINK') {
       const blob = styleMap.get(normalizePath(elem.getAttribute('href')));
       if (blob) elem.setAttribute('href', blob);
@@ -529,26 +524,32 @@ function injectDOM(doc, styles, scripts) {
     return elem;
   };
 
+  // Inline scripts are appended and execute synchronously during injection,
+  // in document order — they define globals (window.__OVERLAY__ etc.) the
+  // app bundles rely on. External scripts are NOT injected here: they are
+  // created by executeScripts() afterwards, strictly in order, exactly once.
   for (const node of [...doc.head.childNodes]) {
-    if (node.nodeType === Node.ELEMENT_NODE) document.head.appendChild(rewrite(node));
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    if (node.tagName === 'SCRIPT' && node.hasAttribute('src')) continue;
+    document.head.appendChild(rewrite(node));
   }
   for (const node of [...doc.body.childNodes]) {
-    if (node.nodeType === Node.ELEMENT_NODE) document.body.appendChild(rewrite(node));
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    if (node.tagName === 'SCRIPT' && node.hasAttribute('src')) continue;
+    document.body.appendChild(rewrite(node));
   }
 }
 
-async function executeScripts() {
-  // Re-create every blob script element so they execute in order, exactly once.
-  const elements = [...document.getElementsByTagName('script')].filter((s) =>
-    s.src.startsWith('blob:'),
-  );
-  for (const elem of elements) {
+async function executeScripts(entries) {
+  // Create blob script elements sequentially so each bundle executes in the
+  // order the build intended, after all inline globals are defined.
+  for (const entry of entries) {
     await new Promise((resolve, reject) => {
       const fresh = document.createElement('script');
-      for (const attr of elem.attributes) fresh.setAttribute(attr.name, attr.value);
+      fresh.src = entry.blob;
       fresh.onload = resolve;
-      fresh.onerror = () => reject(new Error(`failed to execute ${elem.src}`));
-      elem.replaceWith(fresh);
+      fresh.onerror = () => reject(new Error(`failed to execute ${entry.url}`));
+      document.body.appendChild(fresh);
     });
   }
 }
@@ -657,7 +658,7 @@ async function boot() {
   injectDOM(doc, styles, scripts);
 
   setStatus('STARTING');
-  await executeScripts();
+  await executeScripts(scripts);
   await waitForMount();
 
   setProgress(0, 1);
