@@ -172,8 +172,11 @@ function patchCSS(text, cfg) {
 // cache - a new patcher version just re-patches instantly. The cache key
 // covers the mirror, build and instance origin; switching any of them starts
 // a fresh cache. v2 = raw-content format (v1 stored patched bytes).
+// v3 = same format; bumped once because the mirror itself was repaired
+// (Wayback replayed archived Content-Encoding, so most assets had been
+// stored compressed) - stale v2 entries hold those corrupt bytes.
 
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 
 function hashString(s) {
   let h = 2166136261;
@@ -198,6 +201,19 @@ const opfs = {
         `${CACHE_VERSION}|${state.cfg.proxy_base ? 'proxy' : 'direct'}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
       );
       let dir = await navigator.storage.getDirectory();
+      // Prune entries of older cache versions (e.g. after a version bump):
+      // they would otherwise linger in OPFS forever. Best-effort.
+      try {
+        const vbDir = await dir.getDirectoryHandle('voidbar');
+        const stale = [];
+        for await (const [name] of vbDir.keys()) {
+          if (name !== CACHE_VERSION) stale.push(name);
+        }
+        for (const name of stale) {
+          await vbDir.removeEntry(name, { recursive: true }).catch(() => {});
+          log('pruned old cache dir:', name);
+        }
+      } catch {}
       for (const part of ['voidbar', CACHE_VERSION, key]) {
         dir = await dir.getDirectoryHandle(part, { create: true });
       }
