@@ -171,6 +171,13 @@ func TestHelloIdentifyReadyHeartbeat(t *testing.T) {
 			t.Fatalf("ready.%s must be an array, got %v", key, d[key])
 		}
 	}
+	ugs, ok := d["user_guild_settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("user_guild_settings must be an object, got %v", d["user_guild_settings"])
+	}
+	if _, ok := ugs["entries"].([]any); !ok {
+		t.Fatalf("user_guild_settings.entries must be an array, got %v", ugs)
+	}
 
 	send(t, conn, map[string]any{"op": OpHeartbeat, "d": nil})
 	ack := recv(t, conn)

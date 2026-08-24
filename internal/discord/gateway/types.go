@@ -57,4 +57,13 @@ type ReadyData struct {
 	UserSettings         map[string]any     `json:"user_settings"`
 	Experiments          []any              `json:"experiments"`
 	GuildExperiments     []any              `json:"guild_experiments"`
+	UserGuildSettings    *VersionedArray    `json:"user_guild_settings"`
+}
+
+// VersionedArray is Discord's {entries, partial, version} wrapper used by
+// READY fields such as user_guild_settings. Entries must always be present.
+type VersionedArray struct {
+	Entries []any `json:"entries"`
+	Partial bool  `json:"partial"`
+	Version int   `json:"version"`
 }

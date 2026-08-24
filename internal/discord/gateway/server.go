@@ -300,6 +300,11 @@ return &ReadyData{
 		UserSettings:        map[string]any{},
 		Experiments:         []any{},
 		GuildExperiments:    []any{},
+		UserGuildSettings: &VersionedArray{
+			Entries: []any{},
+			Partial: false,
+			Version: 0,
+		},
 	}
 }
 
