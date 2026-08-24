@@ -15,6 +15,9 @@ import (
 // finish loading; anything not covered here lands in handleUnknown and gets
 // logged for contract-by-client implementation.
 func (s *Server) registerStubs(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v9/guild-recommendations", s.requireAuth(s.handleGuildRecommendations))
+	mux.HandleFunc("GET /api/v9/discoverable-guilds", s.requireAuth(s.handleDiscoverableGuilds))
+	mux.HandleFunc("GET /api/v9/discovery/categories", s.handleDiscoveryCategories)
 	mux.HandleFunc("GET /api/v9/experiments", s.handleExperiments)
 	mux.HandleFunc("POST /api/v9/science", s.handleNoContent)
 	mux.HandleFunc("POST /api/v9/metrics", s.handleNoContent)
@@ -98,6 +101,37 @@ func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.U
 func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGuildRecommendations feeds the recommendations store. The client's
+// store comparator shallow-compares recommendationGuilds on every guild
+// store change - a 404 here leaves it undefined and crashes Object.keys.
+func (s *Server) handleGuildRecommendations(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recommended_guilds": []any{},
+		"load_id":            "voidbar",
+	})
+}
+
+// handleDiscoverableGuilds answers the discovery listing with an empty page.
+func (s *Server) handleDiscoverableGuilds(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"guilds":     []any{},
+		"total":      0,
+		"offset":     0,
+		"limit":      0,
+		"categories": []any{},
+		"keywords":   []any{},
+		"load_id":    "voidbar",
+	})
+}
+
+// handleDiscoveryCategories answers the discovery categories probe.
+func (s *Server) handleDiscoveryCategories(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"categories": []any{},
+		"load_id":    "voidbar",
+	})
 }
 
 // handleStatuspageJSON answers statuspage.io-shaped endpoints. The client
