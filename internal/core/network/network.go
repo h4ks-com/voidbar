@@ -151,15 +151,23 @@ func (s *Service) GuildCreatePayloads(userID string) []any {
 		}
 
 		out = append(out, map[string]any{
-			"id":          net.ID,
-			"name":        net.Name,
-			"icon":        nil,
-			"owner_id":    net.CreatedBy,
-			"joined_at":   m.JoinedAt.Format(time.RFC3339),
-			"channels":    channels,
-			"members":     members,
-			"roles":       []any{},
-			"unavailable": false,
+			"id":                     net.ID,
+			"name":                   net.Name,
+			"icon":                   nil,
+			"owner_id":               net.CreatedBy,
+			"joined_at":              m.JoinedAt.Format(time.RFC3339),
+			"channels":               channels,
+			"members":                members,
+			"roles":                  []any{},
+			"presences":              []any{},
+			"voice_states":           []any{},
+			"threads":                []any{},
+			"emojis":                 []any{},
+			"stickers":               []any{},
+			"stage_instances":        []any{},
+			"guild_scheduled_events": []any{},
+			"embedded_activities":    []any{},
+			"unavailable":            false,
 		})
 	}
 	return out
