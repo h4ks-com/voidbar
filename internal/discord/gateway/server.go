@@ -23,11 +23,12 @@ import (
 const DefaultHeartbeatInterval = 41250
 
 type Server struct {
-	auth              *auth.Service
-	cfg               *config.Config
-	log               *slog.Logger
-	heartbeatInterval int
-	guildsForUser     func(userID string) ([]any, error)
+	auth               *auth.Service
+	cfg                *config.Config
+	log                *slog.Logger
+	heartbeatInterval  int
+	guildsForUser      func(userID string) ([]any, error)
+	guildCreateForUser func(userID string) []any
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -35,16 +36,19 @@ type Server struct {
 }
 
 // New creates the gateway server. guildsForUser (optional) supplies the
-// guild list for READY; when nil, the READY carries an empty list.
-func New(a *auth.Service, cfg *config.Config, log *slog.Logger, guildsForUser func(userID string) ([]any, error)) *Server {
+// guild stubs for READY; guildCreateForUser (optional) supplies full
+// GUILD_CREATE payloads dispatched right after READY, which is what fills
+// the client's guild rail.
+func New(a *auth.Service, cfg *config.Config, log *slog.Logger, guildsForUser func(userID string) ([]any, error), guildCreateForUser func(userID string) []any) *Server {
 	return &Server{
-		auth:              a,
-		cfg:               cfg,
-		log:               log,
-		heartbeatInterval: DefaultHeartbeatInterval,
-		guildsForUser:     guildsForUser,
-		sessions:          make(map[string]*Session),
-		byUser:            make(map[string]map[string]*Session),
+		auth:               a,
+		cfg:                cfg,
+		log:                log,
+		heartbeatInterval:  DefaultHeartbeatInterval,
+		guildsForUser:      guildsForUser,
+		guildCreateForUser: guildCreateForUser,
+		sessions:           make(map[string]*Session),
+		byUser:             make(map[string]map[string]*Session),
 	}
 }
 
@@ -175,6 +179,14 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				s.log.Error("ready failed", "err", err)
 				return
 			}
+			if s.guildCreateForUser != nil {
+				for _, guild := range s.guildCreateForUser(user.ID) {
+					if _, err := sess.dispatch("GUILD_CREATE", guild, true); err != nil {
+						s.log.Error("guild create failed", "err", err)
+						return
+					}
+				}
+			}
 		case OpResume:
 			if sess != nil {
 				s.closeWS(conn, CloseAlreadyAuthenticated, "already authenticated")
@@ -264,7 +276,9 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		if raw, err := s.guildsForUser(user.ID); err == nil {
 			for _, g := range raw {
 				if m, ok := g.(map[string]any); ok {
-					guilds = append(guilds, guildUnavailable{ID: fmt.Sprintf("%v", m["id"]), Unavailable: false})
+					// READY always carries guilds as unavailable stubs; the
+					// real data arrives via GUILD_CREATE after READY.
+					guilds = append(guilds, guildUnavailable{ID: fmt.Sprintf("%v", m["id"]), Unavailable: true})
 				}
 			}
 		}

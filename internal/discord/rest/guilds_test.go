@@ -1,8 +1,24 @@
 package rest
 
 import (
+	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/h4ks-com/voidbar/internal/config"
+	"github.com/h4ks-com/voidbar/internal/core/network"
+	"github.com/h4ks-com/voidbar/internal/discord/auth"
+	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
+	"github.com/h4ks-com/voidbar/internal/storage"
+	"github.com/h4ks-com/voidbar/internal/util"
 )
 
 // TestCreateGuildAndGuildDetail exercises the connection-string-as-invite
@@ -57,7 +73,90 @@ func TestCreateGuildAndGuildDetail(t *testing.T) {
 	}
 }
 
-// TestJoinInvite exercises the paste-an-invite (connection string) flow.
+// TestGatewayGuildCreateFlow verifies that after a network is joined, the
+// gateway READY carries unavailable stubs and GUILD_CREATE fills the rail.
+func TestGatewayGuildCreateFlow(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger)
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
+
+	// Join a network first (no real IRC connection happens - the host has no
+	// listener; EnsureConn just spawns a goroutine that fails to connect).
+	if _, err := netSvc.Join(user.ID, "ircs://irc.libera.chat:6697/#go,#rust?name=Libera"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway/?v=9&encoding=json"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	recvJSON := func() map[string]any {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p map[string]any
+		if err := json.Unmarshal(data, &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	_ = recvJSON() // HELLO
+	if err := conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": token}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rdy := recvJSON()
+	if rdy["t"] != "READY" {
+		t.Fatalf("expected READY, got %v", rdy)
+	}
+	readyGuilds := rdy["d"].(map[string]any)["guilds"].([]any)
+	if len(readyGuilds) != 1 {
+		t.Fatalf("expected 1 ready guild stub, got %v", readyGuilds)
+	}
+	if u := readyGuilds[0].(map[string]any)["unavailable"]; u != true {
+		t.Fatalf("ready guild should be unavailable stub: %v", readyGuilds[0])
+	}
+
+	create := recvJSON()
+	if create["t"] != "GUILD_CREATE" {
+		t.Fatalf("expected GUILD_CREATE after READY, got %v", create)
+	}
+	d := create["d"].(map[string]any)
+	if d["name"] != "Libera" {
+		t.Fatalf("guild name: %v", d["name"])
+	}
+	chans := d["channels"].([]any)
+	if len(chans) != 2 {
+		t.Fatalf("channels: %v", chans)
+	}
+	members := d["members"].([]any)
+	if len(members) != 1 {
+		t.Fatalf("members: %v", members)
+	}
+}
 func TestJoinInvite(t *testing.T) {
 	h := newServer(t, "open")
 	token := registerAndLogin(t, h)

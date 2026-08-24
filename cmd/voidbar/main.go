@@ -115,10 +115,10 @@ func serveCmd(args []string, log *slog.Logger) error {
 	defer store.Close()
 	sf := util.NewSnowflake(0, 0)
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
-	gw := gateway.New(authSvc, cfg, log, nil)
+	gw := gateway.New(authSvc, cfg, log, nil, nil)
 	manager := ircmanage.New(store, gw, log)
 	netSvc := network.NewService(store, gw, sf, manager)
-	gw = gateway.New(authSvc, cfg, log, netSvc.GuildsForUser)
+	gw = gateway.New(authSvc, cfg, log, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

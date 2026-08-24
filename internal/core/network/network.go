@@ -7,6 +7,7 @@ package network
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
@@ -99,6 +100,74 @@ func (s *Service) Network(id string) (*storage.Network, error) {
 // MembershipFor returns the user's membership on a network.
 func (s *Service) MembershipFor(userID, netID string) (*storage.Membership, error) {
 	return s.store.GetMembership(netID, userID)
+}
+
+// GuildCreatePayloads returns full GUILD_CREATE payloads for every network
+// the user belongs to, dispatched by the gateway right after READY. Channels
+// come from the member's auto-join list (live IRC channel state follows in
+// later phases); members are the network's memberships with synthesized
+// Discord-shaped users and IRC-operator-ish roles.
+func (s *Service) GuildCreatePayloads(userID string) []any {
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil
+	}
+	var out []any
+	for _, m := range memberships {
+		net, err := s.store.GetNetwork(m.NetworkID)
+		if err != nil {
+			continue
+		}
+		all, err := s.store.ListMemberships(net.ID)
+		if err != nil {
+			continue
+		}
+
+		channels := make([]any, 0, len(m.AutoJoin))
+		for i, ch := range m.AutoJoin {
+			channels = append(channels, map[string]any{
+				"id":              net.ID + ":" + ch,
+				"guild_id":        net.ID,
+				"name":            strings.TrimPrefix(ch, "#"),
+				"type":            0,
+				"position":        i,
+				"topic":           nil,
+				"last_message_id": nil,
+			})
+		}
+
+		members := make([]any, 0, len(all))
+		for _, mem := range all {
+			members = append(members, map[string]any{
+				"user": map[string]any{
+					"id":            mem.UserID,
+					"username":      mem.Nick,
+					"discriminator": "0",
+					"bot":           false,
+				},
+				"roles":     []any{},
+				"joined_at": mem.JoinedAt.Format(time.RFC3339),
+			})
+		}
+
+		out = append(out, map[string]any{
+			"id":          net.ID,
+			"name":        net.Name,
+			"icon":        nil,
+			"owner_id":    net.CreatedBy,
+			"joined_at":   m.JoinedAt.Format(time.RFC3339),
+			"channels":    channels,
+			"members":     members,
+			"roles":       []any{},
+			"unavailable": false,
+		})
+	}
+	return out
+}
+
+// GuildCreateForUser is the gateway hook for the above.
+func (s *Service) GuildCreateForUser(userID string) []any {
+	return s.GuildCreatePayloads(userID)
 }
 
 func username(userID string) string {

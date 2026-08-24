@@ -33,7 +33,7 @@ func newTestServer(t *testing.T) (*Server, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw := New(svc, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	gw := New(svc, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
 	return gw, token, user.ID
 }
 

@@ -29,10 +29,10 @@ func newServer(t *testing.T, registration string) http.Handler {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), registration)
-	gw := gateway.New(svc, cfg, logger, nil)
+	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger)
 	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
-	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser)
+	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser, netSvc.GuildCreateForUser)
 	return New(svc, cfg, logger, gw, netSvc, manager)
 }
 
