@@ -140,13 +140,18 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	channels := make([]any, 0, len(m.AutoJoin))
 	for i, ch := range m.AutoJoin {
 		channels = append(channels, map[string]any{
-			"id":              net.ID + ":" + ch,
-			"guild_id":        net.ID,
-			"name":            strings.TrimPrefix(ch, "#"),
-			"type":            0,
-			"position":        i,
-			"topic":           nil,
-			"last_message_id": nil,
+			"id":                    net.ID + ":" + ch,
+			"guild_id":              net.ID,
+			"name":                  strings.TrimPrefix(ch, "#"),
+			"type":                  0,
+			"position":              i,
+			"topic":                 nil,
+			"last_message_id":       "0",
+			"permission_overwrites": []any{},
+			"rate_limit_per_user":   0,
+			"nsfw":                  false,
+			"flags":                 0,
+			"parent_id":             nil,
 		})
 	}
 
@@ -164,23 +169,55 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		})
 	}
 
+	// Every Discord guild has an @everyone role whose id equals the guild id;
+	// the client computes channel permissions through it, and without the
+	// role channels appear inaccessible.
+	everyoneRole := map[string]any{
+		"id":            net.ID,
+		"name":          "@everyone",
+		"color":         0,
+		"hoist":         false,
+		"icon":          nil,
+		"unicode_emoji": nil,
+		"position":      0,
+		"permissions":   "104324673682433", // everything, owner-oriented bouncer
+		"managed":       false,
+		"mentionable":   false,
+		"flags":         0,
+	}
+
 	return map[string]any{
-		"id":                     net.ID,
-		"name":                   net.Name,
-		"icon":                   nil,
-		"owner_id":               net.CreatedBy,
-		"joined_at":              m.JoinedAt.Format(time.RFC3339),
-		"channels":               channels,
-		"members":                members,
-		"roles":                  []any{},
-		"presences":              []any{},
-		"voice_states":           []any{},
-		"threads":                []any{},
-		"emojis":                 []any{},
-		"stickers":               []any{},
-		"stage_instances":        []any{},
-		"guild_scheduled_events": []any{},
-		"embedded_activities":    []any{},
+		"id":                            net.ID,
+		"name":                          net.Name,
+		"icon":                          nil,
+		"owner_id":                      net.CreatedBy,
+		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
+		"channels":                      channels,
+		"members":                       members,
+		"member_count":                  len(all),
+		"large":                         false,
+		"roles":                         []any{everyoneRole},
+		"presences":                     []any{},
+		"voice_states":                  []any{},
+		"threads":                       []any{},
+		"emojis":                        []any{},
+		"stickers":                      []any{},
+		"stage_instances":               []any{},
+		"guild_scheduled_events":        []any{},
+		"embedded_activities":           []any{},
+		"features":                      []any{},
+		"premium_tier":                  0,
+		"nsfw":                          false,
+		"verification_level":            0,
+		"default_message_notifications": 0,
+		"explicit_content_filter":       0,
+		"mfa_level":                     0,
+		"system_channel_id":             nil,
+		"rules_channel_id":              nil,
+		"public_updates_channel_id":     nil,
+		"afk_channel_id":                nil,
+		"afk_timeout":                   300,
+		"preferred_locale":              "en-US",
 		"guild_hashes": map[string]any{
 			"version":  0,
 			"hashes":   map[string]any{},
