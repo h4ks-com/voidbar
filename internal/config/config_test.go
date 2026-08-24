@@ -122,6 +122,30 @@ func TestGatewayWSURL(t *testing.T) {
 	}
 }
 
+func TestClientConfigOptionalBuild(t *testing.T) {
+	path := writeConfig(t, `
+[client]
+enabled = true
+cdn_base = "https://web.archive.org/web/20220601000000id_/https://discord.com"
+html = "app"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Client.Html != "app" || cfg.Client.Build != "" {
+		t.Fatalf("client config: %+v", cfg.Client)
+	}
+
+	bad := writeConfig(t, `
+[client]
+enabled = true
+`)
+	if _, err := Load(bad); err == nil {
+		t.Fatal("expected validation error for missing cdn_base")
+	}
+}
+
 func TestMissingFileExplicit(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "nope.toml")); err == nil {
 		t.Fatal("expected error for missing explicit config")

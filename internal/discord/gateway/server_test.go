@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -311,6 +313,57 @@ func TestDispatchToMultipleSessions(t *testing.T) {
 		if ev["t"] != "PING" {
 			t.Fatalf("dispatch: %v", ev)
 		}
+	}
+}
+
+func TestZlibStreamCompression(t *testing.T) {
+	gw, token, _ := newTestServer(t)
+	url := startHTTP(t, gw)
+	wsURL := "ws" + strings.TrimPrefix(url, "http") + "/gateway?encoding=json&v=9&compress=zlib-stream"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// zlib-stream is a single continuous stream across frames, so keep one
+	// reader and one JSON decoder alive for the whole connection. The reader
+	// is created lazily: an empty stream has no zlib header yet.
+	stream := &bytes.Buffer{}
+	var dec *json.Decoder
+	nextJSON := func() map[string]any {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mt != websocket.BinaryMessage {
+			t.Fatalf("expected binary frame, got %d", mt)
+		}
+		stream.Write(data)
+		if dec == nil {
+			zr, err := zlib.NewReader(stream)
+			if err != nil {
+				t.Fatalf("zlib reader: %v", err)
+			}
+			dec = json.NewDecoder(zr)
+		}
+		var v map[string]any
+		if err := dec.Decode(&v); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return v
+	}
+
+	if hello := nextJSON(); hello["op"].(float64) != OpHello {
+		t.Fatalf("hello: %v", hello)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"op": OpIdentify, "d": map[string]any{"token": token}}); err != nil {
+		t.Fatal(err)
+	}
+	if rdy := nextJSON(); rdy["t"] != "READY" {
+		t.Fatalf("ready: %v", rdy["t"])
 	}
 }
 

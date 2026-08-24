@@ -21,6 +21,8 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/@me/connections", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/entitlements", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/subscriptions", s.requireAuth(s.handleEmptyArray))
+	mux.HandleFunc("GET /api/v9/users/@me/relationships", s.requireAuth(s.handleEmptyArray))
+	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleEmptyMap))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/users", s.requireAuth(s.handleAffinities))
 }
 
@@ -62,6 +64,10 @@ func (s *Server) handleEmptyArrayPublic(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleEmptyArray(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	writeJSON(w, http.StatusOK, []any{})
+}
+
+func (s *Server) handleEmptyMap(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (s *Server) handleAffinities(w http.ResponseWriter, r *http.Request, _ *storage.User) {

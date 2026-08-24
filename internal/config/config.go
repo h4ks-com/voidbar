@@ -35,6 +35,7 @@ type Client struct {
 	Enabled bool   `toml:"enabled"`
 	CdnBase string `toml:"cdn_base"`
 	Build   string `toml:"build"`
+	Html    string `toml:"html"`
 }
 
 func Default() *Config {
@@ -78,6 +79,7 @@ func applyEnv(cfg *Config) {
 	}
 	set(&cfg.Client.CdnBase, "VOIDBAR_CLIENT_CDN_BASE")
 	set(&cfg.Client.Build, "VOIDBAR_CLIENT_BUILD")
+	set(&cfg.Client.Html, "VOIDBAR_CLIENT_HTML")
 }
 
 func (c *Config) Validate() error {
@@ -96,8 +98,8 @@ func (c *Config) Validate() error {
 		return errors.New("storage.path must not be empty")
 	}
 	if c.Client.Enabled {
-		if c.Client.CdnBase == "" || c.Client.Build == "" {
-			return errors.New("client.cdn_base and client.build are required when client is enabled")
+		if c.Client.CdnBase == "" {
+			return errors.New("client.cdn_base is required when client is enabled")
 		}
 		if !strings.HasPrefix(c.Client.CdnBase, "http://") && !strings.HasPrefix(c.Client.CdnBase, "https://") {
 			return errors.New("client.cdn_base must start with http:// or https://")

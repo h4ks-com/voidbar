@@ -29,6 +29,7 @@ type clientConfig struct {
 	Gateway      string `json:"gateway"`
 	CdnBase      string `json:"cdn_base"`
 	Build        string `json:"build"`
+	Html         string `json:"html"`
 }
 
 func handleConfig(cfg *config.Config) http.HandlerFunc {
@@ -39,11 +40,16 @@ func handleConfig(cfg *config.Config) http.HandlerFunc {
 			_, _ = w.Write([]byte(`{"message":"client loader is disabled on this instance"}`))
 			return
 		}
+		html := cfg.Client.Html
+		if html == "" {
+			html = "app.html"
+		}
 		writeJSON(w, http.StatusOK, clientConfig{
 			InstanceName: "Voidbar",
 			Gateway:      cfg.GatewayWSURL(),
 			CdnBase:      strings.TrimSuffix(cfg.Client.CdnBase, "/"),
 			Build:        cfg.Client.Build,
+			Html:         html,
 		})
 	}
 }

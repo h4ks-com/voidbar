@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -67,23 +69,56 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(1 << 20)
 	ch := make(chan []byte, 256)
+	done := make(chan struct{})
+	compress := r.URL.Query().Get("compress") == "zlib-stream"
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
-		s.writePump(conn, ch)
+		s.writePump(conn, ch, done, compress)
 	}()
 	defer func() {
 		_ = conn.Close()
+		close(done)
 		<-writeDone
 	}()
 	s.handleConn(conn, ch)
 }
 
-func (s *Server) writePump(conn *websocket.Conn, ch chan []byte) {
+func (s *Server) writePump(conn *websocket.Conn, ch <-chan []byte, done <-chan struct{}, compress bool) {
 	defer conn.Close()
-	for frame := range ch {
+	var (
+		zw  *zlib.Writer
+		buf *bytes.Buffer
+	)
+	if compress {
+		buf = &bytes.Buffer{}
+		zw = zlib.NewWriter(buf)
+	}
+	for {
+		var frame []byte
+		select {
+		case <-done:
+			return
+		case frame = <-ch:
+			// nil frames come from a channel closed by session takeover.
+			if frame == nil {
+				return
+			}
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+		var err error
+		if compress {
+			buf.Reset()
+			if _, err = zw.Write(frame); err == nil {
+				err = zw.Flush()
+			}
+			if err == nil {
+				err = conn.WriteMessage(websocket.BinaryMessage, buf.Bytes())
+			}
+		} else {
+			err = conn.WriteMessage(websocket.TextMessage, frame)
+		}
+		if err != nil {
 			return
 		}
 	}

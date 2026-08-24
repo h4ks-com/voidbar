@@ -23,10 +23,17 @@ registration = "closed"
 [client]
 # Serve Voidbar's own loader page at "/". The loader downloads the frozen
 # Discord web build from cdn_base at runtime and patches it in the browser;
-# Voidbar itself stores and serves no Discord assets.
+# Voidbar itself stores and serves no Discord assets. Patched assets are
+# cached in the browser's OPFS, so only the first boot hits the mirror.
 enabled = false
-# Base URL of a CORS-enabled mirror that hosts the build, e.g. an archive.org
-# item. Must not have a trailing slash.
+# Base URL of a CORS-enabled mirror hosting the build. Recommended for
+# production: an archive.org item (archive.org/download/... sends
+# Access-Control-Allow-Origin: *). web.archive.org (Wayback) has no CORS
+# and only works for local dev with browser security disabled.
+# cdn_base = "https://archive.org/download/voidbar-client"
 cdn_base = ""
-# Build directory under cdn_base containing app.html and /assets.
-# build = "january_15_2022"
+# Optional subdirectory under cdn_base containing app.html (leave empty if
+# app.html sits at the root).
+# build = ""
+# Name of the HTML entry when it is not "app.html".
+# html = "app"

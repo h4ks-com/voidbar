@@ -121,6 +121,88 @@ function patchCSS(text, cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// OPFS asset cache
+//
+// After a resource is fetched and patched it is persisted in Origin Private
+// File System; subsequent boots load from the local cache without touching
+// the mirror. Cache key includes the mirror, build and instance origin, so
+// switching any of them starts a fresh cache.
+
+const CACHE_VERSION = 'v1';
+
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+const opfs = {
+  root: null,
+  ready: false,
+
+  async init() {
+    if (!navigator.storage?.getDirectory) {
+      log('OPFS not supported, every boot will hit the mirror');
+      return;
+    }
+    try {
+      const key = hashString(
+        `${CACHE_VERSION}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
+      );
+      let dir = await navigator.storage.getDirectory();
+      for (const part of ['voidbar', CACHE_VERSION, key]) {
+        dir = await dir.getDirectoryHandle(part, { create: true });
+      }
+      this.root = dir;
+      this.ready = true;
+      navigator.storage.persist?.().catch(() => {});
+    } catch (e) {
+      log('OPFS unavailable, caching disabled:', e.message);
+    }
+  },
+
+  async walk(path, create = false) {
+    const parts = path
+      .replace(/^\//, '')
+      .split('/')
+      .filter((p) => p && p !== '..' && p !== '.');
+    const name = parts.pop();
+    let dir = this.root;
+    for (const part of parts) {
+      dir = await dir.getDirectoryHandle(part, { create });
+    }
+    return { dir, name };
+  },
+
+  async read(path) {
+    if (!this.ready) return null;
+    try {
+      const { dir, name } = await this.walk(path);
+      const handle = await dir.getFileHandle(name);
+      return await (await handle.getFile()).text();
+    } catch {
+      return null;
+    }
+  },
+
+  async write(path, text) {
+    if (!this.ready) return;
+    try {
+      const { dir, name } = await this.walk(path, true);
+      const handle = await dir.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+    } catch (e) {
+      log('OPFS write skipped:', path, e.message);
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Resource loading
 
 const cache = new Map(); // normalized path -> { url, blob }
@@ -144,16 +226,26 @@ async function loadResource(path, type) {
   const normalized = normalizePath(path);
   if (cache.has(normalized)) return cache.get(normalized);
 
-  const res = await fetchCDN(normalized);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${normalized}`);
+  let body = await opfs.read(normalized);
 
-  const content = await res.text();
-  const patched = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
+  if (body == null) {
+    const res = await fetchCDN(normalized);
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${normalized}`);
 
+    const content = await res.text();
+    body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
+
+    if (type === 'script') {
+      await preloadChunks(content).catch((e) => log('chunk preload failed:', e));
+    }
+    opfs.write(normalized, body); // fire-and-forget persistence
+  }
+
+  const sourceURL = `${location.protocol}//${location.host}${normalized}`;
   const withSourceURL =
     type === 'script'
-      ? `${patched}\n//# sourceURL=${location.protocol}//${location.host}${normalized}`
-      : `${patched}\n/*# sourceURL=${location.protocol}//${location.host}${normalized} */`;
+      ? `${body}\n//# sourceURL=${sourceURL}`
+      : `${body}\n/*# sourceURL=${sourceURL} */`;
 
   const blob = URL.createObjectURL(
     new Blob([withSourceURL], { type: type === 'script' ? 'application/javascript' : 'text/css' }),
@@ -161,10 +253,6 @@ async function loadResource(path, type) {
 
   const entry = { url: normalized, blob };
   cache.set(normalized, entry);
-
-  if (type === 'script') {
-    await preloadChunks(content).catch((e) => log('chunk preload failed:', e));
-  }
   return entry;
 }
 
@@ -229,11 +317,27 @@ function parseAppHtml(html) {
 function collectResources(head, body) {
   const combined = head.innerHTML + body.innerHTML;
   const urls = (re) =>
-    [...combined.matchAll(re)].map((m) => m[1]).filter((u) => u && u.startsWith('/'));
+    [...combined.matchAll(re)]
+      .map((m) => m[1])
+      .filter((u) => u && u.startsWith('/') && !u.startsWith('/cdn-cgi/'));
 
-  const styles = urls(/<link[^>]+href="([^"]+)"[^>]*>/g).filter((u) => !u.endsWith('.ico'));
-  const scripts = urls(/<script[^>]+src="([^"]+)"[^>]*>/g);
-  return { styles, scripts };
+  const links = [...combined.matchAll(/<link[^>]+>/g)].map((m) => m[0]);
+  const styles = [];
+  const scripts = [];
+  for (const tag of links) {
+    const href = tag.match(/href="([^"]+)"/)?.[1];
+    if (!href || !href.startsWith('/')) continue;
+    if (/rel="[^"]*stylesheet[^"]*"/.test(tag)) styles.push(href);
+    if (/as="script"/.test(tag)) scripts.push(href);
+  }
+  // De-duplicate while keeping order.
+  const seen = new Set();
+  const dedupe = (arr) => arr.filter((u) => !seen.has(u) && seen.add(u));
+
+  styles.push(...urls(/<link[^>]+rel="[^"]*stylesheet[^"]*"[^>]*>/g).filter((u) => !u.endsWith('.ico')));
+  scripts.push(...urls(/<script[^>]+src="([^"]+)"[^>]*>/g));
+
+  return { styles: dedupe(styles), scripts: dedupe(scripts) };
 }
 
 async function loadAll(resources) {
@@ -242,24 +346,30 @@ async function loadAll(resources) {
   setProgress(0, total);
   setStatus(`DOWNLOADING CLIENT (0/${total})`);
 
-  const styles = await Promise.all(
-    resources.styles.map(async (path) => {
-      const entry = await loadResource(path, 'style');
+  const tryLoad = async (path, type) => {
+    try {
+      return await loadResource(path, type);
+    } catch (e) {
+      // Missing optional resources (analytics, some chunks) must not kill boot.
+      log('skipping resource:', path, e.message);
+      return null;
+    } finally {
       done++;
       setProgress(done, total);
       setStatus(`DOWNLOADING CLIENT (${done}/${total})`);
-      return entry;
-    }),
-  );
+    }
+  };
+
+  const styles = (
+    await Promise.all(resources.styles.map((path) => tryLoad(path, 'style')))
+  ).filter(Boolean);
 
   const scripts = [];
   for (const path of resources.scripts) {
-    const entry = await loadResource(path, 'script');
-    scripts.push(entry);
-    done++;
-    setProgress(done, total);
-    setStatus(`DOWNLOADING CLIENT (${done}/${total})`);
+    const entry = await tryLoad(path, 'script');
+    if (entry) scripts.push(entry);
   }
+  if (scripts.length === 0) throw new Error('all client scripts failed to load');
   return { styles, scripts };
 }
 
@@ -388,9 +498,15 @@ async function boot() {
   document.title = state.cfg.instance_name || 'Voidbar';
   log('instance:', state.cfg.instance_name, 'build:', state.cfg.build);
 
+  await opfs.init();
+
   setStatus('DOWNLOADING CLIENT');
-  const res = await fetchCDN(`/${state.cfg.build}/app.html`);
-  if (!res.ok) throw new Error(`client HTML HTTP ${res.status} from ${state.cfg.cdn_base}/${state.cfg.build}`);
+  const htmlPath = `/${state.cfg.build ? state.cfg.build + '/' : ''}${state.cfg.html || 'app.html'}`;
+  const res = await fetchCDN(htmlPath);
+  if (!res.ok)
+    throw new Error(
+      `client HTML HTTP ${res.status} for ${state.cfg.cdn_base}${htmlPath}`,
+    );
 
   const doc = parseAppHtml(await res.text());
   const resources = collectResources(doc.head, doc.body);
