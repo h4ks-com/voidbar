@@ -55,7 +55,10 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.H
 	mux.HandleFunc("GET /api/v9/users/@me/channels", s.requireAuth(s.handleUserChannels))
 	mux.HandleFunc("POST /api/v9/guilds", s.requireAuth(s.handleCreateGuild))
 	mux.HandleFunc("POST /api/v9/invites/{code}", s.requireAuth(s.handleJoinInvite))
+	mux.HandleFunc("GET /api/v9/channels/{channel}/messages", s.requireAuth(s.handleGetMessages))
 	mux.HandleFunc("POST /api/v9/channels/{channel}/messages", s.requireAuth(s.handleSendMessage))
+	mux.HandleFunc("GET /api/v9/channels/{channel}/pins", s.requireAuth(s.handleEmptyArray))
+	mux.HandleFunc("POST /api/v9/channels/{channel}/messages/{message}/ack", s.requireAuth(s.handleNoContentAuthed))
 	if net != nil {
 		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))
 	}

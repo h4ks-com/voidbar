@@ -109,6 +109,13 @@ type sendMessageRequest struct {
 	Content string `json:"content"`
 }
 
+// handleGetMessages answers the channel history request. Voidbar's replay
+// buffer arrives in a later phase; for now channels start empty, which the
+// client renders as the beginning of history.
+func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	writeJSON(w, http.StatusOK, []any{})
+}
+
 // handleSendMessage relays a Discord message to IRC. The channel id is
 // "<networkID>:<irc-channel>".
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
