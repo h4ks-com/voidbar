@@ -115,16 +115,31 @@ func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *stor
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
+			s.log.Warn("auth_fail", "path", r.URL.Path, "reason", "no/unknown auth header", "header_prefix", authHeaderPrefix(r))
 			unauthorized(w)
 			return
 		}
 		u, err := s.auth.ValidateToken(token)
 		if err != nil {
+			s.log.Warn("auth_fail", "path", r.URL.Path, "reason", "invalid token", "token_len", len(token))
 			unauthorized(w)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), userCtxKey, u)), u)
 	}
+}
+
+// authHeaderPrefix reports the scheme part of the Authorization header for
+// diagnostics (never logs the credential itself).
+func authHeaderPrefix(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if i := strings.IndexByte(h, ' '); i > 0 {
+		return h[:i]
+	}
+	if len(h) > 16 {
+		return h[:16]
+	}
+	return h
 }
 
 func bearerToken(r *http.Request) string {

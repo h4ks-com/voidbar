@@ -22,9 +22,13 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
 	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleNoContentAuthed))
+	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
+	mux.HandleFunc("GET /api/v9/users/@me/affinities/guilds", s.requireAuth(s.handleGuildAffinities))
+	mux.HandleFunc("GET /api/v9/users/@me/library", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
 	mux.HandleFunc("GET /api/v2/incidents/unresolved.json", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v2/scheduled-maintenances/active.json", s.handleEmptyArrayPublic)
+	mux.HandleFunc("GET /api/v2/scheduled-maintenances/upcoming.json", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/gateway/bot", s.handleGatewayBot)
 	mux.HandleFunc("GET /api/v9/applications/detectable", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/users/@me/connections", s.requireAuth(s.handleEmptyArray))
@@ -94,6 +98,23 @@ func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.U
 func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSettingsProtoGet answers the client's loadIfNecessary probe with an
+// empty serialized PreloadedUserSettings (all defaults).
+func (s *Server) handleSettingsProtoGet(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"settings":              "",
+		"required_data_version": nil,
+	})
+}
+
+// handleGuildAffinities mirrors the user-affinities shape for guilds.
+func (s *Server) handleGuildAffinities(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"guild_affinities":         []any{},
+		"inverse_guild_affinities": []any{},
+	})
 }
 
 // remoteAuthStub accepts the QR-login websocket and closes it immediately.
