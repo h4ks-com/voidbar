@@ -162,6 +162,16 @@ func TestNickCollisionDoesNotEatForeignMessages(t *testing.T) {
 	manager.EnsureConn("u1", "net1")
 	waitFor(t, sink, "irc connected")
 
+	// The collision rename (doesnm -> doesnm_) must be persisted into the
+	// membership so the Discord side displays the nick we actually hold.
+	mem, err := store.GetMembership("net1", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Nick != "doesnm_" {
+		t.Fatalf("membership nick after collision = %q, want doesnm_", mem.Nick)
+	}
+
 	fake, ok := <-fakeConns
 	if !ok {
 		t.Fatal("fake server saw no connection")

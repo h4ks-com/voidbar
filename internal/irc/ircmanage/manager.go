@@ -156,12 +156,45 @@ func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.CONNECTED, func(client *girc.Client, e girc.Event) {
 		channels := ""
 		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil {
+			// The server may have renamed us during registration (nick
+			// collision: doesnm -> doesnm_); 001 carries the actual nick
+			// and girc tracks it before CONNECTED fires. Persist it so the
+			// Discord side shows the nick we really hold on IRC.
+			if actual := client.GetNick(); actual != mem.Nick {
+				mem.Nick = actual
+				if err := m.store.UpsertMembership(mem); err != nil {
+					m.log.Warn("irc nick sync failed", "user", c.userID, "nick", actual, "err", err)
+				} else {
+					m.log.Info("irc nick synced", "user", c.userID, "nick", actual)
+				}
+			}
 			channels = strings.Join(mem.AutoJoin, ",")
 			for _, ch := range mem.AutoJoin {
 				client.Cmd.Join(ch)
 			}
 		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
+	})
+
+	// Later renames (ghost reclaim, manual /nick): keep the membership nick
+	// in sync so the Discord display name always matches the IRC nick.
+	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) == 0 {
+			return
+		}
+		// girc has already updated its tracked nick by the time user
+		// handlers run, so Params[0] == GetNick() only for our own renames.
+		if !strings.EqualFold(e.Params[0], client.GetNick()) {
+			return
+		}
+		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil && mem.Nick != e.Params[0] {
+			mem.Nick = e.Params[0]
+			if err := m.store.UpsertMembership(mem); err != nil {
+				m.log.Warn("irc nick sync failed", "user", c.userID, "nick", e.Params[0], "err", err)
+			} else {
+				m.log.Info("irc nick synced", "user", c.userID, "nick", e.Params[0])
+			}
+		}
 	})
 }
 

@@ -153,6 +153,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	// optimistic "sending" entry by nonce and keys the store by id. A
 	// constant or malformed id leaves the gray pending copy behind (and the
 	// first message rendered twice).
+	// Display the nick the bouncer actually holds on IRC (the membership
+	// nick is synced on connect/renames): after a collision the account
+	// username (doesnm) would otherwise hide the real nick (doesnm_).
+	authorName := u.Username
+	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
+		authorName = mem.Nick
+	}
 	msg := map[string]any{
 		"id":               s.net.NewMessageID(),
 		"channel_id":       channelID,
@@ -173,7 +180,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		"flags":            0,
 		"author": map[string]any{
 			"id":            u.ID,
-			"username":      u.Username,
+			"username":      authorName,
 			"discriminator": "0",
 			"bot":           false,
 		},
