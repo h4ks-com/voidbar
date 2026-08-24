@@ -106,6 +106,9 @@ func (s *Service) ChannelByID(id string) (*storage.Channel, error) {
 	return s.store.GetChannel(id)
 }
 
+// NewMessageID mints a snowflake id for a message.
+func (s *Service) NewMessageID() string { return s.sf.New() }
+
 // ChannelsFor resolves (registers if needed) the network's IRC channels.
 func (s *Service) ChannelsFor(netID string, ircNames []string) ([]*storage.Channel, error) {
 	return s.store.ChannelsByIRC(netID, ircNames, s.sf.New)

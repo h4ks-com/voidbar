@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/storage"
@@ -112,6 +113,7 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 
 type sendMessageRequest struct {
 	Content string `json:"content"`
+	Nonce   any    `json:"nonce"`
 }
 
 // handleGetMessages answers the channel history request. Voidbar's replay
@@ -147,15 +149,40 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":         u.ID + ":" + channelID,
-		"channel_id": channelID,
-		"content":    req.Content,
+	// The response must be a full, unique message: the client clears the
+	// optimistic "sending" entry by nonce and keys the store by id. A
+	// constant or malformed id leaves the gray pending copy behind (and the
+	// first message rendered twice).
+	msg := map[string]any{
+		"id":               s.net.NewMessageID(),
+		"channel_id":       channelID,
+		"content":          req.Content,
+		"timestamp":        time.Now().UTC().Format(time.RFC3339),
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            req.Nonce,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
 		"author": map[string]any{
 			"id":            u.ID,
 			"username":      u.Username,
 			"discriminator": "0",
 			"bot":           false,
 		},
-	})
+	}
+	// Own messages also arrive via the gateway on real Discord (keeping the
+	// user's other sessions in sync); the client dedupes by id and the
+	// nonce match clears the pending state.
+	if s.gw != nil {
+		s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
+	}
+	writeJSON(w, http.StatusOK, msg)
 }

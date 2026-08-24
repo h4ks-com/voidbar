@@ -14,6 +14,7 @@ import (
 	"github.com/h4ks-com/voidbar/internal/config"
 	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
+	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
@@ -27,14 +28,15 @@ type Server struct {
 	log  *slog.Logger
 	net  *network.Service
 	irc  *ircmanage.Manager
+	gw   *gateway.Server
 }
 
 type ctxKey struct{ name string }
 
 var userCtxKey = ctxKey{"user"}
 
-func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.Handler, net *network.Service, irc *ircmanage.Manager) http.Handler {
-	s := &Server{auth: a, cfg: cfg, log: log, net: net, irc: irc}
+func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gateway.Server, net *network.Service, irc *ircmanage.Manager) http.Handler {
+	s := &Server{auth: a, cfg: cfg, log: log, net: net, irc: irc, gw: gatewayWS}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /api/v9/gateway", s.handleGateway)

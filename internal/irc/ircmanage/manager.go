@@ -96,14 +96,15 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	m.registerHandlers(c)
 
 	go func() {
+		<-c.cancel
+		client.Close()
+	}()
+	go func() {
 		defer close(c.done)
 		m.log.Info("irc connecting", "user", userID, "network", networkID, "server", net.Host)
 		if err := client.Connect(); err != nil {
 			m.log.Warn("irc connect failed", "user", userID, "network", networkID, "err", err)
-			return
 		}
-		<-c.cancel
-		client.Close()
 	}()
 }
 
@@ -143,11 +144,12 @@ func (m *Manager) Drop(userID, networkID string) {
 
 func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.PRIVMSG, func(client *girc.Client, e girc.Event) {
-		// PRIVMSG from ourselves is echoed back by the server (echo-message);
-		// don't re-broadcast our own messages as incoming.
-		if e.Source != nil && strings.EqualFold(e.Source.Name, client.Config.Nick) {
-			return
-		}
+		// girc already filters echoes natively: events whose source equals
+		// the CURRENT nick (GetID, i.e. post-collision) are flagged Echo and
+		// never reach command handlers (girc conn.go/handler.go). Do NOT
+		// compare against Config.Nick here - that stays at the configured
+		// nick after a collision rename, which silently ate the foreign
+		// user's messages.
 		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), time.Now().UTC().Format(time.RFC3339))
 	})
 
