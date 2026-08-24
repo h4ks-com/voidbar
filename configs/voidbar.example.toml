@@ -1,0 +1,21 @@
+# Voidbar server configuration.
+# Copy to voidbar.toml and adjust. All values can be overridden with
+# VOIDBAR_* environment variables (VOIDBAR_SERVER_LISTEN, etc).
+
+[server]
+listen = "127.0.0.1:8080"
+# Public URL clients use to reach this instance. Must include scheme.
+public_url = "http://127.0.0.1:8080"
+
+[storage]
+# BadgerDB data directory.
+path = "./data"
+
+[auth]
+# open | closed | invite
+# closed: users are created via CLI (first user becomes admin automatically)
+# invite: registration requires an invite code (see: voidbar invite create)
+registration = "closed"
+# Optional explicit path for the master encryption key.
+# Default: <storage.path>/master.key (auto-generated on first run).
+# master_key_path = "./data/master.key"
