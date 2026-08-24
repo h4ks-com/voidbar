@@ -21,6 +21,7 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v9/flurgergson", s.handleNoContent)
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
+	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleNoContentAuthed))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
 	mux.HandleFunc("GET /api/v2/incidents/unresolved.json", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v2/scheduled-maintenances/active.json", s.handleEmptyArrayPublic)
@@ -86,6 +87,13 @@ func (s *Server) handleEmptyArrayPublic(w http.ResponseWriter, r *http.Request) 
 // handleNull answers 200 with JSON null - Discord's "no trial offer" reply.
 func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	writeJSON(w, http.StatusOK, nil)
+}
+
+// handleNoContentAuthed acknowledges client-driven writes (settings sync
+// etc.) without storing anything.
+func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	_, _ = io.Copy(io.Discard, r.Body)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // remoteAuthStub accepts the QR-login websocket and closes it immediately.
