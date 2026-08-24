@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/config"
+	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/discord/rest"
+	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/mirror"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
@@ -113,8 +115,11 @@ func serveCmd(args []string, log *slog.Logger) error {
 	defer store.Close()
 	sf := util.NewSnowflake(0, 0)
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
-	gw := gateway.New(authSvc, cfg, log)
-	restHandler := rest.New(authSvc, cfg, log, gw)
+	gw := gateway.New(authSvc, cfg, log, nil)
+	manager := ircmanage.New(store, gw, log)
+	netSvc := network.NewService(store, gw, sf, manager)
+	gw = gateway.New(authSvc, cfg, log, netSvc.GuildsForUser)
+	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()
 	root.Handle("/api/", restHandler)

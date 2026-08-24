@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/h4ks-com/voidbar/internal/config"
+	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
 )
@@ -27,8 +29,11 @@ func newServer(t *testing.T, registration string) http.Handler {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), registration)
-	gw := gateway.New(svc, cfg, logger)
-	return New(svc, cfg, logger, gw)
+	gw := gateway.New(svc, cfg, logger, nil)
+	manager := ircmanage.New(store, gw, logger)
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	gw = gateway.New(svc, cfg, logger, netSvc.GuildsForUser)
+	return New(svc, cfg, logger, gw, netSvc, manager)
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string, body any) (*httptest.ResponseRecorder, map[string]any) {

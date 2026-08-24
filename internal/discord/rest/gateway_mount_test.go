@@ -31,8 +31,8 @@ func TestGatewayThroughRESTRouter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw := gateway.New(svc, cfg, logger)
-	h := New(svc, cfg, logger, gw)
+	gw := gateway.New(svc, cfg, logger, nil)
+	h := New(svc, cfg, logger, gw, nil, nil)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 

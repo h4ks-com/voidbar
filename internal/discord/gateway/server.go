@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -26,18 +27,22 @@ type Server struct {
 	cfg               *config.Config
 	log               *slog.Logger
 	heartbeatInterval int
+	guildsForUser     func(userID string) ([]any, error)
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	byUser   map[string]map[string]*Session
 }
 
-func New(a *auth.Service, cfg *config.Config, log *slog.Logger) *Server {
+// New creates the gateway server. guildsForUser (optional) supplies the
+// guild list for READY; when nil, the READY carries an empty list.
+func New(a *auth.Service, cfg *config.Config, log *slog.Logger, guildsForUser func(userID string) ([]any, error)) *Server {
 	return &Server{
 		auth:              a,
 		cfg:               cfg,
 		log:               log,
 		heartbeatInterval: DefaultHeartbeatInterval,
+		guildsForUser:     guildsForUser,
 		sessions:          make(map[string]*Session),
 		byUser:            make(map[string]map[string]*Session),
 	}
@@ -254,10 +259,20 @@ func (s *Server) findSession(id string) *Session {
 }
 
 func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
+	guilds := []guildUnavailable{}
+	if s.guildsForUser != nil {
+		if raw, err := s.guildsForUser(user.ID); err == nil {
+			for _, g := range raw {
+				if m, ok := g.(map[string]any); ok {
+					guilds = append(guilds, guildUnavailable{ID: fmt.Sprintf("%v", m["id"]), Unavailable: false})
+				}
+			}
+		}
+	}
 	return &ReadyData{
 		V:                    9,
 		User:                 model.ToUser(user),
-		Guilds:               []guildUnavailable{},
+		Guilds:               guilds,
 		SessionID:            sess.ID,
 		ResumeURL:            s.cfg.GatewayWSURL(),
 		PrivateChannels:      []any{},

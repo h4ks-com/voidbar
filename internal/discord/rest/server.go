@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/config"
+	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/model"
+	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 )
 
@@ -23,14 +25,16 @@ type Server struct {
 	auth *auth.Service
 	cfg  *config.Config
 	log  *slog.Logger
+	net  *network.Service
+	irc  *ircmanage.Manager
 }
 
 type ctxKey struct{ name string }
 
 var userCtxKey = ctxKey{"user"}
 
-func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.Handler) http.Handler {
-	s := &Server{auth: a, cfg: cfg, log: log}
+func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.Handler, net *network.Service, irc *ircmanage.Manager) http.Handler {
+	s := &Server{auth: a, cfg: cfg, log: log, net: net, irc: irc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /api/v9/gateway", s.handleGateway)
@@ -49,6 +53,12 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS http.H
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	mux.HandleFunc("GET /api/v9/users/@me/guilds", s.requireAuth(s.handleUserGuilds))
 	mux.HandleFunc("GET /api/v9/users/@me/channels", s.requireAuth(s.handleUserChannels))
+	mux.HandleFunc("POST /api/v9/guilds", s.requireAuth(s.handleCreateGuild))
+	mux.HandleFunc("POST /api/v9/invites/{code}", s.requireAuth(s.handleJoinInvite))
+	mux.HandleFunc("POST /api/v9/channels/{channel}/messages", s.requireAuth(s.handleSendMessage))
+	if net != nil {
+		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))
+	}
 	s.registerStubs(mux)
 	s.registerUnknown(mux)
 	return s.withLogging(withCORS(mux))
