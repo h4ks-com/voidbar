@@ -88,6 +88,11 @@ function buildGlobalEnv(cfg) {
 function patchJS(text, cfg) {
   const host = location.host;
 
+  // Kill Sentry at the source: an empty DSN disables the SDK entirely, so it
+  // never queues or posts events (redirecting the host alone still produced
+  // noisy requests to 0.0.0.0).
+  text = text.replace(/https?:\/\/[0-9a-f]{16,}@sentry\.io\/\d+/g, '""');
+
   // Kill telemetry transport before it can phone home.
   text = text.replaceAll('sentry.io', '0.0.0.0');
   text = text.replace(/track:function\([^)]*\){/, '$&return;');
@@ -132,6 +137,9 @@ function patchCSS(text, cfg) {
 // switching any of them starts a fresh cache.
 
 const CACHE_VERSION = 'v1';
+// Bump when patchJS/patchCSS semantics change: OPFS entries hold already
+// patched content, so a new patcher must invalidate the whole cache.
+const PATCH_VERSION = 'p2';
 
 function hashString(s) {
   let h = 2166136261;
@@ -153,7 +161,7 @@ const opfs = {
     }
     try {
       const key = hashString(
-        `${CACHE_VERSION}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
+        `${CACHE_VERSION}|${PATCH_VERSION}|${state.cfg.cdn_base}|${state.cfg.build}|${location.host}`,
       );
       let dir = await navigator.storage.getDirectory();
       for (const part of ['voidbar', CACHE_VERSION, key]) {
@@ -524,19 +532,31 @@ function injectDOM(doc, styles, scripts) {
     return elem;
   };
 
-  // Inline scripts are appended and execute synchronously during injection,
-  // in document order — they define globals (window.__OVERLAY__ etc.) the
-  // app bundles rely on. External scripts are NOT injected here: they are
-  // created by executeScripts() afterwards, strictly in order, exactly once.
+  // Inline scripts adopted from the parsed document never execute (per spec,
+  // moving a script between documents does not start it), so they are
+  // re-created here and run synchronously, in document order — defining the
+  // globals (window.__OVERLAY__ etc.) the bundles rely on. External scripts
+  // are NOT injected: executeScripts() creates them strictly in order later.
+  const append = (target, node) => {
+    if (node.tagName === 'SCRIPT') {
+      if (node.hasAttribute('src')) return; // handled by executeScripts
+      const fresh = document.createElement('script');
+      for (const attr of node.attributes) {
+        if (attr.name.toLowerCase() === 'integrity') continue;
+        fresh.setAttribute(attr.name, attr.value);
+      }
+      fresh.textContent = node.textContent;
+      target.appendChild(fresh);
+      return;
+    }
+    target.appendChild(rewrite(node));
+  };
+
   for (const node of [...doc.head.childNodes]) {
-    if (node.nodeType !== Node.ELEMENT_NODE) continue;
-    if (node.tagName === 'SCRIPT' && node.hasAttribute('src')) continue;
-    document.head.appendChild(rewrite(node));
+    if (node.nodeType === Node.ELEMENT_NODE) append(document.head, node);
   }
   for (const node of [...doc.body.childNodes]) {
-    if (node.nodeType !== Node.ELEMENT_NODE) continue;
-    if (node.tagName === 'SCRIPT' && node.hasAttribute('src')) continue;
-    document.body.appendChild(rewrite(node));
+    if (node.nodeType === Node.ELEMENT_NODE) append(document.body, node);
   }
 }
 
