@@ -209,7 +209,9 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 			}
 			old.attach(ch)
 			old.replay(d.Seq, ch)
-			if _, err := old.dispatch("RESUMED", nil, false); err != nil {
+			// RESUMED with an empty object: d:null made the client's event
+			// hydrator read properties of null (_getConnectionPath/_trace).
+			if _, err := old.dispatch("RESUMED", map[string]any{"_trace": []string{"voidbar"}}, false); err != nil {
 				s.log.Error("resumed failed", "err", err)
 				return
 			}
@@ -223,8 +225,10 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				return
 			}
 		default:
-			s.closeWS(conn, CloseUnknownOpcode, "unknown opcode")
-			return
+			// Tolerate unknown opcodes (the client sends some pre-IDENTIFY
+			// frames we don't model); closing here tore down healthy sockets
+			// with 4001 loops.
+			s.log.Warn("gateway unknown opcode", "op", p.Op, "authenticated", sess != nil)
 		}
 		if sess != nil {
 			_ = conn.SetReadDeadline(time.Now().Add(time.Duration(float64(s.heartbeatInterval)*1.5) * time.Millisecond))

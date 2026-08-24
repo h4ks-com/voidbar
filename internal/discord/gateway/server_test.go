@@ -214,12 +214,19 @@ func TestDoubleIdentify(t *testing.T) {
 	expectClose(t, conn, CloseAlreadyAuthenticated)
 }
 
-func TestUnknownOpcode(t *testing.T) {
-	gw, _, _ := newTestServer(t)
+func TestUnknownOpcodeTolerated(t *testing.T) {
+	gw, token, _ := newTestServer(t)
 	conn := dial(t, startHTTP(t, gw))
 	recv(t, conn)
 	send(t, conn, map[string]any{"op": 42, "d": nil})
-	expectClose(t, conn, CloseUnknownOpcode)
+
+	// Unknown opcodes are logged, not fatal: the connection stays alive and
+	// a subsequent IDENTIFY still works.
+	send(t, conn, map[string]any{"op": OpIdentify, "d": map[string]any{"token": token}})
+	rdy := recv(t, conn)
+	if rdy["t"] != "READY" {
+		t.Fatalf("identify after unknown opcode: %v", rdy["t"])
+	}
 }
 
 func TestUnauthenticatedCommand(t *testing.T) {
@@ -268,8 +275,8 @@ func TestResumeReplaysOfflineEvents(t *testing.T) {
 	if res["t"] != "RESUMED" || res["s"].(float64) != 4 {
 		t.Fatalf("resumed: %v", res)
 	}
-	if res["d"] != nil {
-		t.Fatalf("resumed d should be null: %v", res["d"])
+	if d, ok := res["d"].(map[string]any); !ok || d["_trace"] == nil {
+		t.Fatalf("resumed d must carry _trace: %v", res["d"])
 	}
 	send(t, conn2, map[string]any{"op": OpHeartbeat, "d": nil})
 	if ack := recv(t, conn2); ack["op"].(float64) != OpHeartbeatACK {

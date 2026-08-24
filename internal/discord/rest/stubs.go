@@ -24,7 +24,7 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v9/flurgergson", s.handleNoContent)
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
-	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleNoContentAuthed))
+	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoPatch))
 	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/guilds", s.requireAuth(s.handleGuildAffinities))
 	mux.HandleFunc("GET /api/v9/users/@me/library", s.requireAuth(s.handleEmptyArray))
@@ -141,6 +141,17 @@ func (s *Server) handleStatuspageJSON(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"incidents":              []any{},
 		"scheduled_maintenances": []any{},
+	})
+}
+
+// handleSettingsProtoPatch acknowledges settings persistence. The client
+// reads body.out_of_date and body.settings from the response - a bare 204
+// made it parse null and crash.
+func (s *Server) handleSettingsProtoPatch(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	_, _ = io.Copy(io.Discard, r.Body)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"settings":    "",
+		"out_of_date": false,
 	})
 }
 
