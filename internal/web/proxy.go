@@ -81,6 +81,12 @@ func (p *cdnProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Source maps are only requested by DevTools; answering instantly avoids
+	// multi-second upstream/CDX lookups for files mirrors never store.
+	if strings.HasSuffix(rel, ".map") {
+		http.NotFound(w, r)
+		return
+	}
 	cp, err := p.cachePath(rel)
 	if err != nil {
 		http.NotFound(w, r)

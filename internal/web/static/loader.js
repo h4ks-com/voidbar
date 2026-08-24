@@ -52,21 +52,26 @@ async function fetchConfig() {
 }
 
 function buildGlobalEnv(cfg) {
-  const host = `${location.protocol}//${location.host}`;
+  // Endpoint formats MUST match the original client GLOBAL_ENV exactly:
+  // the bundles prepend location.protocol to API_ENDPOINT /
+  // MEDIA_PROXY_ENDPOINT / ASSET_ENDPOINT (expecting "//host" values) and
+  // location.protocol + "//" + CDN_HOST (expecting a bare host). Absolute
+  // URLs here produce mangled requests like GET /http:/host/api/....
+  const rel = (u) => u.replace(/^https?:/, '');
   return {
-    API_ENDPOINT: `${host}/api`,
+    API_ENDPOINT: rel(`${location.origin}/api`),
     API_VERSION: 9,
     GATEWAY_ENDPOINT: cfg.gateway,
-    WEBAPP_ENDPOINT: host,
-    CDN_HOST: host,
-    ASSET_ENDPOINT: assetBase(),
-    MEDIA_PROXY_ENDPOINT: host,
-    WIDGET_ENDPOINT: '',
+    WEBAPP_ENDPOINT: rel(location.origin),
+    CDN_HOST: location.host,
+    ASSET_ENDPOINT: rel(assetBase()),
+    MEDIA_PROXY_ENDPOINT: rel(location.origin),
+    WIDGET_ENDPOINT: rel(`${location.origin}/widget`),
     INVITE_HOST: location.host,
     GUILD_TEMPLATE_HOST: location.host,
     GIFT_CODE_HOST: `${location.host}/gifts`,
     RELEASE_CHANNEL: 'stable',
-    MARKETING_ENDPOINT: '',
+    MARKETING_ENDPOINT: rel(location.origin),
     BRAINTREE_KEY: '',
     STRIPE_KEY: '',
     NETWORKING_ENDPOINT: '',
