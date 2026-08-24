@@ -15,6 +15,7 @@ import (
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/storage"
+	"github.com/h4ks-com/voidbar/internal/util"
 )
 
 // Manager holds one connection per (user, network).
@@ -22,6 +23,7 @@ type Manager struct {
 	store *storage.Storage
 	gw    *gateway.Server
 	log   *slog.Logger
+	sf    *util.Snowflake
 
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
@@ -36,11 +38,12 @@ type conn struct {
 }
 
 // New creates the manager.
-func New(store *storage.Storage, gw *gateway.Server, log *slog.Logger) *Manager {
+func New(store *storage.Storage, gw *gateway.Server, log *slog.Logger, sf *util.Snowflake) *Manager {
 	return &Manager{
 		store: store,
 		gw:    gw,
 		log:   log,
+		sf:    sf,
 		conns: make(map[string]*conn),
 	}
 }
@@ -104,6 +107,25 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	}()
 }
 
+// EnsureAll opens upstream connections for every recorded membership.
+// Upstream connections do not survive server restarts, so this runs at boot.
+func (m *Manager) EnsureAll() {
+	nets, err := m.store.ListNetworks()
+	if err != nil {
+		m.log.Warn("ensure all: networks", "err", err)
+		return
+	}
+	for _, net := range nets {
+		members, err := m.store.ListMemberships(net.ID)
+		if err != nil {
+			continue
+		}
+		for _, mem := range members {
+			m.EnsureConn(mem.UserID, net.ID)
+		}
+	}
+}
+
 // Drop closes a connection; it will be re-created on the next EnsureConn.
 func (m *Manager) Drop(userID, networkID string) {
 	k := key(userID, networkID)
@@ -142,18 +164,47 @@ func (m *Manager) registerHandlers(c *conn) {
 }
 
 func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
-	channelID := c.networkID + ":" + target
+	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
+		// Queries (DMs) arrive as a bare nick target; DM wiring comes later.
+		m.log.Info("irc query skipped", "user", c.userID, "from", author)
+		return
+	}
+	channelID := ""
+	if ch, err := m.store.EnsureChannel(c.networkID, target, m.sf.New); err == nil {
+		channelID = ch.ID
+	} else {
+		m.log.Warn("irc channel resolve failed", "err", err, "target", target)
+		return
+	}
+	// Snowflake message id is mandatory: the client's message store drops
+	// MESSAGE_CREATE payloads without one.
+	msgID := m.sf.New()
 	payload := map[string]any{
-		"channel_id": channelID,
-		"content":    content,
+		"id":               msgID,
+		"channel_id":       channelID,
+		"content":          content,
+		"timestamp":        ts,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nil,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
 		"author": map[string]any{
 			"id":            "irc:" + author,
 			"username":      author,
 			"discriminator": "0",
 			"bot":           false,
 		},
-		"timestamp": ts,
 	}
+	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 }
 

@@ -7,7 +7,6 @@ package network
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
@@ -102,6 +101,16 @@ func (s *Service) MembershipFor(userID, netID string) (*storage.Membership, erro
 	return s.store.GetMembership(netID, userID)
 }
 
+// ChannelByID resolves a snowflake channel id to its registry record.
+func (s *Service) ChannelByID(id string) (*storage.Channel, error) {
+	return s.store.GetChannel(id)
+}
+
+// ChannelsFor resolves (registers if needed) the network's IRC channels.
+func (s *Service) ChannelsFor(netID string, ircNames []string) ([]*storage.Channel, error) {
+	return s.store.ChannelsByIRC(netID, ircNames, s.sf.New)
+}
+
 // GuildCreatePayloads returns full GUILD_CREATE payloads for every network
 // the user belongs to, dispatched by the gateway right after READY. Channels
 // come from the member's auto-join list (live IRC channel state follows in
@@ -137,12 +146,18 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		all = nil
 	}
 
-	channels := make([]any, 0, len(m.AutoJoin))
-	for i, ch := range m.AutoJoin {
+	// Channels carry URL-safe snowflake ids resolved through the channel
+	// registry (the IRC name itself would break client routing).
+	chans, err := s.store.ChannelsByIRC(net.ID, m.AutoJoin, s.sf.New)
+	if err != nil {
+		chans = nil
+	}
+	channels := make([]any, 0, len(chans))
+	for i, ch := range chans {
 		channels = append(channels, map[string]any{
-			"id":                    net.ID + ":" + ch,
+			"id":                    ch.ID,
 			"guild_id":              net.ID,
-			"name":                  strings.TrimPrefix(ch, "#"),
+			"name":                  ch.Name,
 			"type":                  0,
 			"position":              i,
 			"topic":                 nil,

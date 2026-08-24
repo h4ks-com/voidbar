@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -95,11 +96,22 @@ func (p *cdnProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Local mirror directory (as produced by `voidbar mirror`): fastest
 	//    path, and the only one that works fully offline.
+	//    Wayback archives webpack chunks under bare content-hash names
+	//    ({hash}.js) while the client requests id-prefixed names
+	//    ({chunkId}.{hash}.js) - on a miss, retry with the id stripped.
 	if p.mirrorDir != "" {
 		if mp, ok := p.mirrorPath(rel); ok {
 			if b, err := os.ReadFile(mp); err == nil {
 				p.serve(w, r, rel, b)
 				return
+			}
+		}
+		if stripped, ok := stripChunkID(rel); ok {
+			if mp, ok2 := p.mirrorPath(stripped); ok2 {
+				if b, err := os.ReadFile(mp); err == nil {
+					p.serve(w, r, rel, b)
+					return
+				}
 			}
 		}
 	}
@@ -134,6 +146,19 @@ func (p *cdnProxy) mirrorPath(rel string) (string, bool) {
 		return "", false
 	}
 	return local, true
+}
+
+// chunkIDRe matches webpack id-prefixed asset names, e.g.
+// assets/906.070bd796afd556fd6d8e.js -> assets/070bd796afd556fd6d8e.js.
+// Works with and without a leading path component before "assets/".
+var chunkIDRe = regexp.MustCompile(`^((?:.*/)?assets/)\d+\.([0-9a-zA-Z]{16,}\.(?:js|css))$`)
+
+func stripChunkID(rel string) (string, bool) {
+	m := chunkIDRe.FindStringSubmatch(rel)
+	if m == nil {
+		return "", false
+	}
+	return m[1] + m[2], true
 }
 
 // fetchUpstream tries, in order: the plain path, the path without the

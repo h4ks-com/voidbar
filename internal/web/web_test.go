@@ -134,7 +134,12 @@ func TestProxyPrefersMirrorDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(mirror, "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Wayback archives chunks under bare hash names; the client asks for
+	// id-prefixed names.
 	if err := os.WriteFile(filepath.Join(mirror, "assets", "app.js"), []byte("from-mirror"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "assets", "070bd796afd556fd6d8e.js"), []byte("chunk-content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,10 +171,21 @@ func TestProxyPrefersMirrorDir(t *testing.T) {
 		t.Fatalf("upstream hit %d times, expected 0 (mirror_dir must win)", hits.Load())
 	}
 
+	// Id-prefixed request resolves to the bare-hash file from the mirror.
+	res, err := http.Get(srv.URL + ProxyBasePath + "/assets/906.070bd796afd556fd6d8e.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || string(body) != "chunk-content" {
+		t.Fatalf("id-strip fallback: %d %q", res.StatusCode, body)
+	}
+
 	// A file missing from the mirror 404s fast: with a local mirror_dir the
 	// proxy never falls back to the network (the mirror already encodes
 	// whatever the discovery process could find).
-	res, err := http.Get(srv.URL + ProxyBasePath + "/assets/other.js")
+	res, err = http.Get(srv.URL + ProxyBasePath + "/assets/other.js")
 	if err != nil {
 		t.Fatal(err)
 	}

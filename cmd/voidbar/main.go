@@ -116,9 +116,15 @@ func serveCmd(args []string, log *slog.Logger) error {
 	sf := util.NewSnowflake(0, 0)
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
 	gw := gateway.New(authSvc, cfg, log, nil, nil)
-	manager := ircmanage.New(store, gw, log)
+	manager := ircmanage.New(store, gw, log, sf)
 	netSvc := network.NewService(store, gw, sf, manager)
-	gw = gateway.New(authSvc, cfg, log, func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil }, netSvc.GuildCreateForUser)
+	manager.EnsureAll()
+	// A single gateway instance: the manager dispatches IRC events into it,
+	// and the network service supplies the READY/GUILD_CREATE payloads.
+	gw.SetGuildProviders(
+		func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil },
+		netSvc.GuildCreateForUser,
+	)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

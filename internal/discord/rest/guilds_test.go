@@ -89,9 +89,12 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	gw := gateway.New(svc, cfg, logger, nil, nil)
-	manager := ircmanage.New(store, gw, logger)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
 	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
-	gw = gateway.New(svc, cfg, logger, func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil }, netSvc.GuildCreateForUser)
+	gw.SetGuildProviders(
+		func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil },
+		netSvc.GuildCreateForUser,
+	)
 
 	// Join a network first (no real IRC connection happens - the host has no
 	// listener; EnsureConn just spawns a goroutine that fails to connect).

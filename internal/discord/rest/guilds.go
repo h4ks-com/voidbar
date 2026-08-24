@@ -69,7 +69,7 @@ func (s *Server) handleJoinInvite(w http.ResponseWriter, r *http.Request, u *sto
 }
 
 // handleGuildDetail answers GET /guilds/:id with the channel list assembled
-// from the member's auto-join channels and live IRC state.
+// from the channel registry (auto-join channels of the member).
 func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	guildID := r.PathValue("guild")
 	if s.net == nil {
@@ -86,12 +86,17 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusNotFound, "unknown guild")
 		return
 	}
-	channels := make([]any, 0, len(mem.AutoJoin))
-	for i, ch := range mem.AutoJoin {
+	chans, err := s.net.ChannelsFor(guildID, mem.AutoJoin)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to list channels")
+		return
+	}
+	channels := make([]any, 0, len(chans))
+	for i, ch := range chans {
 		channels = append(channels, map[string]any{
-			"id":       guildID + ":" + ch,
+			"id":       ch.ID,
 			"guild_id": guildID,
-			"name":     strings.TrimPrefix(ch, "#"),
+			"name":     ch.Name,
 			"type":     0,
 			"position": i,
 			"topic":    nil,
@@ -101,7 +106,7 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 		"id":           guildID,
 		"name":         net.Name,
 		"channels":     channels,
-		"member_count": len(mem.AutoJoin),
+		"member_count": len(channels),
 	})
 }
 
@@ -116,8 +121,8 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	writeJSON(w, http.StatusOK, []any{})
 }
 
-// handleSendMessage relays a Discord message to IRC. The channel id is
-// "<networkID>:<irc-channel>".
+// handleSendMessage relays a Discord message to IRC. The channel id is a
+// snowflake resolved through the channel registry.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	channelID := r.PathValue("channel")
 	var req sendMessageRequest
@@ -129,12 +134,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusBadRequest, "empty message")
 		return
 	}
-	netID, ircChannel, ok := strings.Cut(channelID, ":")
-	if !ok || s.irc == nil {
-		jsonError(w, http.StatusBadRequest, "invalid channel")
+	if s.net == nil || s.irc == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
 		return
 	}
-	if err := s.irc.SendChannel(u.ID, netID, ircChannel, req.Content); err != nil {
+	ch, err := s.net.ChannelByID(channelID)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "unknown channel")
+		return
+	}
+	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, req.Content); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}

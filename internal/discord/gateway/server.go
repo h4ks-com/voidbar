@@ -34,6 +34,14 @@ type Server struct {
 	byUser   map[string]map[string]*Session
 }
 
+// SetGuildProviders installs the READY/GUILD_CREATE hooks after
+// construction (the network service needs the gateway instance first, so
+// the hooks cannot be passed to New in the wiring order main uses).
+func (s *Server) SetGuildProviders(guildsForUser func(userID string) ([]any, error), guildCreateForUser func(userID string) []any) {
+	s.guildsForUser = guildsForUser
+	s.guildCreateForUser = guildCreateForUser
+}
+
 // New creates the gateway server. guildsForUser (optional) supplies the
 // guild stubs for READY; guildCreateForUser (optional) supplies full
 // GUILD_CREATE payloads dispatched right after READY, which is what fills

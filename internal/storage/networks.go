@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -22,6 +23,94 @@ type Network struct {
 	Password  string    `json:"password,omitempty"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Channel is a Discord-facing channel backed by an IRC channel. IDs are
+// snowflakes: they end up in URLs (/channels/<guild>/<channel>), so the
+// IRC name itself (with its # and friends) must never appear there.
+type Channel struct {
+	ID        string    `json:"id"`
+	NetworkID string    `json:"network_id"`
+	IRCName   string    `json:"irc_name"` // "#go"
+	Name      string    `json:"name"`     // "go"
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func chanKey(id string) []byte { return []byte("chan/" + id) }
+func chanNetKey(netID, ircName string) []byte {
+	return []byte("channet/" + netID + "/" + ircName)
+}
+
+// EnsureChannel registers the network's IRC channel and returns its stable,
+// URL-safe snowflake id. Idempotent by (network, irc name).
+func (s *Storage) EnsureChannel(netID, ircName string, newID func() string) (*Channel, error) {
+	var ch Channel
+	err := s.db.Update(func(txn *badger.Txn) error {
+		idx, err := txn.Get(chanNetKey(netID, ircName))
+		if err == nil {
+			return idx.Value(func(id []byte) error {
+				item, err := txn.Get(chanKey(string(id)))
+				if err != nil {
+					return err
+				}
+				return item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) })
+			})
+		}
+		if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		ch = Channel{
+			ID:        newID(),
+			NetworkID: netID,
+			IRCName:   ircName,
+			Name:      strings.TrimPrefix(ircName, "#"),
+			CreatedAt: time.Now().UTC(),
+		}
+		b, err := json.Marshal(ch)
+		if err != nil {
+			return err
+		}
+		if err := txn.Set(chanKey(ch.ID), b); err != nil {
+			return err
+		}
+		return txn.Set(chanNetKey(netID, ircName), []byte(ch.ID))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
+
+func (s *Storage) GetChannel(id string) (*Channel, error) {
+	var ch Channel
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(chanKey(id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) })
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
+
+// ChannelsByIRC resolves channel ids for a network's IRC channel names,
+// registering any that are missing. Returns channels in the input order.
+func (s *Storage) ChannelsByIRC(netID string, ircNames []string, newID func() string) ([]*Channel, error) {
+	out := make([]*Channel, 0, len(ircNames))
+	for _, name := range ircNames {
+		ch, err := s.EnsureChannel(netID, name, newID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, nil
 }
 
 // Membership ties a user to a network with their per-connection identity.
