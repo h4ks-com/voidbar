@@ -148,14 +148,14 @@ func bearerToken(r *http.Request) string {
 		return ""
 	}
 	parts := strings.SplitN(h, " ", 2)
-	if len(parts) != 2 {
-		return ""
+	if len(parts) == 2 {
+		switch parts[0] {
+		case "Bearer", "Bot":
+			return strings.TrimSpace(parts[1])
+		}
 	}
-	switch parts[0] {
-	case "Bearer", "Bot":
-		return strings.TrimSpace(parts[1])
-	}
-	return ""
+	// Discord user clients send the raw token with no auth scheme.
+	return strings.TrimSpace(h)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

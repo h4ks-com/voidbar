@@ -128,13 +128,16 @@ func TestStubStatuspageAndTrialOffer(t *testing.T) {
 	for _, path := range []string{
 		"/api/v2/incidents/unresolved.json",
 		"/api/v2/scheduled-maintenances/active.json",
+		"/api/v2/scheduled-maintenances/upcoming.json",
 	} {
-		rec, out := doAny(t, h, "GET", path, "", nil)
+		rec, out := do(t, h, "GET", path, "", nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: %d", path, rec.Code)
 		}
-		if arr, ok := out.([]any); !ok || len(arr) != 0 {
-			t.Fatalf("%s: %v", path, out)
+		for _, key := range []string{"incidents", "scheduled_maintenances"} {
+			if arr, ok := out[key].([]any); !ok || len(arr) != 0 {
+				t.Fatalf("%s: %s must be an empty array, got %v", path, key, out[key])
+			}
 		}
 	}
 

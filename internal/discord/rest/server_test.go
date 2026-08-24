@@ -162,6 +162,31 @@ func TestRegisterLoginMeFlow(t *testing.T) {
 	}
 }
 
+func TestRawTokenAuthorization(t *testing.T) {
+	h := newServer(t, "open")
+	token := registerAndLogin(t, h)
+
+	// Discord user clients send the raw token with no auth scheme.
+	req := httptest.NewRequest("GET", "/api/v9/users/@me", nil)
+	req.Header.Set("Authorization", token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("raw token: %d", rec.Code)
+	}
+
+	// Prefixed forms keep working.
+	for _, form := range []string{"Bearer " + token, "Bot " + token} {
+		req := httptest.NewRequest("GET", "/api/v9/users/@me", nil)
+		req.Header.Set("Authorization", form)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%q: %d", form, rec.Code)
+		}
+	}
+}
+
 func TestUserMetadataEndpoints(t *testing.T) {
 	h := newServer(t, "open")
 	token := registerAndLogin(t, h)

@@ -26,9 +26,9 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/guilds", s.requireAuth(s.handleGuildAffinities))
 	mux.HandleFunc("GET /api/v9/users/@me/library", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
-	mux.HandleFunc("GET /api/v2/incidents/unresolved.json", s.handleEmptyArrayPublic)
-	mux.HandleFunc("GET /api/v2/scheduled-maintenances/active.json", s.handleEmptyArrayPublic)
-	mux.HandleFunc("GET /api/v2/scheduled-maintenances/upcoming.json", s.handleEmptyArrayPublic)
+	mux.HandleFunc("GET /api/v2/incidents/unresolved.json", s.handleStatuspageJSON)
+	mux.HandleFunc("GET /api/v2/scheduled-maintenances/active.json", s.handleStatuspageJSON)
+	mux.HandleFunc("GET /api/v2/scheduled-maintenances/upcoming.json", s.handleStatuspageJSON)
 	mux.HandleFunc("GET /api/v9/gateway/bot", s.handleGatewayBot)
 	mux.HandleFunc("GET /api/v9/applications/detectable", s.handleEmptyArrayPublic)
 	mux.HandleFunc("GET /api/v9/users/@me/connections", s.requireAuth(s.handleEmptyArray))
@@ -98,6 +98,16 @@ func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.U
 func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleStatuspageJSON answers statuspage.io-shaped endpoints. The client
+// destructures the named array fields, so both keys must always be present
+// (a bare [] crashes its destructuring).
+func (s *Server) handleStatuspageJSON(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"incidents":              []any{},
+		"scheduled_maintenances": []any{},
+	})
 }
 
 // handleSettingsProtoGet answers the client's loadIfNecessary probe with an
