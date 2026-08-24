@@ -1,8 +1,8 @@
 // Voidbar client loader.
 //
 // Downloads a frozen Discord web client build from a configured CDN mirror
-// (e.g. archive.org), patches it in-memory so every API / gateway / asset
-// request is redirected to this Voidbar instance, and boots it.
+// (e.g. an archive.org item), patches it in-memory so every API / gateway /
+// asset request is redirected to this Voidbar instance, and boots it.
 //
 // Voidbar itself never stores or serves Discord assets; only this original
 // loader code is served by the instance.
@@ -91,7 +91,10 @@ function patchJS(text, cfg) {
   // Kill telemetry transport before it can phone home.
   text = text.replaceAll('sentry.io', '0.0.0.0');
   text = text.replace(/track:function\([^)]*\){/, '$&return;');
-  text = text.replace(/t\.analyticsTrackingStoreMaker=function\(e\){/, 't.analyticsTrackingStoreMaker=function(e){return;');
+  text = text.replace(
+    /t\.analyticsTrackingStoreMaker=function\(e\){/,
+    't.analyticsTrackingStoreMaker=function(e){return;',
+  );
 
   // Redirect every hardcoded Discord origin to this instance. The client
   // should prefer GLOBAL_ENV, but plenty of code paths still use literals.
@@ -203,104 +206,261 @@ const opfs = {
 };
 
 // ---------------------------------------------------------------------------
-// Resource loading
+// Fetching
+
+const FETCH_TIMEOUT_MS = 60_000;
+const MAX_RETRIES = 5;
+const POOL_SIZE = 4;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchRaw(url, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Fetch with retry & exponential backoff. Mirrors rate-limit (429) and shed
+// load (5xx, refused streams), so patience is required on the first boot.
+// Returns the Response: 404 is returned as-is, everything else is retried.
+async function fetchCDN(path, opts = {}) {
+  const url = `${state.cfg.cdn_base}${path}`;
+  let backoff = 1000;
+  let lastError = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await sleep(backoff + Math.floor(Math.random() * 400));
+      backoff = Math.min(backoff * 2, 30_000);
+    }
+    let res;
+    try {
+      res = await fetchRaw(url, opts);
+    } catch (e) {
+      lastError = e;
+      continue; // network error / timeout / refused stream: retry
+    }
+    if (res.status === 404 && path.startsWith('/assets/')) {
+      // Mirrors use slightly different layouts; retry without the prefix.
+      return fetchRaw(`${state.cfg.cdn_base}${path.slice('/assets/'.length)}`, opts);
+    }
+    if (res.status === 429 || res.status >= 500) {
+      const retryAfter = parseInt(res.headers.get('retry-after') || '', 10);
+      await sleep(Number.isFinite(retryAfter) ? Math.min(retryAfter * 1000, 30_000) : backoff);
+      lastError = new Error(`HTTP ${res.status}`);
+      continue;
+    }
+    return res;
+  }
+  throw lastError || new Error(`fetch failed: ${path}`);
+}
+
+// ---------------------------------------------------------------------------
+// Download scheduler
+//
+// A single work queue drained by a small worker pool. Script downloads
+// enqueue webpack chunk groups they discover (chunks of chunks), so the
+// queue stays bounded and the mirror sees at most POOL_SIZE concurrent
+// requests.
+
+const CHUNK_MAP_RE = /[{,]\s*(?:"|')?(\d+)(?:"|')?\s*:\s*(?:"|')([0-9a-zA-Z._-]{10,})(?:"|')/g;
+const CSS_URL_RE = /url\((['"]?)(\/assets\/[^)'"]+)\1\)/g;
 
 const cache = new Map(); // normalized path -> { url, blob }
+const scheduler = {
+  queue: [],
+  inFlight: 0,
+  seen: new Set(),
+  missing: new Set(),
+  doneCount: 0,
+
+  get total() {
+    return this.doneCount + this.queue.length + this.inFlight;
+  },
+
+  pump() {
+    while (this.inFlight < POOL_SIZE && this.queue.length > 0) {
+      const task = this.queue.shift();
+      this.inFlight++;
+      task()
+        .catch((e) => log('task failed:', e.message))
+        .finally(() => {
+          this.inFlight--;
+          this.doneCount++;
+          setStatus(`DOWNLOADING CLIENT (${this.doneCount}/${this.total})`);
+          setProgress(this.doneCount, this.total);
+          this.pump();
+        });
+    }
+  },
+
+  enqueue(task) {
+    this.queue.push(task);
+    this.pump();
+  },
+
+  idle() {
+    if (this.queue.length === 0 && this.inFlight === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.queue.length === 0 && this.inFlight === 0) resolve();
+        else setTimeout(check, 100);
+      };
+      check();
+    });
+  },
+};
 
 function normalizePath(path) {
   if (path.startsWith('http')) return new URL(path).pathname;
   return path.startsWith('/') ? path : `/assets/${path}`;
 }
 
-async function fetchCDN(path, opts) {
-  const url = `${state.cfg.cdn_base}${path}`;
-  const res = await fetch(url, opts);
-  if (res.status === 404 && path.startsWith('/assets/')) {
-    // Mirrors use slightly different layouts; retry without the prefix.
-    return fetch(`${state.cfg.cdn_base}${path.slice('/assets/'.length)}`, opts);
-  }
-  return res;
-}
-
-async function loadResource(path, type) {
-  const normalized = normalizePath(path);
-  if (cache.has(normalized)) return cache.get(normalized);
-
-  let body = await opfs.read(normalized);
-
-  if (body == null) {
-    const res = await fetchCDN(normalized);
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${normalized}`);
-
-    const content = await res.text();
-    body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
-
-    if (type === 'script') {
-      await preloadChunks(content).catch((e) => log('chunk preload failed:', e));
-    }
-    opfs.write(normalized, body); // fire-and-forget persistence
-  }
-
-  const sourceURL = `${location.protocol}//${location.host}${normalized}`;
-  const withSourceURL =
-    type === 'script'
-      ? `${body}\n//# sourceURL=${sourceURL}`
-      : `${body}\n/*# sourceURL=${sourceURL} */`;
-
-  const blob = URL.createObjectURL(
-    new Blob([withSourceURL], { type: type === 'script' ? 'application/javascript' : 'text/css' }),
-  );
-
-  const entry = { url: normalized, blob };
-  cache.set(normalized, entry);
-  return entry;
-}
-
-// ---------------------------------------------------------------------------
-// Webpack chunk discovery and preloading
-
-const CHUNK_MAP_RE = /[{,]\s*(?:"|')?(\d+)(?:"|')?\s*:\s*(?:"|')([0-9a-zA-Z._-]{10,})(?:"|')/g;
-
-function extractChunkVariants(content) {
+function chunkVariants(content) {
   const byHash = new Map();
   let match;
   while ((match = CHUNK_MAP_RE.exec(content)) !== null) {
     const hash = match[2];
     if (!byHash.has(hash)) {
-      byHash.set(hash, [`/assets/${match[1]}.${hash}.js`, `/assets/${hash}.js`, `/assets/${hash}.css`]);
+      byHash.set(hash, [
+        `/assets/${match[1]}.${hash}.js`,
+        `/assets/${hash}.js`,
+        `/assets/${hash}.css`,
+      ]);
     }
   }
   return byHash;
 }
 
-async function resolveChunk(variants) {
-  for (const path of variants) {
-    try {
-      const res = await fetchCDN(path, { method: 'HEAD' });
-      if (res.ok) return path;
-    } catch {
-      // try next variant
-    }
+function assetURLs(content) {
+  const out = new Set();
+  let match;
+  while ((match = CSS_URL_RE.exec(content)) !== null) {
+    out.add(match[2]);
   }
-  return null;
+  return out;
 }
 
-async function preloadChunks(content) {
-  const variants = extractChunkVariants(content);
-  if (variants.size === 0) return;
+function makeBlob(normalized, body, type) {
+  const sourceURL = `${location.protocol}//${location.host}${normalized}`;
+  const withSourceURL =
+    type === 'script'
+      ? `${body}\n//# sourceURL=${sourceURL}`
+      : `${body}\n/*# sourceURL=${sourceURL} */`;
+  const blob = URL.createObjectURL(
+    new Blob([withSourceURL], { type: type === 'script' ? 'application/javascript' : 'text/css' }),
+  );
+  const entry = { url: normalized, blob };
+  cache.set(normalized, entry);
+  return entry;
+}
 
-  log(`discovered ${variants.size} chunk candidates`);
-  setStatus(`RESOLVING CHUNKS (0/${variants.size})`);
-
-  const jobs = [...variants.entries()].map(async ([, candidate], index) => {
-    const path = await resolveChunk(candidate);
-    setStatus(`RESOLVING CHUNKS (${index + 1}/${variants.size})`);
-    if (!path) return;
-    if (cache.has(normalizePath(path))) return;
-    await loadResource(path, path.endsWith('.css') ? 'style' : 'script').catch(() => {});
+// Download one file (with retry), patch it, cache the blob, persist to OPFS,
+// and enqueue discovered chunks/assets. Used by the boot-time pool.
+function enqueueFile(path, type) {
+  const normalized = normalizePath(path);
+  if (scheduler.seen.has(normalized)) return;
+  scheduler.seen.add(normalized);
+  scheduler.enqueue(async () => {
+    let body = await opfs.read(normalized);
+    let content = null;
+    if (body == null) {
+      const res = await fetchCDN(normalized);
+      if (!res.ok) {
+        scheduler.missing.add(normalized);
+        log('missing:', normalized);
+        return;
+      }
+      content = await res.text();
+      body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
+      opfs.write(normalized, body); // fire-and-forget persistence
+    }
+    makeBlob(normalized, body, type);
+    if (content != null && type === 'script') {
+      for (const [hash, variants] of chunkVariants(content)) enqueueChunk(hash, variants);
+    }
+    if (content != null) {
+      for (const asset of assetURLs(content)) enqueueAsset(asset);
+    }
   });
+}
 
-  await Promise.all(jobs);
+function enqueueAsset(path) {
+  const normalized = normalizePath(path);
+  if (scheduler.seen.has(normalized)) return;
+  scheduler.seen.add(normalized);
+  scheduler.enqueue(async () => {
+    const res = await fetchCDN(normalized);
+    if (!res.ok) {
+      scheduler.missing.add(normalized);
+      return;
+    }
+    await res.arrayBuffer(); // warm browser HTTP cache; fetched by CSS at runtime
+  });
+}
+
+// Webpack chunk: candidates are tried in order with GET (no HEAD round-trip;
+// mirrors rate-limit hard). First non-404 wins.
+function enqueueChunk(hash, variants) {
+  const key = `chunk:${hash}`;
+  if (scheduler.seen.has(key)) return;
+  scheduler.seen.add(key);
+  scheduler.enqueue(async () => {
+    for (const candidate of variants) {
+      const normalized = normalizePath(candidate);
+      if (cache.has(normalized)) return;
+
+      let body = await opfs.read(normalized);
+      let content = null;
+      if (body == null) {
+        const res = await fetchCDN(normalized);
+        if (res.status === 404) continue; // try next variant
+        if (!res.ok) {
+          log('chunk fetch failed:', normalized, res.status);
+          return;
+        }
+        content = await res.text();
+        const type = normalized.endsWith('.css') ? 'style' : 'script';
+        body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
+        opfs.write(normalized, body);
+        makeBlob(normalized, body, type);
+      } else {
+        makeBlob(normalized, body, normalized.endsWith('.css') ? 'style' : 'script');
+      }
+      if (content != null && !normalized.endsWith('.css')) {
+        for (const [h, v] of chunkVariants(content)) enqueueChunk(h, v);
+        for (const asset of assetURLs(content)) enqueueAsset(asset);
+      }
+      return;
+    }
+    log('chunk not found on mirror:', hash);
+  });
+}
+
+// Load a resource outside of boot (dynamic chunk interception). Uses the
+// same retry logic; OPFS and blob caches are consulted first.
+async function loadResource(path, type) {
+  const normalized = normalizePath(path);
+  if (cache.has(normalized)) return cache.get(normalized);
+  if (scheduler.missing.has(normalized)) throw new Error(`known missing: ${normalized}`);
+
+  let body = await opfs.read(normalized);
+  if (body == null) {
+    const res = await fetchCDN(normalized);
+    if (!res.ok) {
+      if (res.status === 404) scheduler.missing.add(normalized);
+      throw new Error(`HTTP ${res.status} for ${normalized}`);
+    }
+    const content = await res.text();
+    body = type === 'script' ? patchJS(content, state.cfg) : patchCSS(content, state.cfg);
+    opfs.write(normalized, body);
+  }
+  return makeBlob(normalized, body, type);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,59 +476,38 @@ function parseAppHtml(html) {
 
 function collectResources(head, body) {
   const combined = head.innerHTML + body.innerHTML;
-  const urls = (re) =>
-    [...combined.matchAll(re)]
-      .map((m) => m[1])
-      .filter((u) => u && u.startsWith('/') && !u.startsWith('/cdn-cgi/'));
-
-  const links = [...combined.matchAll(/<link[^>]+>/g)].map((m) => m[0]);
   const styles = [];
   const scripts = [];
-  for (const tag of links) {
-    const href = tag.match(/href="([^"]+)"/)?.[1];
-    if (!href || !href.startsWith('/')) continue;
-    if (/rel="[^"]*stylesheet[^"]*"/.test(tag)) styles.push(href);
-    if (/as="script"/.test(tag)) scripts.push(href);
-  }
-  // De-duplicate while keeping order.
   const seen = new Set();
-  const dedupe = (arr) => arr.filter((u) => !seen.has(u) && seen.add(u));
-
-  styles.push(...urls(/<link[^>]+rel="[^"]*stylesheet[^"]*"[^>]*>/g).filter((u) => !u.endsWith('.ico')));
-  scripts.push(...urls(/<script[^>]+src="([^"]+)"[^>]*>/g));
-
-  return { styles: dedupe(styles), scripts: dedupe(scripts) };
-}
-
-async function loadAll(resources) {
-  const total = resources.styles.length + resources.scripts.length;
-  let done = 0;
-  setProgress(0, total);
-  setStatus(`DOWNLOADING CLIENT (0/${total})`);
-
-  const tryLoad = async (path, type) => {
-    try {
-      return await loadResource(path, type);
-    } catch (e) {
-      // Missing optional resources (analytics, some chunks) must not kill boot.
-      log('skipping resource:', path, e.message);
-      return null;
-    } finally {
-      done++;
-      setProgress(done, total);
-      setStatus(`DOWNLOADING CLIENT (${done}/${total})`);
+  const add = (list, v) => {
+    if (v && v.startsWith('/') && !v.startsWith('/cdn-cgi/') && !seen.has(v)) {
+      seen.add(v);
+      list.push(v);
     }
   };
 
-  const styles = (
-    await Promise.all(resources.styles.map((path) => tryLoad(path, 'style')))
-  ).filter(Boolean);
-
-  const scripts = [];
-  for (const path of resources.scripts) {
-    const entry = await tryLoad(path, 'script');
-    if (entry) scripts.push(entry);
+  for (const tag of combined.match(/<link[^>]+>/g) || []) {
+    const href = tag.match(/href="([^"]+)"/)?.[1];
+    if (/rel="[^"]*stylesheet[^"]*"/.test(tag)) add(styles, href);
+    if (/as="script"/.test(tag)) add(scripts, href);
   }
+  for (const m of combined.matchAll(/<script[^>]+src="([^"]+)"[^>]*>/g)) {
+    add(scripts, m[1]);
+  }
+  return { styles, scripts };
+}
+
+async function loadAll(resources) {
+  for (const path of resources.styles) enqueueFile(path, 'style');
+  for (const path of resources.scripts) enqueueFile(path, 'script');
+  await scheduler.idle();
+
+  const styles = resources.styles
+    .map((p) => cache.get(normalizePath(p)))
+    .filter(Boolean);
+  const scripts = resources.scripts
+    .map((p) => cache.get(normalizePath(p)))
+    .filter(Boolean);
   if (scripts.length === 0) throw new Error('all client scripts failed to load');
   return { styles, scripts };
 }
@@ -400,7 +539,9 @@ function injectDOM(doc, styles, scripts) {
 
 async function executeScripts() {
   // Re-create every blob script element so they execute in order, exactly once.
-  const elements = [...document.getElementsByTagName('script')].filter((s) => s.src.startsWith('blob:'));
+  const elements = [...document.getElementsByTagName('script')].filter((s) =>
+    s.src.startsWith('blob:'),
+  );
   for (const elem of elements) {
     await new Promise((resolve, reject) => {
       const fresh = document.createElement('script');
@@ -504,9 +645,7 @@ async function boot() {
   const htmlPath = `/${state.cfg.build ? state.cfg.build + '/' : ''}${state.cfg.html || 'app.html'}`;
   const res = await fetchCDN(htmlPath);
   if (!res.ok)
-    throw new Error(
-      `client HTML HTTP ${res.status} for ${state.cfg.cdn_base}${htmlPath}`,
-    );
+    throw new Error(`client HTML HTTP ${res.status} for ${state.cfg.cdn_base}${htmlPath}`);
 
   const doc = parseAppHtml(await res.text());
   const resources = collectResources(doc.head, doc.body);

@@ -18,6 +18,7 @@ import (
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/discord/rest"
+	"github.com/h4ks-com/voidbar/internal/mirror"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
 	"github.com/h4ks-com/voidbar/internal/web"
@@ -37,6 +38,8 @@ func main() {
 		err = userCmd(os.Args[2:])
 	case "invite":
 		err = inviteCmd(os.Args[2:])
+	case "mirror":
+		err = mirrorCmd(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -59,7 +62,35 @@ Usage:
   voidbar user   list [--config <path>]
   voidbar invite create [--uses N] [--by <user-id>] [--config <path>]
   voidbar invite list  [--config <path>]
+  voidbar mirror --from <upstream-url> --out <dir> [--html app] [--concurrency 4]
+
+mirror downloads a frozen client build from an upstream mirror (e.g. the
+Wayback Machine) into a local directory for one-time upload to a CORS-enabled
+mirror such as an archive.org item.
 `)
+}
+
+func mirrorCmd(args []string) error {
+	fs := flag.NewFlagSet("mirror", flag.ContinueOnError)
+	from := fs.String("from", "", "upstream base URL, e.g. https://web.archive.org/web/<ts>id_/https://discord.com")
+	out := fs.String("out", "", "output directory (created if missing; resumable)")
+	html := fs.String("html", "app", "entry path relative to --from")
+	concurrency := fs.Int("concurrency", 4, "parallel downloads")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" || *out == "" {
+		return errors.New("--from and --out are required")
+	}
+	return mirror.Run(mirror.Options{
+		Base:        *from,
+		HTML:        *html,
+		Out:         *out,
+		Concurrency: *concurrency,
+		Log: func(format string, args ...any) {
+			fmt.Printf("mirror: "+format+"\n", args...)
+		},
+	})
 }
 
 func serveCmd(args []string, log *slog.Logger) error {
