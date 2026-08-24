@@ -303,7 +303,7 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			Partial: false,
 			Version: 0,
 		},
-		UserSettingsProto: &UserSettingsProto{},
+		UserSettingsProto: "",
 		ConnectedAccounts: []any{},
 		GuildJoinRequests: []any{},
 		Consents:          map[string]any{},

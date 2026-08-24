@@ -41,29 +41,33 @@ type guildUnavailable struct {
 }
 
 type ReadyData struct {
-	V                    int                `json:"v"`
-	User                 *model.User        `json:"user"`
-	Guilds               []any              `json:"guilds"`
-	SessionID            string             `json:"session_id"`
-	ResumeURL            string             `json:"resume_url"`
-	ResumeGatewayURL     string             `json:"resume_gateway_url"`
-	PrivateChannels      []any              `json:"private_channels"`
-	Users                []any              `json:"users"`
-	Presences            []any              `json:"presences"`
-	Relationships        []any              `json:"relationships"`
-	Sessions             []any              `json:"sessions"`
-	GeoOrderedRTCRegions []any              `json:"geo_ordered_rtc_regions"`
-	SessionType          string             `json:"session_type"`
-	UserSettings         map[string]any     `json:"user_settings"`
-	Experiments          []any              `json:"experiments"`
-	GuildExperiments     []any              `json:"guild_experiments"`
-	UserGuildSettings    *VersionedArray    `json:"user_guild_settings"`
-	ReadState            *VersionedArray    `json:"read_state"`
-	UserSettingsProto    *UserSettingsProto `json:"user_settings_proto"`
-	ConnectedAccounts    []any              `json:"connected_accounts"`
-	GuildJoinRequests    []any              `json:"guild_join_requests"`
-	Consents             map[string]any     `json:"consents"`
-	AnalyticsToken       string             `json:"analytics_token"`
+	V                    int             `json:"v"`
+	User                 *model.User     `json:"user"`
+	Guilds               []any           `json:"guilds"`
+	SessionID            string          `json:"session_id"`
+	ResumeURL            string          `json:"resume_url"`
+	ResumeGatewayURL     string          `json:"resume_gateway_url"`
+	PrivateChannels      []any           `json:"private_channels"`
+	Users                []any           `json:"users"`
+	Presences            []any           `json:"presences"`
+	Relationships        []any           `json:"relationships"`
+	Sessions             []any           `json:"sessions"`
+	GeoOrderedRTCRegions []any           `json:"geo_ordered_rtc_regions"`
+	SessionType          string          `json:"session_type"`
+	UserSettings         map[string]any  `json:"user_settings"`
+	Experiments          []any           `json:"experiments"`
+	GuildExperiments     []any           `json:"guild_experiments"`
+	UserGuildSettings    *VersionedArray `json:"user_guild_settings"`
+	ReadState            *VersionedArray `json:"read_state"`
+	// UserSettingsProto is the base64-encoded serialized PreloadedUserSettings
+	// protobuf (wire format is a STRING; the client decodes it via
+	// b64ToPreloadedUserSettingsProto before storing). An empty string is a
+	// valid empty message meaning "all defaults".
+	UserSettingsProto string         `json:"user_settings_proto"`
+	ConnectedAccounts []any          `json:"connected_accounts"`
+	GuildJoinRequests []any          `json:"guild_join_requests"`
+	Consents          map[string]any `json:"consents"`
+	AnalyticsToken    string         `json:"analytics_token"`
 }
 
 // VersionedArray is Discord's {entries, partial, version} wrapper used by
@@ -73,11 +77,4 @@ type VersionedArray struct {
 	Entries []any `json:"entries"`
 	Partial bool  `json:"partial"`
 	Version int   `json:"version"`
-}
-
-// UserSettingsProto mirrors the preloaded user settings protobuf.
-type UserSettingsProto struct {
-	Versions struct {
-		DataVersion int `json:"dataVersion"`
-	} `json:"versions"`
 }
