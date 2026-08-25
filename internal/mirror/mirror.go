@@ -328,12 +328,33 @@ func Run(opts Options) error {
 // revalidateExisting walks the output tree and repairs any text asset
 // stored in a compressed transfer encoding, returning the repair count.
 func (d *downloader) revalidateExisting() int {
+	return Revalidate(d.opts.Out)
+}
+
+// Revalidate walks dir and repairs in place any text asset stored in a
+// compressed transfer encoding (see DecodeCompressed). It needs no network
+// and is safe to run on every serve startup: serving an old, pre-repair
+// mirror_dir would otherwise feed the client undecodable bytes (gray
+// screen) until `voidbar mirror` happens to run again. Returns the number
+// of repaired files.
+func Revalidate(dir string) int {
+	return revalidate(dir, true)
+}
+
+// Check is Revalidate without writing: it reports how many files in dir
+// are still stored compressed. `voidbar mirror --check` uses it as a
+// mirror health probe.
+func Check(dir string) int {
+	return revalidate(dir, false)
+}
+
+func revalidate(dir string, write bool) int {
 	n := 0
-	_ = filepath.WalkDir(d.opts.Out, func(p string, e os.DirEntry, err error) error {
+	_ = filepath.WalkDir(dir, func(p string, e os.DirEntry, err error) error {
 		if err != nil || e.IsDir() {
 			return nil
 		}
-		rel, rerr := filepath.Rel(d.opts.Out, p)
+		rel, rerr := filepath.Rel(dir, p)
 		if rerr != nil {
 			return nil
 		}
@@ -347,6 +368,10 @@ func (d *downloader) revalidateExisting() int {
 		}
 		dec, ok := DecodeCompressed(webPath, b)
 		if !ok || bytes.Equal(dec, b) {
+			return nil
+		}
+		if !write {
+			n++
 			return nil
 		}
 		if werr := os.WriteFile(p, dec, 0o644); werr == nil {

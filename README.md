@@ -210,6 +210,13 @@ makes the proxy serve purely from the local mirror (no network at runtime).
 
 ## Known issues / troubleshooting
 
+- **Gray/blank screen on a fresh clone**: two causes, both fixed —
+  (1) mirrors downloaded by pre-repair builds contain still-compressed
+  bodies: `serve` now self-heals `mirror_dir` at startup (log line
+  `mirror: revalidated ...`), and `voidbar mirror --check --out <dir>`
+  probes a mirror without writing (exit 1 if repair is needed);
+  (2) the browser may have cached those bytes in OPFS — open the
+  instance with `?voidbar-wipe` once (see below).
 - **Two lazy chunks (38698, 11976) were never archived** by the Wayback
   Machine (crawler wasn't logged in). They produce `ChunkLoadError`
   pageerrors in the console; harmless — everything visible works.

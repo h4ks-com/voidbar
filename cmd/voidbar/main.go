@@ -65,10 +65,13 @@ Usage:
   voidbar invite create [--uses N] [--by <user-id>] [--config <path>]
   voidbar invite list  [--config <path>]
   voidbar mirror --from <upstream-url> --out <dir> [--html app] [--concurrency 4]
+  voidbar mirror --check --out <dir>
 
 mirror downloads a frozen client build from an upstream mirror (e.g. the
 Wayback Machine) into a local directory for one-time upload to a CORS-enabled
-mirror such as an archive.org item.
+mirror such as an archive.org item. --check probes an existing directory for
+files still stored compressed (pre-repair downloads) without writing; serve
+also self-heals the configured mirror_dir at startup.
 `)
 }
 
@@ -78,8 +81,24 @@ func mirrorCmd(args []string) error {
 	out := fs.String("out", "", "output directory (created if missing; resumable)")
 	html := fs.String("html", "app", "entry path relative to --from")
 	concurrency := fs.Int("concurrency", 4, "parallel downloads")
+	check := fs.Bool("check", false, "report how many files are still stored compressed, then exit (no network, no writes)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *check {
+		if *out == "" {
+			return errors.New("--out is required with --check")
+		}
+		if _, err := os.Stat(*out); err != nil {
+			return fmt.Errorf("--check: %w", err)
+		}
+		n := mirror.Check(*out)
+		fmt.Printf("mirror check: %d files still compressed\n", n)
+		if n > 0 {
+			fmt.Println("run `voidbar mirror --from <base> --out <dir>` (or just start `serve`) to repair them")
+			return errors.New("mirror needs repair")
+		}
+		return nil
 	}
 	if *from == "" || *out == "" {
 		return errors.New("--from and --out are required")
@@ -139,6 +158,13 @@ func serveCmd(args []string, log *slog.Logger) error {
 	if cfg.Client.Enabled {
 		if cfg.Client.ProxyCDN {
 			log.Warn("client.proxy_cdn is enabled: this instance proxies and caches Discord client assets itself; use only on instances NOT reachable from the public internet")
+		}
+		if cfg.Client.MirrorDir != "" {
+			// Self-heal mirrors downloaded by pre-repair builds so old
+			// mirror_dirs don't serve still-compressed bodies (gray screen).
+			if n := mirror.Revalidate(cfg.Client.MirrorDir); n > 0 {
+				log.Info("mirror: revalidated compressed files from an older run", "count", n)
+			}
 		}
 		root.Handle("/", web.Handler(cfg, log))
 	} else {
