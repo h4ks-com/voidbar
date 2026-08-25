@@ -28,7 +28,20 @@ type Manager struct {
 
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
+
+	// reconnectBackoff is the initial delay before the first retry after
+	// an upstream drop; it doubles per consecutive failure (capped at
+	// reconnectBackoffMax) and resets once a link stays up for a while.
+	reconnectBackoff time.Duration
 }
+
+const (
+	reconnectBackoffInitial = 5 * time.Second
+	reconnectBackoffMax     = 60 * time.Second
+	// A link that lived at least this long counts as "was healthy":
+	// the next drop retries with the initial backoff again.
+	reconnectHealthyAfter = 30 * time.Second
+)
 
 type conn struct {
 	userID    string
@@ -41,11 +54,12 @@ type conn struct {
 // New creates the manager.
 func New(store *storage.Storage, gw *gateway.Server, log *slog.Logger, sf *util.Snowflake) *Manager {
 	return &Manager{
-		store: store,
-		gw:    gw,
-		log:   log,
-		sf:    sf,
-		conns: make(map[string]*conn),
+		store:            store,
+		gw:               gw,
+		log:              log,
+		sf:               sf,
+		conns:            make(map[string]*conn),
+		reconnectBackoff: reconnectBackoffInitial,
 	}
 }
 
@@ -83,28 +97,68 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
 	}
-	client := girc.New(cfg)
-
 	c := &conn{
 		userID:    userID,
 		networkID: networkID,
-		client:    client,
 		cancel:    make(chan struct{}),
 		done:      make(chan struct{}),
 	}
 	m.conns[k] = c
 
-	m.registerHandlers(c)
-
-	go func() {
-		<-c.cancel
-		client.Close()
-	}()
+	// Supervisor: owns the (user, network) link for the lifetime of the
+	// membership. Bouncer semantics demand the upstream connection outlives
+	// any single TCP session, so every drop - network flap, server restart,
+	// ping timeout - is retried with exponential backoff until cancelled
+	// (Drop / Leave). A fresh girc client is built per attempt: a client
+	// whose read loop died is single-use (tracking state, buffers).
 	go func() {
 		defer close(c.done)
-		m.log.Info("irc connecting", "user", userID, "network", networkID, "server", net.Host)
-		if err := client.Connect(); err != nil {
-			m.log.Warn("irc connect failed", "user", userID, "network", networkID, "err", err)
+		backoff := m.reconnectBackoff
+		for {
+			client := girc.New(cfg)
+			m.mu.Lock()
+			c.client = client
+			m.mu.Unlock()
+			m.registerHandlers(c)
+
+			// Per-attempt closer: Drop() may fire while we're blocked
+			// inside Connect(); closing the client forces it to return.
+			attempt := make(chan struct{})
+			go func() {
+				select {
+				case <-c.cancel:
+					client.Close()
+					<-attempt
+				case <-attempt:
+				}
+			}()
+
+			m.log.Info("irc connecting", "user", userID, "network", networkID, "server", net.Host)
+			started := time.Now()
+			cErr := client.Connect()
+			lived := time.Since(started)
+			close(attempt)
+
+			select {
+			case <-c.cancel:
+				return
+			default:
+			}
+			if cErr != nil {
+				m.log.Warn("irc link down, retrying", "user", userID, "network", networkID, "err", cErr, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
+			} else {
+				m.log.Warn("irc link closed, retrying", "user", userID, "network", networkID, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
+			}
+			select {
+			case <-c.cancel:
+				return
+			case <-time.After(backoff):
+			}
+			if lived >= reconnectHealthyAfter {
+				backoff = m.reconnectBackoff
+			} else if backoff *= 2; backoff > reconnectBackoffMax {
+				backoff = reconnectBackoffMax
+			}
 		}
 	}()
 }
@@ -265,21 +319,34 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 func (m *Manager) JoinChannel(userID, networkID, channel string) {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
 	m.mu.Unlock()
-	if !ok {
+	if !ok || client == nil {
 		return
 	}
-	c.client.Cmd.Join(channel)
+	client.Cmd.Join(channel)
 }
 
-// SendChannel relays a Discord message into an IRC channel.
+// SendChannel relays a Discord message into an IRC channel. Between a drop
+// and the next successful reconnect this errors (the supervisor swaps
+// c.client under mu, so it is read under the same lock).
 func (m *Manager) SendChannel(userID, networkID, channel, content string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("not connected to %s", networkID)
 	}
-	c.client.Cmd.Message(channel, content)
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	client.Cmd.Message(channel, content)
 	return nil
 }

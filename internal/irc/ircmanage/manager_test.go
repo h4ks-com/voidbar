@@ -108,14 +108,19 @@ func fakeIRCServer(t *testing.T, ln net.Listener) chan net.Conn {
 
 func waitFor(t *testing.T, sink *logSink, substr string) {
 	t.Helper()
+	waitForCount(t, sink, substr, 1)
+}
+
+func waitForCount(t *testing.T, sink *logSink, substr string, want int) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if sink.has(substr) {
+		if sink.count(substr) >= want {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for log %q; got:\n%s", substr, strings.Join(sink.lines, "\n"))
+	t.Fatalf("timed out waiting for %d log %q; got %d:\n%s", want, substr, sink.count(substr), strings.Join(sink.lines, "\n"))
 }
 
 // TestNickCollisionDoesNotEatForeignMessages reproduces the reported bug:
@@ -197,4 +202,99 @@ func TestNickCollisionDoesNotEatForeignMessages(t *testing.T) {
 	if sink.has("from=doesnm_") {
 		t.Fatalf("own echo leaked into relay:\n%s", strings.Join(sink.lines, "\n"))
 	}
+}
+
+// servingConn is a minimal registration flow for the reconnect test: no
+// collision, 001 on first NICK, PING/PONG.
+func serveRegistration(conn net.Conn) {
+	go func() {
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		welcomed := false
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+			case strings.HasPrefix(line, "NICK"):
+				if !welcomed {
+					nick := strings.TrimPrefix(line, "NICK ")
+					_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome to fake\r\n"))
+					welcomed = true
+				}
+			case strings.HasPrefix(line, "PING"):
+				_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+			}
+		}
+	}()
+}
+
+// TestReconnectAfterDrop verifies bouncer semantics on the upstream side:
+// when the TCP link dies, the supervisor dials again (fresh client, backoff)
+// and the CONNECTED handler re-joins the auto-join channels.
+func TestReconnectAfterDrop(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveRegistration(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "reconn", Username: "reconn", Realname: "reconn",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond // snappy retries in test
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	first, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no first connection")
+	}
+
+	// Kill the link like a network flap: the manager must re-dial.
+	_ = first.Close()
+	waitForCount(t, sink, "irc connected", 2)
+	second, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no second connection")
+	}
+	_ = second.Close()
 }
