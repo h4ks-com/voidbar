@@ -1,0 +1,33 @@
+# WIP docker-compose for Voidbar.
+#
+#   docker compose build
+#   # one-off: mirror the frozen client into ./mirror (resumable, ~950 files)
+#   docker compose run --rm voidbar mirror \
+#     --from "https://web.archive.org/web/20220601000000id_/https://discord.com" \
+#     --out /mirror --html app
+#   docker compose up
+#
+# Then open http://127.0.0.1:18084/ and register (registration is "open").
+# If your browser ever serves a poisoned cache: http://127.0.0.1:18084/?voidbar-wipe
+# or press Ctrl+Alt+Shift+R on the page.
+
+services:
+  voidbar:
+    build: .
+    ports:
+      - "127.0.0.1:18084:8080"
+    environment:
+      # inside the container we must listen on all interfaces
+      VOIDBAR_SERVER_LISTEN: 0.0.0.0:8080
+      VOIDBAR_SERVER_PUBLIC_URL: http://127.0.0.1:18084
+      VOIDBAR_CLIENT_ENABLED: "true"
+      VOIDBAR_CLIENT_CDN_BASE: https://web.archive.org/web/20220601000000id_/https://discord.com
+      VOIDBAR_CLIENT_HTML: app
+      # opt-in! see "Client assets & legal notes" in README
+      VOIDBAR_CLIENT_PROXY_CDN: "true"
+      VOIDBAR_CLIENT_MIRROR_DIR: /mirror
+      VOIDBAR_AUTH_REGISTRATION: open
+    volumes:
+      - ./data:/data
+      - ./mirror:/mirror
+    restart: unless-stopped

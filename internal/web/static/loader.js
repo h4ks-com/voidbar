@@ -261,7 +261,38 @@ const opfs = {
       log('OPFS write skipped:', path, e.message);
     }
   },
+
+  // Nuke every cached client asset (all cache versions), then reload the
+  // page with the wipe param stripped so it boots clean.
+  async wipeAndReload() {
+    try {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry('voidbar', { recursive: true });
+      log('OPFS cache wiped');
+    } catch (e) {
+      log('OPFS wipe:', e.message);
+    }
+    const url = new URL(location.href);
+    url.searchParams.delete('voidbar-wipe');
+    location.replace(url.href);
+  },
 };
+
+// Emergency cache wipe, two ways:
+//   - append ?voidbar-wipe to the instance URL (works even if the cached
+//     client is so broken it never mounts), or
+//   - press Ctrl+Alt+Shift+R (Windows/Linux) any time after the page loads.
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.ctrlKey && e.altKey && e.shiftKey && e.code === 'KeyR') {
+      e.preventDefault();
+      opfs.wipeAndReload();
+    }
+  },
+  true,
+);
+
 
 // ---------------------------------------------------------------------------
 // Fetching
@@ -808,6 +839,11 @@ clientLog.start();
 const state = { cfg: null };
 
 async function boot() {
+  if (new URLSearchParams(location.search).has('voidbar-wipe')) {
+    await opfs.wipeAndReload();
+    return;
+  }
+
   setStatus('FETCHING CONFIG');
   state.cfg = await fetchConfig();
 

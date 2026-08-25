@@ -49,12 +49,22 @@ June 2022, loaded through the loader from the Wayback Machine):
 - `voidbar mirror` downloads/repairs the client build locally (brotli/gzip
   bodies from Wayback are decoded; runs self-heal old mirrors)
 
-## Running a WIP instance (Windows)
+## Running a WIP instance
+
+Three interchangeable ways — pick one. In all cases: open the instance URL
+in a Chromium browser, register on first run, press **Добавить сервер →
+Присоединиться к серверу** and paste a connection string, e.g.
+`irc://irc.libera.chat:6697/#voidbar?name=Libera`.
+
+**If the client is stuck on a gray/blank screen or crashes**, first read
+[Client cache (OPFS)](#client-cache-opfs) below — it is almost always a
+poisoned browser cache, not the server.
+
+### Windows (Go)
 
 Prerequisites: Go 1.22+ (e.g. `C:\Program Files\Go\bin\go.exe`).
 
 ```powershell
-# build
 & "C:\Program Files\Go\bin\go.exe" build -o voidbar.exe ./cmd/voidbar
 
 # 1) mirror the frozen client (once; resumable, ~950 files, needs no server)
@@ -75,12 +85,95 @@ $env:VOIDBAR_AUTH_REGISTRATION= "open"                                  # defaul
 .\voidbar.exe serve
 ```
 
-Then open `http://127.0.0.1:18084/` in a Chromium browser (register on first
-run), press **Добавить сервер → Присоединиться к серверу** and paste a
-connection string, e.g. `irc://irc.libera.chat:6697/#voidbar?name=Libera`.
+### Linux (Go)
 
-Config can also live in a TOML file (`--config path`), keys mirror the env
-vars (`server.listen`, `auth.registration`, `client.*`, ...). `mirror_dir`
+```bash
+go build -o voidbar ./cmd/voidbar
+
+# 1) mirror the frozen client (once; resumable)
+mkdir -p ~/.local/share/voidbar
+./voidbar mirror \
+  --from "https://web.archive.org/web/20220601000000id_/https://discord.com" \
+  --out ~/.local/share/voidbar/mirror-2022-06 --html app
+
+# 2) serve
+export VOIDBAR_SERVER_LISTEN="127.0.0.1:18084"
+export VOIDBAR_SERVER_PUBLIC_URL="http://127.0.0.1:18084"
+export VOIDBAR_STORAGE_PATH="$HOME/.local/share/voidbar/data"
+export VOIDBAR_CLIENT_ENABLED=true
+export VOIDBAR_CLIENT_CDN_BASE="https://web.archive.org/web/20220601000000id_/https://discord.com"
+export VOIDBAR_CLIENT_HTML=app
+export VOIDBAR_CLIENT_PROXY_CDN=true                                    # opt-in! see legal notes
+export VOIDBAR_CLIENT_MIRROR_DIR="$HOME/.local/share/voidbar/mirror-2022-06"
+export VOIDBAR_AUTH_REGISTRATION=open
+./voidbar serve
+```
+
+Optional systemd unit (`~/.config/systemd/user/voidbar.service`, then
+`systemctl --user enable --now voidbar`):
+
+```ini
+[Unit]
+Description=Voidbar IRC bouncer
+
+[Service]
+Environment=VOIDBAR_SERVER_LISTEN=127.0.0.1:18084
+Environment=VOIDBAR_SERVER_PUBLIC_URL=http://127.0.0.1:18084
+Environment=VOIDBAR_STORAGE_PATH=%h/.local/share/voidbar/data
+Environment=VOIDBAR_CLIENT_ENABLED=true
+Environment=VOIDBAR_CLIENT_CDN_BASE=https://web.archive.org/web/20220601000000id_/https://discord.com
+Environment=VOIDBAR_CLIENT_HTML=app
+Environment=VOIDBAR_CLIENT_PROXY_CDN=true
+Environment=VOIDBAR_CLIENT_MIRROR_DIR=%h/.local/share/voidbar/mirror-2022-06
+Environment=VOIDBAR_AUTH_REGISTRATION=open
+ExecStart=%h/.local/bin/voidbar serve
+
+[Install]
+WantedBy=default.target
+```
+
+### Docker
+
+`Dockerfile` and `docker-compose.yml` are in the repo root. The compose file
+bind-mounts `./data` (instance storage) and `./mirror` (the mirrored
+client) and publishes the server on `127.0.0.1:18084`.
+
+```bash
+docker compose build
+
+# one-off: mirror the frozen client into ./mirror (resumable)
+docker compose run --rm voidbar mirror \
+  --from "https://web.archive.org/web/20220601000000id_/https://discord.com" \
+  --out /mirror --html app
+
+docker compose up
+```
+
+Plain `docker run` equivalent:
+
+```bash
+docker build -t voidbar .
+docker run --rm -p 127.0.0.1:18084:8080 \
+  -v "$PWD/data:/data" -v "$PWD/mirror:/mirror" \
+  -e VOIDBAR_SERVER_LISTEN=0.0.0.0:8080 \
+  -e VOIDBAR_SERVER_PUBLIC_URL=http://127.0.0.1:18084 \
+  -e VOIDBAR_CLIENT_ENABLED=true \
+  -e VOIDBAR_CLIENT_CDN_BASE=https://web.archive.org/web/20220601000000id_/https://discord.com \
+  -e VOIDBAR_CLIENT_HTML=app \
+  -e VOIDBAR_CLIENT_PROXY_CDN=true \
+  -e VOIDBAR_CLIENT_MIRROR_DIR=/mirror \
+  -e VOIDBAR_AUTH_REGISTRATION=open \
+  voidbar
+```
+
+Note: inside a container the server must listen on `0.0.0.0` (the compose
+file already does); the browser still talks to `127.0.0.1:18084` via the
+port mapping. `VOIDBAR_STORAGE_PATH=/data` is baked into the image.
+
+### Configuration
+
+Env vars can also live in a TOML file (`--config path`); keys mirror them
+(`server.listen`, `auth.registration`, `client.*`, ...). `mirror_dir`
 makes the proxy serve purely from the local mirror (no network at runtime).
 
 ## Not implemented yet
@@ -123,16 +216,24 @@ makes the proxy serve purely from the local mirror (no network at runtime).
 - **Remote-auth QR** (`/remote-auth`) is stubbed; the client hardcodes
   `wss:` so on an http instance you'll see periodic WS errors in the
   console. Non-fatal, login by email/password works.
-- **Client cache (OPFS)**: the loader caches raw client bytes in the
-  browser. If an asset set ever changes server-side, bump `CACHE_VERSION`
-  in `internal/web/static/loader.js` (v3 currently) — old dirs are pruned
-  automatically. If the client misbehaves after an update, hard-reload
-  (Ctrl+F5) and, as a last resort, wipe the cache manually — DevTools
-  console on the instance origin:
+
+### Client cache (OPFS)
+
+The loader caches raw client bytes in the browser. If an asset set ever
+changes server-side, bump `CACHE_VERSION` in
+`internal/web/static/loader.js` (v3 currently) — old dirs are pruned
+automatically on load. To wipe the cache by hand:
+
+- open the instance with `?voidbar-wipe` in the URL
+  (e.g. `http://127.0.0.1:18084/?voidbar-wipe`) — works even when the
+  cached client is too broken to boot, or
+- press **Ctrl+Alt+Shift+R** on the page, or
+- as a last resort, run this in DevTools on the instance origin:
   ```js
   const root = await navigator.storage.getDirectory();
   await root.removeEntry('voidbar', { recursive: true });
   ```
+
 - The client is RU-localized in our test profile; UI labels in this README
   are the Russian ones ("Добавить сервер" etc.).
 
