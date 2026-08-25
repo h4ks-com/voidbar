@@ -20,10 +20,8 @@ import (
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/discord/rest"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
-	"github.com/h4ks-com/voidbar/internal/mirror"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
-	"github.com/h4ks-com/voidbar/internal/web"
 )
 
 func main() {
@@ -40,8 +38,6 @@ func main() {
 		err = userCmd(os.Args[2:])
 	case "invite":
 		err = inviteCmd(os.Args[2:])
-	case "mirror":
-		err = mirrorCmd(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -64,54 +60,10 @@ Usage:
   voidbar user   list [--config <path>]
   voidbar invite create [--uses N] [--by <user-id>] [--config <path>]
   voidbar invite list  [--config <path>]
-  voidbar mirror --from <upstream-url> --out <dir> [--html app] [--concurrency 4]
-  voidbar mirror --check --out <dir>
 
-mirror downloads a frozen client build from an upstream mirror (e.g. the
-Wayback Machine) into a local directory for one-time upload to a CORS-enabled
-mirror such as an archive.org item. --check probes an existing directory for
-files still stored compressed (pre-repair downloads) without writing; serve
-also self-heals the configured mirror_dir at startup.
+Backend only: point a Discord client (e.g. the repackaged Android build)
+at the instance's REST/Gateway endpoints.
 `)
-}
-
-func mirrorCmd(args []string) error {
-	fs := flag.NewFlagSet("mirror", flag.ContinueOnError)
-	from := fs.String("from", "", "upstream base URL, e.g. https://web.archive.org/web/<ts>id_/https://discord.com")
-	out := fs.String("out", "", "output directory (created if missing; resumable)")
-	html := fs.String("html", "app", "entry path relative to --from")
-	concurrency := fs.Int("concurrency", 4, "parallel downloads")
-	check := fs.Bool("check", false, "report how many files are still stored compressed, then exit (no network, no writes)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *check {
-		if *out == "" {
-			return errors.New("--out is required with --check")
-		}
-		if _, err := os.Stat(*out); err != nil {
-			return fmt.Errorf("--check: %w", err)
-		}
-		n := mirror.Check(*out)
-		fmt.Printf("mirror check: %d files still compressed\n", n)
-		if n > 0 {
-			fmt.Println("run `voidbar mirror --from <base> --out <dir>` (or just start `serve`) to repair them")
-			return errors.New("mirror needs repair")
-		}
-		return nil
-	}
-	if *from == "" || *out == "" {
-		return errors.New("--from and --out are required")
-	}
-	return mirror.Run(mirror.Options{
-		Base:        *from,
-		HTML:        *html,
-		Out:         *out,
-		Concurrency: *concurrency,
-		Log: func(format string, args ...any) {
-			fmt.Printf("mirror: "+format+"\n", args...)
-		},
-	})
 }
 
 func serveCmd(args []string, log *slog.Logger) error {
@@ -155,21 +107,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	root.Handle("/gateway/", restHandler)
 	root.Handle("/remote-auth", restHandler)
 	root.Handle("/remote-auth/", restHandler)
-	if cfg.Client.Enabled {
-		if cfg.Client.ProxyCDN {
-			log.Warn("client.proxy_cdn is enabled: this instance proxies and caches Discord client assets itself; use only on instances NOT reachable from the public internet")
-		}
-		if cfg.Client.MirrorDir != "" {
-			// Self-heal mirrors downloaded by pre-repair builds so old
-			// mirror_dirs don't serve still-compressed bodies (gray screen).
-			if n := mirror.Revalidate(cfg.Client.MirrorDir); n > 0 {
-				log.Info("mirror: revalidated compressed files from an older run", "count", n)
-			}
-		}
-		root.Handle("/", web.Handler(cfg, log))
-	} else {
-		root.Handle("/", restHandler)
-	}
+	root.Handle("/", restHandler)
 	handler := root
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,

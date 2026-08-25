@@ -14,7 +14,6 @@ type Config struct {
 	Server  Server  `toml:"server"`
 	Storage Storage `toml:"storage"`
 	Auth    Auth    `toml:"auth"`
-	Client  Client  `toml:"client"`
 }
 
 type Server struct {
@@ -29,15 +28,6 @@ type Storage struct {
 type Auth struct {
 	Registration  string `toml:"registration"`
 	MasterKeyPath string `toml:"master_key_path"`
-}
-
-type Client struct {
-	Enabled   bool   `toml:"enabled"`
-	CdnBase   string `toml:"cdn_base"`
-	Build     string `toml:"build"`
-	Html      string `toml:"html"`
-	ProxyCDN  bool   `toml:"proxy_cdn"`
-	MirrorDir string `toml:"mirror_dir"`
 }
 
 func Default() *Config {
@@ -76,16 +66,6 @@ func applyEnv(cfg *Config) {
 	set(&cfg.Storage.Path, "VOIDBAR_STORAGE_PATH")
 	set(&cfg.Auth.Registration, "VOIDBAR_AUTH_REGISTRATION")
 	set(&cfg.Auth.MasterKeyPath, "VOIDBAR_AUTH_MASTER_KEY_PATH")
-	if v, ok := os.LookupEnv("VOIDBAR_CLIENT_ENABLED"); ok && v != "" {
-		cfg.Client.Enabled = v == "true" || v == "1"
-	}
-	set(&cfg.Client.CdnBase, "VOIDBAR_CLIENT_CDN_BASE")
-	set(&cfg.Client.Build, "VOIDBAR_CLIENT_BUILD")
-	set(&cfg.Client.Html, "VOIDBAR_CLIENT_HTML")
-	set(&cfg.Client.MirrorDir, "VOIDBAR_CLIENT_MIRROR_DIR")
-	if v, ok := os.LookupEnv("VOIDBAR_CLIENT_PROXY_CDN"); ok && v != "" {
-		cfg.Client.ProxyCDN = v == "true" || v == "1"
-	}
 }
 
 func (c *Config) Validate() error {
@@ -102,26 +82,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.Path == "" {
 		return errors.New("storage.path must not be empty")
-	}
-	if c.Client.Enabled {
-		if c.Client.CdnBase == "" {
-			return errors.New("client.cdn_base is required when client is enabled")
-		}
-		if !strings.HasPrefix(c.Client.CdnBase, "http://") && !strings.HasPrefix(c.Client.CdnBase, "https://") {
-			return errors.New("client.cdn_base must start with http:// or https://")
-		}
-	}
-	if c.Client.ProxyCDN && !c.Client.Enabled {
-		return errors.New("client.proxy_cdn requires client.enabled")
-	}
-	if c.Client.MirrorDir != "" {
-		info, err := os.Stat(c.Client.MirrorDir)
-		if err != nil {
-			return fmt.Errorf("client.mirror_dir: %w", err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("client.mirror_dir %q is not a directory", c.Client.MirrorDir)
-		}
 	}
 	return nil
 }
