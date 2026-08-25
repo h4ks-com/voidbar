@@ -183,6 +183,9 @@ func (m *Manager) EnsureAll() {
 }
 
 // Drop closes a connection; it will be re-created on the next EnsureConn.
+// Waiting on the supervisor is capped: if the current attempt is stuck in
+// a hung dial (client.Close can't interrupt net.Dialer), the goroutine
+// exits on its own once Connect returns and sees the cancel.
 func (m *Manager) Drop(userID, networkID string) {
 	k := key(userID, networkID)
 	m.mu.Lock()
@@ -192,8 +195,13 @@ func (m *Manager) Drop(userID, networkID string) {
 		close(c.cancel)
 	}
 	m.mu.Unlock()
-	if ok {
-		<-c.done
+	if !ok {
+		return
+	}
+	select {
+	case <-c.done:
+	case <-time.After(5 * time.Second):
+		m.log.Warn("drop: supervisor still in a hung dial, abandoning", "user", userID, "network", networkID)
 	}
 }
 

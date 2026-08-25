@@ -29,6 +29,7 @@ type Server struct {
 	heartbeatInterval  int
 	guildsForUser      func(userID string) ([]any, error)
 	guildCreateForUser func(userID string) []any
+	dmChannelsForUser  func(userID string) []any
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -41,6 +42,12 @@ type Server struct {
 func (s *Server) SetGuildProviders(guildsForUser func(userID string) ([]any, error), guildCreateForUser func(userID string) []any) {
 	s.guildsForUser = guildsForUser
 	s.guildCreateForUser = guildCreateForUser
+}
+
+// SetDMChannelsProvider installs the READY private_channels hook; same
+// late-wiring rationale as SetGuildProviders.
+func (s *Server) SetDMChannelsProvider(dmChannelsForUser func(userID string) []any) {
+	s.dmChannelsForUser = dmChannelsForUser
 }
 
 // New creates the gateway server. guildsForUser (optional) supplies the
@@ -305,6 +312,12 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			SessionType:      "normal",
 		}
 	}
+	privateChannels := []any{}
+	if s.dmChannelsForUser != nil {
+		if dms := s.dmChannelsForUser(user.ID); dms != nil {
+			privateChannels = dms
+		}
+	}
 	return &ReadyData{
 		V:                    9,
 		User:                 model.ToUser(user),
@@ -312,7 +325,7 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		SessionID:            sess.ID,
 		ResumeURL:            s.cfg.GatewayWSURL(),
 		ResumeGatewayURL:     s.cfg.GatewayWSURL(),
-		PrivateChannels:      []any{},
+		PrivateChannels:      privateChannels,
 		Users:                []any{},
 		Presences:            []any{},
 		Relationships:        []any{},

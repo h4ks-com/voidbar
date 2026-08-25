@@ -203,6 +203,32 @@ func (s *Service) DMChannelsFor(userID string) []*storage.DMChannel {
 	return dms
 }
 
+// DMChannelPayloads shapes the user's DM threads for the client (READY
+// private_channels and GET /users/@me/channels share the wire form).
+func (s *Service) DMChannelPayloads(userID string) []any {
+	dms := s.DMChannelsFor(userID)
+	out := make([]any, 0, len(dms))
+	for _, dm := range dms {
+		out = append(out, map[string]any{
+			"id":               dm.ID,
+			"type":             1,
+			"flags":            0,
+			"last_message_id":  nil,
+			"last_message_timestamp": nil,
+			"recipients": []any{map[string]any{
+				"id":            model.IrcAuthorID("irc:" + dm.Nick),
+				"username":      dm.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			}},
+			"is_message_request":           false,
+			"is_message_request_timestamp": nil,
+			"is_spam":                      false,
+		})
+	}
+	return out
+}
+
 // EnsureDMChannel returns (creating if needed) the user's DM thread with a
 // nick on a network.
 func (s *Service) EnsureDMChannel(userID, netID, nick string) (*storage.DMChannel, error) {
