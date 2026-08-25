@@ -7,7 +7,7 @@ IRC networks on the other, so a real Discord client can be used to chat on IRC.
 
 **Backend only.** Voidbar serves no web client and ships no Discord assets —
 bring your own client: repackage the Discord Android build with
-[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher) and
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher) and
 point it at your instance. This keeps the project on the same safe side of
 the C&D line Spacebar lives on: the server is a clean-room implementation,
 the client is the user's own repackaged build.
@@ -29,7 +29,7 @@ the client is the user's own repackaged build.
 
 Work in progress. The vertical slice is **working end-to-end against a live IRC
 network** with the Discord **Android** client, 126.21, repackaged with
-[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher):
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher):
 login → READY → age gate suppressed → channel
 history renders → send/receive relay in both directions, no crashes.
 
@@ -56,7 +56,7 @@ Covered:
 
 ## Android client
 
-[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher)
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher)
 repackages the stock Discord Android build (decode → repoint hosts → rebuild
 → sign). The server carries a few Android-specific compatibility details
 worth knowing about:
