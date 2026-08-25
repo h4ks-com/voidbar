@@ -33,3 +33,9 @@ Thumbs.db
 configs/voidbar.toml
 # Editor backup
 *~
+
+# Android patching artifacts (large binaries, never commit)
+tools/apktool.jar
+tools/uber-apk-signer.jar
+tools/dap-work/
+*.apk
