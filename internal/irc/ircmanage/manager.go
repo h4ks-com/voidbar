@@ -241,6 +241,20 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
+	// Persist into the channel's replay buffer (bouncer semantics: history
+	// survives client reconnects and server restarts). The live relay must
+	// not depend on storage health, so failures are logged, not fatal.
+	if err := m.store.AppendMessage(storage.BufferedMessage{
+		ID:         msgID,
+		ChannelID:  channelID,
+		AuthorID:   "irc:" + author,
+		AuthorName: author,
+		Content:    content,
+		Timestamp:  ts,
+		Type:       0,
+	}); err != nil {
+		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
+	}
 }
 
 // JoinChannel makes the user's upstream connection join an IRC channel

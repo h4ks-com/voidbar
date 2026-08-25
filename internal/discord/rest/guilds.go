@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -222,11 +223,61 @@ type sendMessageRequest struct {
 	Nonce   any    `json:"nonce"`
 }
 
-// handleGetMessages answers the channel history request. Voidbar's replay
-// buffer arrives in a later phase; for now channels start empty, which the
-// client renders as the beginning of history.
+// messagePayload builds the full stock Discord message shape shared by the
+// send response, gateway MESSAGE_CREATE fanout and buffered history reads.
+func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any) map[string]any {
+	return map[string]any{
+		"id":               id,
+		"channel_id":       channelID,
+		"content":          content,
+		"timestamp":        ts,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nonce,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
+		"author": map[string]any{
+			"id":            authorID,
+			"username":      authorName,
+			"discriminator": "0",
+			"bot":           false,
+		},
+	}
+}
+
+// handleGetMessages serves the channel replay buffer. Ordering follows the
+// Discord REST contract: newest-first (descending by id) by default and
+// with ?before=, ascending with ?after=, so the client's scroll-up paging
+// works unchanged.
 func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
-	writeJSON(w, http.StatusOK, []any{})
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := r.URL.Query()
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	buffered := s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
+	out := make([]any, 0, len(buffered))
+	for _, m := range buffered {
+		out = append(out, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, m.AuthorID, m.AuthorName, m.Nonce))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleSendMessage relays a Discord message to IRC. The channel id is a
@@ -266,36 +317,25 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := map[string]any{
-		"id":               s.net.NewMessageID(),
-		"channel_id":       channelID,
-		"content":          req.Content,
-		"timestamp":        time.Now().UTC().Format(time.RFC3339),
-		"edited_timestamp": nil,
-		"tts":              false,
-		"mention_everyone": false,
-		"mentions":         []any{},
-		"mention_roles":    []any{},
-		"mention_channels": []any{},
-		"attachments":      []any{},
-		"embeds":           []any{},
-		"reactions":        []any{},
-		"nonce":            req.Nonce,
-		"pinned":           false,
-		"type":             0,
-		"flags":            0,
-		"author": map[string]any{
-			"id":            u.ID,
-			"username":      authorName,
-			"discriminator": "0",
-			"bot":           false,
-		},
-	}
+	msg := messagePayload(s.net.NewMessageID(), channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
 	// Own messages also arrive via the gateway on real Discord (keeping the
 	// user's other sessions in sync); the client dedupes by id and the
 	// nonce match clears the pending state.
 	if s.gw != nil {
 		s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
+	}
+	// And they enter the replay buffer like inbound relays, so history
+	// shows the whole conversation after a reconnect/restart.
+	if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
+		ID:         msg["id"].(string),
+		ChannelID:  channelID,
+		AuthorID:   u.ID,
+		AuthorName: authorName,
+		Content:    req.Content,
+		Nonce:      req.Nonce,
+		Timestamp:  msg["timestamp"].(string),
+	}); err != nil {
+		s.log.Warn("buffer append failed", "err", err, "channel", channelID)
 	}
 	writeJSON(w, http.StatusOK, msg)
 }

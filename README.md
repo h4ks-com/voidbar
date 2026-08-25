@@ -46,6 +46,10 @@ June 2022, loaded through the loader from the Wayback Machine):
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
   render in the client; nick collisions don't eat foreign messages
+- **Replay buffer**: the last 500 messages per channel are persisted
+  (Badger) and served over `GET /channels/:id/messages` with Discord
+  pagination (`limit`/`before`/`after`); own sends are buffered too, and
+  history survives server restarts
 - `voidbar mirror` downloads/repairs the client build locally (brotli/gzip
   bodies from Wayback are decoded; runs self-heal old mirrors)
 
@@ -178,9 +182,11 @@ makes the proxy serve purely from the local mirror (no network at runtime).
 
 ## Not implemented yet
 
-- **History/replay**: `GET /channels/:id/messages` always returns `[]`; the
-  bouncer buffer (store + replay on session start/backfill on join) is the
-  next phase. Restarting the server loses nothing except unread history.
+- **History prefill via `draft/chathistory`**: the bouncer replays only what
+  it saw while connected; it does not ask the upstream server for older
+  history on join ( Ergo/solanum expose it, many networks don't —
+  testnet.ergo.chat was probed but its hosting subnets were unreachable).
+  History is also capped at 500 messages per channel (ring buffer).
 - **DMs**: IRC queries (PRIVMSG to a nick) are received upstream but skipped
   with a log line (`irc query skipped`); no DM channels in the client.
 - **Upstream auto-reconnect**: connections are (re)established at boot

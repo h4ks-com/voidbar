@@ -36,6 +36,24 @@ func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, 
 	return &Service{store: store, gw: gw, sf: sf, manager: manager}
 }
 
+// AppendBufferedMessage records a message into the channel's replay buffer
+// (own sends; inbound relays write via the IRC manager directly).
+func (s *Service) AppendBufferedMessage(m storage.BufferedMessage) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.AppendMessage(m)
+}
+
+// ChannelMessages reads the channel replay buffer; see
+// storage.Storage.ChannelMessages for ordering semantics.
+func (s *Service) ChannelMessages(channelID, before, after string, limit int) []storage.BufferedMessage {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.ChannelMessages(channelID, before, after, limit)
+}
+
 // mergeChannels merges new IRC channel names into the member's auto-join
 // list (case-insensitive dedup, original order kept).
 func mergeChannels(existing, add []string) ([]string, bool) {
