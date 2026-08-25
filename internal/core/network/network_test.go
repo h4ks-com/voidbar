@@ -83,3 +83,92 @@ func TestJoinIdempotentSameGuild(t *testing.T) {
 		t.Fatalf("same conn string must yield same guild: %s vs %s", a.ID, b.ID)
 	}
 }
+
+func TestLeaveRemovesMembershipAndGCsNetwork(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	u2 := &storage.User{ID: "user2", Username: "other"}
+	if err := store.CreateUser(u2); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+
+	net, err := svc.Join("user2", "ircs://irc.libera.chat:6697/#go?name=Libera")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chans, err := svc.ChannelsFor(net.ID, []string{"#go"})
+	if err != nil || len(chans) != 1 {
+		t.Fatalf("channels: %v %v", chans, err)
+	}
+	if err := store.AppendMessage(storage.BufferedMessage{ID: "1", ChannelID: chans[0].ID, Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Leave("user2", net.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.MembershipFor("user2", net.ID); err != storage.ErrNotFound {
+		t.Fatalf("membership must be gone, got %v", err)
+	}
+	// Last member left: the whole network (channels + buffers) is GC'd.
+	if _, err := svc.Network(net.ID); err != storage.ErrNotFound {
+		t.Fatalf("network must be GC'd, got %v", err)
+	}
+	if _, err := store.GetChannel(chans[0].ID); err != storage.ErrNotFound {
+		t.Fatalf("channel must be GC'd, got %v", err)
+	}
+	if msgs := store.ChannelMessages(chans[0].ID, "", "", 50); len(msgs) != 0 {
+		t.Fatalf("buffer must be GC'd, got %d", len(msgs))
+	}
+
+	// Leaving a network you're not in is a 404-shaped error.
+	if err := svc.Leave("user2", net.ID); err != storage.ErrNotFound {
+		t.Fatalf("second leave: %v", err)
+	}
+}
+
+func TestLeaveKeepsNetworkWhileOtherMembersRemain(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, u := range []*storage.User{
+		{ID: "user1", Username: "doesnm", Email: "doesnm@example.com"},
+		{ID: "user2", Username: "other", Email: "other@example.com"},
+	} {
+		if err := store.CreateUser(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+
+	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same connection string: user2 joins the same network.
+	if _, err := svc.Join("user2", "ircs://irc.libera.chat:6697/#go"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Leave("user1", net.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Network(net.ID); err != nil {
+		t.Fatalf("network must survive while user2 is a member: %v", err)
+	}
+	if _, err := svc.MembershipFor("user2", net.ID); err != nil {
+		t.Fatalf("user2 membership must survive: %v", err)
+	}
+}

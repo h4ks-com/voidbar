@@ -214,8 +214,9 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":           guildID,
 		"name":         net.Name,
+		"owner_id":     model.ClydeID,
 		"channels":     channels,
-		"member_count": len(channels),
+		"member_count": len(channels) + 1,
 	})
 }
 
@@ -279,6 +280,60 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		out = append(out, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGuildPreview answers GET /guilds/:id/preview — the client fetches
+// this when opening guild screens (e.g. settings). Minimal GuildPreview.
+func (s *Server) handleGuildPreview(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	guildID := r.PathValue("guild")
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	net, err := s.net.Network(guildID)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "Unknown Guild")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":                       guildID,
+		"name":                     net.Name,
+		"icon":                     nil,
+		"splash":                   nil,
+		"discovery_splash":         nil,
+		"emojis":                   []any{},
+		"stickers":                 []any{},
+		"features":                 []any{},
+		"description":              "",
+		"approximate_member_count": 1,
+		"approximate_presence_count": 1,
+	})
+}
+
+// handleLeaveGuild implements DELETE /users/@me/guilds/{guild} — the
+// client's "Leave server" action. 204 per Discord; the client also reacts
+// to the GUILD_DELETE dispatch, which is what actually clears the rail.
+func (s *Server) handleLeaveGuild(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	guildID := r.PathValue("guild")
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	if err := s.net.Leave(u.ID, guildID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonError(w, http.StatusNotFound, "Unknown Guild")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "leave failed")
+		return
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(u.ID, "GUILD_DELETE", map[string]any{
+			"id":          guildID,
+			"unavailable": false,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleSendMessage relays a Discord message to IRC. The channel id is a

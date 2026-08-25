@@ -277,3 +277,69 @@ func (s *Storage) ListMembershipsForUser(userID string) ([]*Membership, error) {
 	sort.Slice(ms, func(i, j int) bool { return ms[i].NetworkID < ms[j].NetworkID })
 	return ms, nil
 }
+
+// DeleteMembership removes a single user's membership on a network
+// (Discord "leave guild"). Idempotent.
+func (s *Storage) DeleteMembership(netID, userID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(memberKey(netID, userID))
+	})
+}
+
+// DeleteNetworkCascade garbage-collects a network nobody is a member of
+// anymore: the network record, every channel registry entry (both the
+// chan/<id> record and the channet/<net>/<irc> index) and each channel's
+// replay buffer. Callers only invoke it after the last membership is gone.
+func (s *Storage) DeleteNetworkCascade(netID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete(networkKey(netID)); err != nil {
+			return err
+		}
+		// Collect first, delete after: mutating while iterating a badger
+		// txn skips entries.
+		var memberKeys, chanIdxKeys, chanIDs [][]byte
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		mp := []byte("member/" + netID + "/")
+		for it.Seek(mp); it.ValidForPrefix(mp); it.Next() {
+			memberKeys = append(memberKeys, it.Item().KeyCopy(nil))
+		}
+		cp := []byte("channet/" + netID + "/")
+		for it.Seek(cp); it.ValidForPrefix(cp); it.Next() {
+			item := it.Item()
+			chanIdxKeys = append(chanIdxKeys, item.KeyCopy(nil))
+			_ = item.Value(func(id []byte) error {
+				chanIDs = append(chanIDs, append([]byte(nil), id...))
+				return nil
+			})
+		}
+		it.Close()
+		for _, k := range memberKeys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		for _, k := range chanIdxKeys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		for _, id := range chanIDs {
+			if err := txn.Delete(chanKey(string(id))); err != nil {
+				return err
+			}
+			var msgKeys [][]byte
+			prefix := msgPrefix(string(id))
+			it2 := txn.NewIterator(badger.DefaultIteratorOptions)
+			for it2.Seek(prefix); it2.ValidForPrefix(prefix); it2.Next() {
+				msgKeys = append(msgKeys, it2.Item().KeyCopy(nil))
+			}
+			it2.Close()
+			for _, k := range msgKeys {
+				if err := txn.Delete(k); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}

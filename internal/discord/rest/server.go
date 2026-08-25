@@ -54,6 +54,13 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("GET /api/v9/users/@me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	mux.HandleFunc("GET /api/v9/users/@me/guilds", s.requireAuth(s.handleUserGuilds))
+	mux.HandleFunc("DELETE /api/v9/users/@me/guilds/{guild}", s.requireAuth(s.handleLeaveGuild))
+	// Android 126.21's "Delete server" (settings screen) is a POST to
+	// /guilds/{id}/delete, not a DELETE — route both at the same handler.
+	mux.HandleFunc("POST /api/v9/guilds/{guild}/delete", s.requireAuth(s.handleLeaveGuild))
+	mux.HandleFunc("DELETE /api/v9/guilds/{guild}", s.requireAuth(s.handleLeaveGuild))
+	// The client fetches a guild preview when opening guild screens.
+	mux.HandleFunc("GET /api/v9/guilds/{guild}/preview", s.requireAuth(s.handleGuildPreview))
 	mux.HandleFunc("GET /api/v9/users/@me/channels", s.requireAuth(s.handleUserChannels))
 	mux.HandleFunc("POST /api/v9/guilds", s.requireAuth(s.handleCreateGuild))
 	mux.HandleFunc("GET /api/v9/invites/{code}", s.requireAuth(s.handleGetInvite))

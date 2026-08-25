@@ -16,6 +16,7 @@ import (
 	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
@@ -169,8 +170,11 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 		t.Fatalf("channels: %v", chans)
 	}
 	members := d["members"].([]any)
-	if len(members) != 1 {
+	if len(members) != 2 {
 		t.Fatalf("members: %v", members)
+	}
+	if d["owner_id"] != model.ClydeID {
+		t.Fatalf("owner must be Clyde, got %v", d["owner_id"])
 	}
 }
 func TestJoinInvite(t *testing.T) {

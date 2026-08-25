@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/irc/connstr"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
@@ -219,6 +220,28 @@ func (s *Service) FindByChannelName(userID, ircName string) (*storage.Network, *
 	return nil, nil, storage.ErrNotFound
 }
 
+// Leave removes the user's membership on a network — the Discord "leave
+// guild" action. The upstream IRC connection is dropped; when the last
+// membership on the network is gone the network itself (channels, replay
+// buffers) is garbage-collected, so an accidental join leaves no residue.
+func (s *Service) Leave(userID, guildID string) error {
+	if _, err := s.store.GetMembership(guildID, userID); err != nil {
+		return err
+	}
+	if err := s.store.DeleteMembership(guildID, userID); err != nil {
+		return err
+	}
+	if s.manager != nil {
+		s.manager.Drop(userID, guildID)
+	}
+	if members, err := s.store.ListMemberships(guildID); err == nil && len(members) == 0 {
+		if err := s.store.DeleteNetworkCascade(guildID); err != nil {
+			return fmt.Errorf("network gc: %w", err)
+		}
+	}
+	return nil
+}
+
 // GuildCreatePayloads returns full GUILD_CREATE payloads for every network
 // the user belongs to, dispatched by the gateway right after READY. Channels
 // come from the member's auto-join list (live IRC channel state follows in
@@ -278,7 +301,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		})
 	}
 
-	members := make([]any, 0, len(all))
+	members := make([]any, 0, len(all)+1)
 	for _, mem := range all {
 		members = append(members, map[string]any{
 			"user": map[string]any{
@@ -291,6 +314,9 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 	}
+	// The owner is always Clyde: users only ever join networks (the
+	// "Delete server" owner flow stays hidden, "Leave server" shows).
+	members = append(members, model.ClydeMember(net.CreatedAt.Format(time.RFC3339)))
 
 	// Every Discord guild has an @everyone role whose id equals the guild id;
 	// the client computes channel permissions through it, and without the
@@ -313,11 +339,11 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		"id":                            net.ID,
 		"name":                          net.Name,
 		"icon":                          nil,
-		"owner_id":                      net.CreatedBy,
+		"owner_id":                      model.ClydeID,
 		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
 		"channels":                      channels,
 		"members":                       members,
-		"member_count":                  len(all),
+		"member_count":                  len(all) + 1,
 		"large":                         false,
 		"roles":                         []any{everyoneRole},
 		"presences":                     []any{},
