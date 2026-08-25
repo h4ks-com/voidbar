@@ -54,6 +54,22 @@ func (s *Service) ChannelMessages(channelID, before, after string, limit int) []
 	return s.store.ChannelMessages(channelID, before, after, limit)
 }
 
+// UserSettings returns the persisted legacy client settings for a user.
+func (s *Service) UserSettings(userID string) map[string]any {
+	if s.store == nil {
+		return map[string]any{}
+	}
+	return s.store.UserSettings(userID)
+}
+
+// MergeUserSettings persists a settings PATCH body for a user.
+func (s *Service) MergeUserSettings(userID string, patch map[string]any) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.MergeUserSettings(userID, patch)
+}
+
 // mergeChannels merges new IRC channel names into the member's auto-join
 // list (case-insensitive dedup, original order kept).
 func mergeChannels(existing, add []string) ([]string, bool) {

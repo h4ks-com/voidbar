@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -27,15 +28,16 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoPatch))
 	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
 	// The legacy (non-proto) settings store: the client PATCHes e.g. the
-	// last opened channel on navigation. Persisted settings are a later
-	// phase; acknowledging the write keeps navigation clean.
+	// last opened channel on navigation and dismissed promos. Persisted so
+	// onboarding popovers ("account switcher" promo, guide) stay dismissed
+	// across sessions instead of re-appearing over the guild rail.
 	// Billing: the client probes payment sources/country after joining a
 	// guild (gift/boost upsells). No billing on a bouncer.
 	mux.HandleFunc("GET /api/v9/users/@me/billing/payment-sources", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/country-code", s.requireAuth(func(w http.ResponseWriter, r *http.Request, u *storage.User) {
 		writeJSON(w, http.StatusOK, map[string]any{"country_code": "US"})
 	}))
-	mux.HandleFunc("PATCH /api/v9/users/@me/settings", s.requireAuth(s.handleNoContentAuthed))
+	mux.HandleFunc("PATCH /api/v9/users/@me/settings", s.requireAuth(s.handleSettingsPatch))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/guilds", s.requireAuth(s.handleGuildAffinities))
 	mux.HandleFunc("GET /api/v9/users/@me/library", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/user-trial-offer", s.requireAuth(s.handleNull))
@@ -110,6 +112,24 @@ func (s *Server) handleNull(w http.ResponseWriter, r *http.Request, _ *storage.U
 // etc.) without storing anything.
 func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	_, _ = io.Copy(io.Discard, r.Body)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSettingsPatch merges the legacy settings PATCH body into storage
+// and acknowledges with 204 (Discord's contract for this endpoint).
+func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	patch := map[string]any{}
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		// Unreadable body: still acknowledge; the client treats 204 as
+		// "synced" and won't retry-spam.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if s.net != nil {
+		if err := s.net.MergeUserSettings(u.ID, patch); err != nil {
+			s.log.Warn("settings persist failed", "err", err, "user", u.ID)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

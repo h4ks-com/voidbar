@@ -261,6 +261,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, u *storage.Use
 }
 
 func (s *Server) handleUserSettings(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net != nil {
+		writeJSON(w, http.StatusOK, s.net.UserSettings(u.ID))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
