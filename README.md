@@ -6,9 +6,11 @@ Voidbar speaks the Discord protocol (REST + Gateway) on one side and connects to
 IRC networks on the other, so a real Discord client can be used to chat on IRC.
 
 **Backend only.** Voidbar serves no web client and ships no Discord assets —
-bring your own client (see [Android client](#android-client)). This keeps the
-project on the same safe side of the C&D line Spacebar lives on: the server is
-a clean-room implementation, the client is the user's own repackaged build.
+bring your own client: repackage the Discord Android build with
+[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher) and
+point it at your instance. This keeps the project on the same safe side of
+the C&D line Spacebar lives on: the server is a clean-room implementation,
+the client is the user's own repackaged build.
 
 ## Concept
 
@@ -27,7 +29,8 @@ a clean-room implementation, the client is the user's own repackaged build.
 
 Work in progress. The vertical slice is **working end-to-end against a live IRC
 network** with the Discord **Android** client, 126.21, repackaged with
-`tools/discord-apk-patcher`: login → READY → age gate suppressed → channel
+[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher):
+login → READY → age gate suppressed → channel
 history renders → send/receive relay in both directions, no crashes.
 
 Covered:
@@ -53,9 +56,10 @@ Covered:
 
 ## Android client
 
-`tools/discord-apk-patcher` repackage of the stock Discord Android build
-(decode → repoint hosts → rebuild → sign). The server carries a few
-Android-specific compatibility details worth knowing about:
+[discord-apk-patcher](https://github.com/h4ks-com/discord-apk-patcher)
+repackages the stock Discord Android build (decode → repoint hosts → rebuild
+→ sign). The server carries a few Android-specific compatibility details
+worth knowing about:
 
 - **Gateway frame field order matters**: dispatch frames serialize `op`
   first, then `t`/`s` before `d` — the client's streaming JSON parser

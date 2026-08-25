@@ -3,8 +3,8 @@
 #   docker compose build
 #   docker compose up
 #
-# Then point a Discord client (e.g. the repackaged Android build from
-# tools/discord-apk-patcher) at http://127.0.0.1:18084/.
+# Then point a Discord client (e.g. an Android build repackaged with
+# discord-apk-patcher) at http://127.0.0.1:18084/.
 
 services:
   voidbar:

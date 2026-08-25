@@ -39,3 +39,5 @@ tools/apktool.jar
 tools/uber-apk-signer.jar
 tools/dap-work/
 *.apk
+
+tools/
