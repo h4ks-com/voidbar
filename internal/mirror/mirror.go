@@ -214,7 +214,15 @@ type downloader struct {
 	mu      sync.Mutex
 	missing map[string]bool
 	saved   int
+
+	// CDX rate gate: the Wayback CDX API 429s bursts hard, so lookups are
+	// spaced at least cdxInterval apart process-wide.
+	cdxMu   sync.Mutex
+	cdxNext time.Time
 }
+
+// cdxInterval is the minimum spacing between CDX API calls.
+const cdxInterval = 1500 * time.Millisecond
 
 // Run downloads the build into opts.Out.
 func Run(opts Options) error {
@@ -245,6 +253,15 @@ func Run(opts Options) error {
 	revalidated := d.revalidateExisting()
 	if revalidated > 0 {
 		opts.Log("revalidated %d compressed files from a previous run", revalidated)
+	}
+
+	// Seed chunk discovery from EVERY local script, not just the ones the
+	// entry HTML reaches: resumed mirrors can hold chunks whose own chunk
+	// maps were never propagated (pre-fix enqueueChunk skipped scanning
+	// local files), leaving transitive lazy chunks unarchived.
+	seeded := d.seedLocalChunks()
+	if seeded > 0 {
+		opts.Log("seeded chunk discovery from %d local scripts", seeded)
 	}
 
 	html, err := d.fetchLocalOrRemote("/" + strings.TrimPrefix(opts.HTML, "/"))
@@ -382,6 +399,29 @@ func revalidate(dir string, write bool) int {
 	return n
 }
 
+// seedLocalChunks enqueues chunk candidates extracted from every .js file
+// already present in the output tree. It runs before the workers start, so
+// discovery can reach chunk maps that only exist in files downloaded by
+// earlier runs. Returns the number of scripts scanned.
+func (d *downloader) seedLocalChunks() int {
+	n := 0
+	_ = filepath.WalkDir(d.opts.Out, func(p string, e os.DirEntry, err error) error {
+		if err != nil || e.IsDir() || !strings.HasSuffix(p, ".js") {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil || !looksTextual(b) {
+			return nil
+		}
+		n++
+		for hash, candidates := range ExtractChunkVariants(string(b)) {
+			d.enqueueChunk(hash, candidates)
+		}
+		return nil
+	})
+	return n
+}
+
 func (d *downloader) enqueue(task func()) {
 	d.wg.Add(1)
 	go func() {
@@ -409,8 +449,18 @@ func (d *downloader) enqueueChunk(hash string, candidates []string) {
 				if dec, ok := DecodeCompressed(cand, b); ok {
 					if !bytes.Equal(dec, b) {
 						_ = d.save(cand, dec)
+						b = dec
 					}
-					return // already have it from a previous run
+					// Already have it - but STILL scan the content: chunks
+					// downloaded by earlier runs never contributed their
+					// chunk maps, which is how transitive lazy chunks went
+					// missing from resumed mirrors (gray spinners).
+					if strings.HasSuffix(cand, ".js") {
+						for h, cs := range ExtractChunkVariants(string(b)) {
+							d.enqueueChunk(h, cs)
+						}
+					}
+					return
 				}
 			}
 			content, err := d.fetchLocalOrRemote(cand)
@@ -508,6 +558,15 @@ func (d *downloader) fetchViaCDX(p string) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
+	// Space CDX calls out process-wide; workers queue here instead of
+	// hammering the API into 429 storms.
+	d.cdxMu.Lock()
+	if wait := time.Until(d.cdxNext); wait > 0 {
+		time.Sleep(wait)
+	}
+	d.cdxNext = time.Now().Add(cdxInterval)
+	d.cdxMu.Unlock()
+
 	ctx := context.Background()
 	target, err := CDXLookup(ctx, d.client, original+p)
 	if err != nil {
