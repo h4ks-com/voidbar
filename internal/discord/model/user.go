@@ -14,6 +14,11 @@ type User struct {
 	Email         string  `json:"email"`
 	Verified      bool    `json:"verified"`
 	MFAEnabled    bool    `json:"mfa_enabled"`
+	// Doubles as "this account has a date of birth" for the Android client
+	// (MeUser.hasBirthday = nsfwAllowance != UNKNOWN); leaving it unset makes
+	// accounts created after 2021-02-05 hit the un-dismissable
+	// REGISTER_AGE_GATE modal on every boot.
+	NsfwAllowed bool `json:"nsfw_allowed"`
 }
 
 func ToUser(u *storage.User) *User {
@@ -24,5 +29,6 @@ func ToUser(u *storage.User) *User {
 		Avatar:        nil,
 		Email:         u.Email,
 		Verified:      true,
+		NsfwAllowed:   true,
 	}
 }

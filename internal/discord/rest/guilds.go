@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/core/network"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
 )
 
@@ -275,7 +276,7 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	buffered := s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
 	out := make([]any, 0, len(buffered))
 	for _, m := range buffered {
-		out = append(out, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, m.AuthorID, m.AuthorName, m.Nonce))
+		out = append(out, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -293,6 +294,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusBadRequest, "empty message")
 		return
 	}
+	// The Android compose box sends a trailing newline with each send (the
+	// same artifact Spacebar renders as a gap under every mobile message);
+	// real Discord trims it server-side, so the bouncer does too.
+	req.Content = strings.TrimRight(req.Content, " \t\r\n")
 	if s.net == nil || s.irc == nil {
 		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
 		return

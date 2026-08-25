@@ -14,6 +14,7 @@ import (
 	"github.com/lrstanley/girc"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
 )
@@ -233,7 +234,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 		"type":             0,
 		"flags":            0,
 		"author": map[string]any{
-			"id":            "irc:" + author,
+			"id":            model.IrcAuthorID("irc:" + author),
 			"username":      author,
 			"discriminator": "0",
 			"bot":           false,

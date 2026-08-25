@@ -6,11 +6,16 @@ import (
 	"github.com/h4ks-com/voidbar/internal/discord/model"
 )
 
+// Payload field order matters: encoding/json emits fields in declaration
+// order, and streaming clients (Android) parse "d" per the ALREADY-READ "t".
+// Dispatch frames must therefore carry t/s before d (real Discord sends
+// {"t":...,"s":...,"op":0,"d":{...}}). op-first is also required for
+// non-dispatch frames (HELLO), which clients dispatch on opcode.
 type Payload struct {
 	Op int             `json:"op"`
-	D  json.RawMessage `json:"d"`
 	S  *int64          `json:"s,omitempty"`
 	T  string          `json:"t,omitempty"`
+	D  json.RawMessage `json:"d"`
 }
 
 type opFrame struct {

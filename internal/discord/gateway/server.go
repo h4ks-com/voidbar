@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -286,6 +287,22 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 	if s.guildsForUser != nil {
 		if raw, err := s.guildsForUser(user.ID); err == nil {
 			guilds = append(guilds, raw...)
+		}
+	}
+	// Debug bisect switch for client-compat work: VOIDBAR_READY_MINIMAL
+	// strips READY down to the fields one by one until a picky client
+	// (Android 126.21) accepts it, pinpointing the offending shape.
+	if os.Getenv("VOIDBAR_READY_MINIMAL") != "" {
+		s.log.Warn("ready_bisect: sending minimal READY (no guilds/users)")
+		guilds = []any{}
+		return &ReadyData{
+			V:                9,
+			User:             model.ToUser(user),
+			Guilds:           guilds,
+			SessionID:        sess.ID,
+			ResumeURL:        s.cfg.GatewayWSURL(),
+			ResumeGatewayURL: s.cfg.GatewayWSURL(),
+			SessionType:      "normal",
 		}
 	}
 	return &ReadyData{

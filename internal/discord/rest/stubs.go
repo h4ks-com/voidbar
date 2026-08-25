@@ -25,6 +25,10 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v9/flurgergson", s.handleNoContent)
 	mux.HandleFunc("PUT /api/v9/fingerprint/whitelist", s.handleNoContent)
 	mux.HandleFunc("GET /api/v9/auth/location-metadata", s.handleLocationMetadata)
+	// The Android client POSTs this before every login (fraud check) and
+	// treats any non-2xx as a network failure ("unknown network error"),
+	// aborting the whole login flow. The value is opaque to us.
+	mux.HandleFunc("POST /api/v9/auth/fingerprint", s.handleAuthFingerprint)
 	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoPatch))
 	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
 	// The legacy (non-proto) settings store: the client PATCHes e.g. the
@@ -52,6 +56,51 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/@me/relationships", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleEmptyMap))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/users", s.requireAuth(s.handleAffinities))
+	// Android client probes after login; 404s leave stores in retry loops
+	// (and the profile screen spins). All are "nothing to show" shapes.
+	mux.HandleFunc("GET /api/v9/users/{id}/profile", s.requireAuth(s.handleUserProfile))
+	mux.HandleFunc("GET /api/v9/users/@me/survey", s.requireAuth(s.handleNull))
+	mux.HandleFunc("POST /api/v9/users/@me/devices", s.requireAuth(s.handleNoContentAuthed))
+}
+
+// handleAuthFingerprint answers the Android client's pre-login fingerprint
+// probe. Format per userdocs (legacy, unauthenticated): a snowflake and a
+// hashed value, "123456789012345678.ABCdef...". Persisting experiments
+// across the auth flow is not implemented; a fresh valid-looking value per
+// call is enough for the client to proceed with login.
+func (s *Server) handleAuthFingerprint(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.Copy(io.Discard, r.Body)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fingerprint": s.auth.Fingerprint(),
+	})
+}
+
+// handleUserProfile answers the Android profile probe. The client renders
+// the user sheet from this; a minimal profile with a connected_account-free
+// body keeps it calm.
+func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	id := r.PathValue("id")
+	username := "user"
+	if id == u.ID {
+		username = u.Username
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":                  id,
+		"username":            username,
+		"discriminator":       "0",
+		"avatar":              nil,
+		"bot":                 false,
+		"public_flags":        0,
+		"flags":               0,
+		"premium_type":        0,
+		"bio":                 "",
+		"connected_accounts":  []any{},
+		"mutual_guilds":       []any{},
+		"mutual_friends_count": 0,
+		"user_profile": map[string]any{
+			"bio": "",
+		},
+	})
 }
 
 // handleLocationMetadata answers the login screen's geo/consent probe with

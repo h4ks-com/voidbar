@@ -37,6 +37,17 @@ func New(store *storage.Storage, sf *util.Snowflake, registration string) *Servi
 
 func (s *Service) Registration() string { return s.registration }
 
+// Fingerprint returns a fresh legacy auth fingerprint ("snowflake.hash" per
+// the userdocs /auth/fingerprint contract). It is opaque to Voidbar and only
+// needs the right shape for clients to carry through the login flow.
+func (s *Service) Fingerprint() string {
+	hash, err := util.RandomToken(27)
+	if err != nil {
+		hash = fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return s.sf.New() + "." + hash
+}
+
 func (s *Service) Register(username, email, password, inviteCode string) (*storage.User, string, error) {
 	if s.registration == "closed" {
 		return nil, "", ErrRegistrationClosed

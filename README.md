@@ -32,8 +32,16 @@ at your own risk.
 ## Status
 
 Work in progress. Phase 1–3 vertical slice is **working end-to-end against a
-live IRC network** (verified with the real Discord web client, build 130303 /
-June 2022, loaded through the loader from the Wayback Machine):
+live IRC network** in two real clients:
+
+- the Discord **web** client, build 130303 / June 2022, loaded through the
+  loader from the Wayback Machine;
+- the Discord **Android** client, 126.21, repackaged with
+  `tools/discord-apk-patcher` (login → READY → channels render, IRC relay
+  in both directions, replay history — see
+  [Android client](#android-client) below).
+
+Both cover:
 
 - REST v9 + Gateway (HELLO/IDENTIFY/READY/HEARTBEAT/RESUME, zlib-stream,
   session replay) enough for the frozen client build to boot and render
@@ -52,6 +60,36 @@ June 2022, loaded through the loader from the Wayback Machine):
   history survives server restarts
 - `voidbar mirror` downloads/repairs the client build locally (brotli/gzip
   bodies from Wayback are decoded; runs self-heal old mirrors)
+
+## Android client
+
+The patched Android build is produced by `tools/discord-apk-patcher`
+(decode → repoint hosts → rebuild → sign). The server carries a few
+Android-specific compatibility details worth knowing about:
+
+- **Gateway frame field order matters**: dispatch frames serialize `op`
+  first, then `t`/`s` before `d` — the client's streaming JSON parser
+  (IncomingParser) reads the header before the body. Go emits struct
+  fields in declaration order, so `internal/discord/gateway/types.go`
+  pins the order.
+- **`nsfw_allowed: true`** on the user object doubles as "this account
+  has a date of birth" for the client (MeUser maps it through
+  NsfwAllowance). Without it, every account with a 2021+ snowflake hits
+  the un-dismissable REGISTER_AGE_GATE modal after login.
+- **IRC authors get deterministic snowflake ids**: the client parses
+  message author ids as 64-bit integers; a literal `"irc:<nick>"` crashes
+  its deserializer and takes down message rendering and the gateway
+  dispatch handler.
+- **Sends are right-trimmed**: the Android compose box appends a trailing
+  newline to every message (the gap Spacebar renders under mobile
+  messages); real Discord trims it server-side, so the bouncer does too.
+- Post-login probes are stubbed so they don't 404-loop:
+  `POST /auth/fingerprint`, `GET /users/{id}/profile`,
+  `GET /users/@me/survey`, `POST /users/@me/devices`.
+  (`GET /sticker-packs` still 404s — harmless.)
+
+`VOIDBAR_READY_MINIMAL=1` on `serve` shrinks the READY payload to the
+minimum known-good set — a bisect switch for future client-compat work.
 
 ## Running a WIP instance
 
@@ -204,8 +242,9 @@ makes the proxy serve purely from the local mirror (no network at runtime).
   (only server password via `pass@` in the connection string), no IRCv3
   caps negotiation (server-time/msgid/batch/multiline ignored; relayed
   messages carry receive-time timestamps).
-- **Settings**: client settings PATCHes are acknowledged (204) but not
-  persisted; per-user appearance/locale reset on reload.
+- **Settings**: legacy (web) client settings are persisted per user
+  (`PATCH /users/@me/settings`); the Android client's appearance settings
+  are not synced and reset on reload.
 - **Invites**: connection strings only — no shareable invite codes for
   other users, no invite expiry/uses semantics (the payload claims
   unlimited).
