@@ -357,6 +357,40 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
 		return
 	}
+	// DM thread: the snowflake resolves to a DMChannel and the relay
+	// targets the peer's nick instead of a #channel.
+	if dm, err := s.net.DMChannelByID(channelID); err == nil {
+		if dm.OwnerID != u.ID {
+			jsonError(w, http.StatusNotFound, "unknown channel")
+			return
+		}
+		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, req.Content); err != nil {
+			jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
+		authorName := u.Username
+		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
+			authorName = mem.Nick
+		}
+		msg := messagePayload(s.net.NewMessageID(), channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
+		if s.gw != nil {
+			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
+		}
+		if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
+			ID:         msg["id"].(string),
+			ChannelID:  channelID,
+			AuthorID:   u.ID,
+			AuthorName: authorName,
+			Content:    req.Content,
+			Nonce:      req.Nonce,
+			Timestamp:  msg["timestamp"].(string),
+		}); err != nil {
+			s.log.Warn("buffer append failed", "err", err, "channel", channelID)
+		}
+		s.net.TouchDMChannel(channelID)
+		writeJSON(w, http.StatusOK, msg)
+		return
+	}
 	ch, err := s.net.ChannelByID(channelID)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "unknown channel")

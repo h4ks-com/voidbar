@@ -298,3 +298,87 @@ func TestReconnectAfterDrop(t *testing.T) {
 	}
 	_ = second.Close()
 }
+
+// TestQueryRelayCreatesDM verifies the inbound-query path: a PRIVMSG whose
+// target is our own nick (not #/&) becomes a DM channel + MESSAGE_CREATE,
+// lands in the replay buffer and shows up in the user's DM list ordering.
+func TestQueryRelayCreatesDM(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveRegistration(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "queryguy", Username: "q", Realname: "q",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+
+	// Inbound query: target is our nick, source is the peer.
+	if _, err := fake.Write([]byte(":stranger!u@h PRIVMSG queryguy :hi there\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, sink, "irc query relayed")
+
+	dms, err := store.ListDMChannels("u1")
+	if err != nil || len(dms) != 1 {
+		t.Fatalf("dm list: %v %v", dms, err)
+	}
+	if dms[0].Nick != "stranger" || dms[0].NetworkID != "net1" || dms[0].OwnerID != "u1" {
+		t.Fatalf("dm record: %+v", dms[0])
+	}
+	// Same peer again: still one thread.
+	if _, err := fake.Write([]byte(":stranger!u@h PRIVMSG queryguy :again\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitForCount(t, sink, "irc query relayed", 2)
+	dms, _ = store.ListDMChannels("u1")
+	if len(dms) != 1 {
+		t.Fatalf("dm must be deduped by peer nick, got %d", len(dms))
+	}
+	// Replay buffer holds both messages.
+	msgs := store.ChannelMessages(dms[0].ID, "", "", 50)
+	if len(msgs) != 2 || msgs[1].Content != "hi there" || msgs[0].Content != "again" {
+		t.Fatalf("dm buffer: %+v", msgs)
+	}
+}

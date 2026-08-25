@@ -189,6 +189,37 @@ func (s *Service) ChannelByID(id string) (*storage.Channel, error) {
 	return s.store.GetChannel(id)
 }
 
+// DMChannelByID resolves a snowflake id to a DM thread.
+func (s *Service) DMChannelByID(id string) (*storage.DMChannel, error) {
+	return s.store.GetDMChannel(id)
+}
+
+// DMChannelsFor lists a user's DM threads (newest activity first).
+func (s *Service) DMChannelsFor(userID string) []*storage.DMChannel {
+	dms, err := s.store.ListDMChannels(userID)
+	if err != nil {
+		return nil
+	}
+	return dms
+}
+
+// EnsureDMChannel returns (creating if needed) the user's DM thread with a
+// nick on a network.
+func (s *Service) EnsureDMChannel(userID, netID, nick string) (*storage.DMChannel, error) {
+	return s.store.EnsureDMChannel(userID, netID, nick, s.sf.New)
+}
+
+// TouchDMChannel bumps a DM thread's activity timestamp.
+func (s *Service) TouchDMChannel(id string) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.TouchDMChannel(id); err != nil {
+		// Ordering-only metadata: never fatal, the caller has no logger.
+		_ = err
+	}
+}
+
 // NewMessageID mints a snowflake id for a message.
 func (s *Service) NewMessageID() string { return s.sf.New() }
 

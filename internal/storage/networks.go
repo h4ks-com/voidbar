@@ -25,14 +25,14 @@ type Network struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Channel is a Discord-facing channel backed by an IRC channel. IDs are
-// snowflakes: they end up in URLs (/channels/<guild>/<channel>), so the
-// IRC name itself (with its # and friends) must never appear there.
+// Channel is a Discord-facing channel backed by an IRC channel or query.
+// IDs are snowflakes: they end up in URLs (/channels/<guild>/<channel>), so
+// the IRC name itself (with its # and friends) must never appear there.
 type Channel struct {
 	ID        string    `json:"id"`
 	NetworkID string    `json:"network_id"`
-	IRCName   string    `json:"irc_name"` // "#go"
-	Name      string    `json:"name"`     // "go"
+	IRCName   string    `json:"irc_name"` // "#go" or a bare nick for DMs
+	Name      string    `json:"name"`     // "go" / the nick
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -40,6 +40,24 @@ func chanKey(id string) []byte { return []byte("chan/" + id) }
 func chanNetKey(netID, ircName string) []byte {
 	return []byte("channet/" + netID + "/" + ircName)
 }
+
+// DMChannel is a Discord-facing DM channel backed by an IRC query with one
+// upstream user. Per (owner, network, nick) - each bouncer user carries
+// their own query threads, mirroring per-connection IRC state.
+type DMChannel struct {
+	ID        string    `json:"id"`
+	NetworkID string    `json:"network_id"`
+	OwnerID   string    `json:"owner_id"`
+	Nick      string    `json:"nick"`
+	LastMsgAt time.Time `json:"last_msg_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func dmKey(id string) []byte { return []byte("dm/" + id) }
+func dmOwnerKey(owner, netID, nick string) []byte {
+	return []byte("dmown/" + owner + "/" + netID + "/" + nick)
+}
+func dmOwnerPrefix(owner string) []byte { return []byte("dmown/" + owner + "/") }
 
 // EnsureChannel registers the network's IRC channel and returns its stable,
 // URL-safe snowflake id. Idempotent by (network, irc name).
@@ -111,6 +129,119 @@ func (s *Storage) ChannelsByIRC(netID string, ircNames []string, newID func() st
 		out = append(out, ch)
 	}
 	return out, nil
+}
+
+// EnsureDMChannel returns (creating if needed) the owner's DM thread with
+// an upstream nick on a network. Idempotent by (owner, network, nick).
+func (s *Storage) EnsureDMChannel(owner, netID, nick string, newID func() string) (*DMChannel, error) {
+	var dm DMChannel
+	err := s.db.Update(func(txn *badger.Txn) error {
+		idx, err := txn.Get(dmOwnerKey(owner, netID, nick))
+		if err == nil {
+			return idx.Value(func(id []byte) error {
+				item, err := txn.Get(dmKey(string(id)))
+				if err != nil {
+					return err
+				}
+				return item.Value(func(val []byte) error { return json.Unmarshal(val, &dm) })
+			})
+		}
+		if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		dm = DMChannel{
+			ID:        newID(),
+			NetworkID: netID,
+			OwnerID:   owner,
+			Nick:      nick,
+			CreatedAt: time.Now().UTC(),
+		}
+		b, err := json.Marshal(dm)
+		if err != nil {
+			return err
+		}
+		if err := txn.Set(dmKey(dm.ID), b); err != nil {
+			return err
+		}
+		return txn.Set(dmOwnerKey(owner, netID, nick), []byte(dm.ID))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dm, nil
+}
+
+// GetDMChannel loads a DM channel by id.
+func (s *Storage) GetDMChannel(id string) (*DMChannel, error) {
+	var dm DMChannel
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(dmKey(id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error { return json.Unmarshal(val, &dm) })
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &dm, nil
+}
+
+// ListDMChannels returns every DM thread a user owns, newest activity
+// first (the order the Direct Messages list renders in).
+func (s *Storage) ListDMChannels(owner string) ([]*DMChannel, error) {
+	var out []*DMChannel
+	// Resolve via the owner index, then load each record; LastMsgAt lives
+	// only in the record, so sorting happens after the load.
+	err := s.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		prefix := dmOwnerPrefix(owner)
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			var dm DMChannel
+			ok := item.Value(func(id []byte) error {
+				rec, err := txn.Get(dmKey(string(id)))
+				if err != nil {
+					return nil // orphan index entry: skip, don't abort
+				}
+				return rec.Value(func(val []byte) error { return json.Unmarshal(val, &dm) })
+			}) == nil
+			if ok {
+				out = append(out, &dm)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastMsgAt.After(out[j].LastMsgAt) })
+	return out, nil
+}
+
+// TouchDMChannel bumps a DM thread's activity timestamp (called on every
+// relayed message so ListDMChannels ordering tracks the conversation).
+func (s *Storage) TouchDMChannel(id string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(dmKey(id))
+		if err != nil {
+			return err
+		}
+		var dm DMChannel
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &dm) }); err != nil {
+			return err
+		}
+		dm.LastMsgAt = time.Now().UTC()
+		b, err := json.Marshal(dm)
+		if err != nil {
+			return err
+		}
+		return txn.Set(dmKey(id), b)
+	})
 }
 
 // Membership ties a user to a network with their per-connection identity.

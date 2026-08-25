@@ -255,8 +255,8 @@ func (m *Manager) registerHandlers(c *conn) {
 
 func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
-		// Queries (DMs) arrive as a bare nick target; DM wiring comes later.
-		m.log.Info("irc query skipped", "user", c.userID, "from", author)
+		// Query (DM): target is our own nick, author is the peer.
+		m.dispatchQuery(c, author, content, ts)
 		return
 	}
 	channelID := ""
@@ -310,6 +310,102 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
 	}
+}
+
+// dispatchQuery relays an inbound IRC query (PRIVMSG to our nick) into the
+// user's DM channel with the peer. The DM channel is created on first
+// contact, announced via CHANNEL_CREATE (so it pops into the DM list) and
+// feeds the same replay buffer as channels.
+func (m *Manager) dispatchQuery(c *conn, author, content, ts string) {
+	dm, err := m.store.EnsureDMChannel(c.userID, c.networkID, author, m.sf.New)
+	if err != nil {
+		m.log.Warn("dm channel ensure failed", "err", err, "user", c.userID, "from", author)
+		return
+	}
+	// First contact: the client learns about the DM thread through
+	// CHANNEL_CREATE (it renders in the Direct Messages list).
+	if time.Since(dm.CreatedAt) < 3*time.Second {
+		m.gw.Dispatch(c.userID, "CHANNEL_CREATE", m.dmChannelPayload(dm))
+	}
+	msgID := m.sf.New()
+	peerID := model.IrcAuthorID("irc:" + author)
+	payload := map[string]any{
+		"id":               msgID,
+		"channel_id":       dm.ID,
+		"content":          content,
+		"timestamp":        ts,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nil,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
+		"author": map[string]any{
+			"id":            peerID,
+			"username":      author,
+			"discriminator": "0",
+			"bot":           false,
+		},
+	}
+	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
+	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
+	if err := m.store.AppendMessage(storage.BufferedMessage{
+		ID:         msgID,
+		ChannelID:  dm.ID,
+		AuthorID:   "irc:" + author,
+		AuthorName: author,
+		Content:    content,
+		Timestamp:  ts,
+		Type:       0,
+	}); err != nil {
+		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
+	}
+	if err := m.store.TouchDMChannel(dm.ID); err != nil {
+		m.log.Warn("dm touch failed", "err", err, "dm", dm.ID)
+	}
+}
+
+// dmChannelPayload shapes a DMChannel for the client (DM channel object:
+// type 1, recipients = [peer]).
+func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
+	return map[string]any{
+		"id":       dm.ID,
+		"type":     1,
+		"flags":    0,
+		"last_message_id": nil,
+		"recipients": []any{map[string]any{
+			"id":            model.IrcAuthorID("irc:" + dm.Nick),
+			"username":      dm.Nick,
+			"discriminator": "0",
+			"bot":           false,
+		}},
+	}
+}
+
+// SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).
+func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	client.Cmd.Message(nick, content)
+	return nil
 }
 
 // JoinChannel makes the user's upstream connection join an IRC channel

@@ -289,5 +289,29 @@ func (s *Server) handleUserGuilds(w http.ResponseWriter, r *http.Request, u *sto
 }
 
 func (s *Server) handleUserChannels(w http.ResponseWriter, r *http.Request, u *storage.User) {
-	writeJSON(w, http.StatusOK, []any{})
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	dms := s.net.DMChannelsFor(u.ID)
+	out := make([]any, 0, len(dms))
+	for _, dm := range dms {
+		out = append(out, map[string]any{
+			"id":               dm.ID,
+			"type":             1,
+			"flags":            0,
+			"last_message_id":  nil,
+			"last_message_timestamp": nil,
+			"recipients": []any{map[string]any{
+				"id":            model.IrcAuthorID("irc:" + dm.Nick),
+				"username":      dm.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			}},
+			"is_message_request":        false,
+			"is_message_request_timestamp": nil,
+			"is_spam":                   false,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
