@@ -344,6 +344,83 @@ func TestChannelMembersFromNAMES(t *testing.T) {
 		t.Fatalf("members: %v", got)
 	}
 }
+
+// TestChannelMembersModesFromNAMES: prefixed NAMES entries must surface
+// their highest channel-membership mode (girc maps prefixes through the
+// server's advertised PREFIX; the fake advertises none, so the standard
+// @=op +=voice apply).
+func TestChannelMembersModesFromNAMES(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinable(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "modguy", Username: "m", Realname: "m",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+	if _, err := fake.Write([]byte(":fake 353 modguy = #test :modguy @opnick +voicenick plainnick\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var got []ChannelMember
+	for time.Now().Before(deadline) {
+		got = manager.ChannelMembersDetailed("u1", "net1", "#test")
+		if len(got) == 4 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	modes := map[string]string{}
+	for _, cm := range got {
+		modes[cm.Nick] = cm.Mode
+	}
+	if modes["opnick"] != "o" || modes["voicenick"] != "v" || modes["plainnick"] != "" || modes["modguy"] != "" {
+		t.Fatalf("modes: %v", modes)
+	}
+}
 // the upstream refuses (473 invite-only) must leave no trace in the
 // auto-join list, and Clyde must DM the user the reason. A join the server
 // accepts echoes back and triggers no rollback.

@@ -212,11 +212,15 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 			"member_list_id":  guildID + ":everyone:0,99",
 		})
 	}
+	// Keep the role set in sync with GUILD_CREATE: the member sidebar's
+	// role sections and name colors resolve through the guild's roles.
+	roles := append([]any{model.EveryoneRolePayload(guildID)}, model.IrcRolePayloads()...)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":           guildID,
 		"name":         net.Name,
 		"owner_id":     model.ClydeID,
 		"channels":     channels,
+		"roles":        roles,
 		"member_count": len(channels) + 1,
 	})
 }

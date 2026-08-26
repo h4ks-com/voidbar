@@ -411,7 +411,10 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 // GUILD_MEMBER_LIST_UPDATE SYNC for one channel (or the guild-wide
 // everyone-list when channelID is empty). Members come from the upstream
 // NAMES state; presence is online for everyone (IRC has no per-user
-// offline: you see exactly who is in the channel).
+// offline: you see exactly who is in the channel). Occupants with a
+// channel-membership prefix land in their own hoisted role sections
+// (founder/admin/operator/half-op/voice), plain members follow under
+// "online".
 func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	mem, err := s.store.GetMembership(guildID, userID)
 	if err != nil {
@@ -425,59 +428,48 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		}
 		ircName = ch.IRCName
 	}
-	var nicks []string
-	if s.manager != nil {
-		if ircName != "" {
-			nicks = s.manager.ChannelMembers(userID, guildID, ircName)
-		} else {
-			// Guild-wide list: union across the member's channels.
-			seen := map[string]bool{}
-			for _, chName := range mem.AutoJoin {
-				for _, n := range s.manager.ChannelMembers(userID, guildID, chName) {
-					if !seen[n] {
-						seen[n] = true
-						nicks = append(nicks, n)
-					}
-				}
-			}
-			sort.Strings(nicks)
+	var list []ircmanage.ChannelMember
+	if ircName != "" {
+		if s.manager != nil {
+			list = s.manager.ChannelMembersDetailed(userID, guildID, ircName)
 		}
+	} else {
+		// Guild-wide list: union across the member's channels.
+		list = s.ircOccupants(userID, guildID, mem.AutoJoin)
 	}
-	if len(nicks) > 99 {
-		nicks = nicks[:99]
+	if len(list) > 99 {
+		list = list[:99]
 	}
 
-	items := make([]any, 0, len(nicks)+1)
-	items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(nicks)}})
-	for _, nick := range nicks {
-		uid := model.IrcAuthorID("irc:" + nick)
-		// COMPAT: presence lives INSIDE the member object here (the item
-		// parser only knows the "group"/"member" keys, and GuildMember
-		// itself carries a presence field the client reads via
-		// StoreStream.handleItem).
-		items = append(items, map[string]any{
-			"member": map[string]any{
-				"user": map[string]any{
-					"id":            uid,
-					"username":      nick,
-					"discriminator": "0",
-					"bot":           false,
-				},
-				"roles":     []any{},
-				"joined_at": mem.JoinedAt.Format(time.RFC3339),
-				"presence": map[string]any{
-					"user":   map[string]any{"id": uid},
-					"status": "online",
-				},
-			},
-		})
+	joinedAt := mem.JoinedAt.Format(time.RFC3339)
+	byMode := make(map[string][]string, len(list))
+	for _, cm := range list {
+		byMode[cm.Mode] = append(byMode[cm.Mode], cm.Nick)
+	}
+	groups := make([]any, 0, len(model.IrcRoleModes())+1)
+	items := make([]any, 0, len(list)+1)
+	for _, mode := range model.IrcRoleModes() {
+		nicks := byMode[mode]
+		if len(nicks) == 0 {
+			continue
+		}
+		roleID := model.IrcRoleID(mode)
+		groups = append(groups, map[string]any{"id": roleID, "count": len(nicks)})
+		items = append(items, map[string]any{"group": map[string]any{"id": roleID, "count": len(nicks)}})
+		for _, nick := range nicks {
+			items = append(items, memberListItem(nick, joinedAt, mode))
+		}
+	}
+	plain := byMode[""]
+	groups = append(groups, map[string]any{"id": "online", "count": len(plain)})
+	items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(plain)}})
+	for _, nick := range plain {
+		items = append(items, memberListItem(nick, joinedAt, ""))
 	}
 	return map[string]any{
 		"id":       guildID + ":everyone:0,99",
 		"guild_id": guildID,
-		"groups": []any{
-			map[string]any{"id": "online", "count": len(nicks)},
-		},
+		"groups":   groups,
 		"ops": []any{
 			map[string]any{
 				"op":    "SYNC",
@@ -486,6 +478,69 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 			},
 		},
 	}
+}
+
+// memberListItem builds one GUILD_MEMBER_LIST_UPDATE member row. COMPAT:
+// presence lives INSIDE the member object here (the item parser only
+// knows the "group"/"member" keys, and GuildMember itself carries a
+// presence field the client reads via StoreStream.handleItem).
+func memberListItem(nick, joinedAt, mode string) map[string]any {
+	uid := model.IrcAuthorID("irc:" + nick)
+	return map[string]any{
+		"member": map[string]any{
+			"user": map[string]any{
+				"id":            uid,
+				"username":      nick,
+				"discriminator": "0",
+				"bot":           false,
+			},
+			"roles":     ircRoleIDsFor(mode),
+			"joined_at": joinedAt,
+			"presence": map[string]any{
+				"user":   map[string]any{"id": uid},
+				"status": "online",
+			},
+		},
+	}
+}
+
+// ircRoleIDsFor wraps a membership mode's role id for a member payload
+// (empty slice for plain members).
+func ircRoleIDsFor(mode string) []any {
+	if model.IrcModeRank(mode) == 0 {
+		return []any{}
+	}
+	return []any{model.IrcRoleID(mode)}
+}
+
+// ircOccupants returns the union of channel occupants across ircNames,
+// each with their highest mode across those channels, sorted by nick.
+func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ircmanage.ChannelMember {
+	if s.manager == nil {
+		return nil
+	}
+	best := map[string]string{}
+	seen := map[string]bool{}
+	var nicks []string
+	for _, chName := range ircNames {
+		for _, cm := range s.manager.ChannelMembersDetailed(userID, networkID, chName) {
+			if !seen[cm.Nick] {
+				seen[cm.Nick] = true
+				nicks = append(nicks, cm.Nick)
+			}
+			if model.IrcModeRank(cm.Mode) > model.IrcModeRank(best[cm.Nick]) {
+				best[cm.Nick] = cm.Mode
+			}
+		}
+	}
+	sort.Slice(nicks, func(i, j int) bool {
+		return strings.ToLower(nicks[i]) < strings.ToLower(nicks[j])
+	})
+	out := make([]ircmanage.ChannelMember, 0, len(nicks))
+	for _, n := range nicks {
+		out = append(out, ircmanage.ChannelMember{Nick: n, Mode: best[n]})
+	}
+	return out
 }
 
 // MemberChunkPayload answers op 8 (Request Guild Members) with a single
@@ -501,35 +556,23 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 	for _, id := range userIDs {
 		want[id] = true
 	}
-	var nicks []string
-	if s.manager != nil {
-		seen := map[string]bool{}
-		for _, chName := range mem.AutoJoin {
-			for _, n := range s.manager.ChannelMembers(userID, guildID, chName) {
-				if !seen[n] {
-					seen[n] = true
-					nicks = append(nicks, n)
-				}
-			}
-		}
-		sort.Strings(nicks)
-	}
-	members := make([]any, 0, len(nicks))
-	presences := make([]any, 0, len(nicks))
-	for _, nick := range nicks {
-		uid := model.IrcAuthorID("irc:" + nick)
+	list := s.ircOccupants(userID, guildID, mem.AutoJoin)
+	members := make([]any, 0, len(list))
+	presences := make([]any, 0, len(list))
+	for _, cm := range list {
+		uid := model.IrcAuthorID("irc:" + cm.Nick)
 		if len(want) > 0 && !want[uid] {
 			continue
 		}
 		user := map[string]any{
 			"id":            uid,
-			"username":      nick,
+			"username":      cm.Nick,
 			"discriminator": "0",
 			"bot":           false,
 		}
 		members = append(members, map[string]any{
 			"user":      user,
-			"roles":     []any{},
+			"roles":     ircRoleIDsFor(cm.Mode),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 		presences = append(presences, map[string]any{
@@ -609,6 +652,22 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		channels = append(channels, s.channelPayload(net.ID, ch, i))
 	}
 
+	// IRC occupants ride along as guild members. The client only lazy-loads
+	// the member sidebar (op 14 lazy list) for "large" guilds; with
+	// large:false it renders straight from GUILD_CREATE's members/presences,
+	// so the NAMES state has to be inlined here too. Occupants carry their
+	// highest channel-membership mode as a synthetic role (name color +
+	// hoisted sidebar section).
+	occupants := s.ircOccupants(m.UserID, net.ID, m.AutoJoin)
+	modeByLower := make(map[string]string, len(occupants))
+	for _, cm := range occupants {
+		modeByLower[strings.ToLower(cm.Nick)] = cm.Mode
+	}
+	seenUser := map[string]bool{}
+	for _, mem := range all {
+		seenUser[mem.UserID] = true
+	}
+
 	members := make([]any, 0, len(all)+1)
 	presences := make([]any, 0)
 	for _, mem := range all {
@@ -619,7 +678,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"discriminator": "0",
 				"bot":           false,
 			},
-			"roles":     []any{},
+			"roles":     ircRoleIDsFor(modeByLower[strings.ToLower(mem.Nick)]),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 	}
@@ -627,64 +686,32 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// "Delete server" owner flow stays hidden, "Leave server" shows).
 	members = append(members, model.ClydeMember(net.CreatedAt.Format(time.RFC3339)))
 
-	// IRC occupants ride along as guild members. The client only lazy-loads
-	// the member sidebar (op 14 lazy list) for "large" guilds; with
-	// large:false it renders straight from GUILD_CREATE's members/presences,
-	// so the NAMES state has to be inlined here too.
-	seenUser := map[string]bool{}
-	for _, mem := range all {
-		seenUser[mem.UserID] = true
-	}
-	if s.manager != nil {
-		seenNick := map[string]bool{}
-		var occupants []string
-		for _, chName := range m.AutoJoin {
-			for _, nick := range s.manager.ChannelMembers(m.UserID, net.ID, chName) {
-				if !seenNick[nick] {
-					seenNick[nick] = true
-					occupants = append(occupants, nick)
-				}
-			}
+	for _, cm := range occupants {
+		uid := model.IrcAuthorID("irc:" + cm.Nick)
+		if seenUser[uid] {
+			continue
 		}
-		sort.Strings(occupants)
-		for _, nick := range occupants {
-			uid := model.IrcAuthorID("irc:" + nick)
-			if seenUser[uid] {
-				continue
-			}
-			members = append(members, map[string]any{
-				"user": map[string]any{
-					"id":            uid,
-					"username":      nick,
-					"discriminator": "0",
-					"bot":           false,
-				},
-				"roles":     []any{},
-				"joined_at": m.JoinedAt.Format(time.RFC3339),
-			})
-			presences = append(presences, map[string]any{
-				"user": map[string]any{"id": uid},
-				"status": "online",
-			})
-		}
+		members = append(members, map[string]any{
+			"user": map[string]any{
+				"id":            uid,
+				"username":      cm.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			},
+			"roles":     ircRoleIDsFor(cm.Mode),
+			"joined_at": m.JoinedAt.Format(time.RFC3339),
+		})
+		presences = append(presences, map[string]any{
+			"user": map[string]any{"id": uid},
+			"status": "online",
+		})
 	}
 
 	// Every Discord guild has an @everyone role whose id equals the guild id;
 	// the client computes channel permissions through it, and without the
-	// role channels appear inaccessible.
-	everyoneRole := map[string]any{
-		"id":            net.ID,
-		"name":          "@everyone",
-		"color":         0,
-		"hoist":         false,
-		"icon":          nil,
-		"unicode_emoji": nil,
-		"position":      0,
-		"permissions":   "104324673682449", // everything incl. MANAGE_CHANNELS, owner-oriented bouncer
-		"managed":       false,
-		"mentionable":   false,
-		"flags":         0,
-	}
+	// role channels appear inaccessible. The IRC prefix roles ride along so
+	// member name colors and hoisted sidebar sections resolve.
+	roles := append([]any{model.EveryoneRolePayload(net.ID)}, model.IrcRolePayloads()...)
 
 	return map[string]any{
 		"id":                            net.ID,
@@ -696,7 +723,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		"members":                       members,
 		"member_count":                  len(members),
 		"large":                         false,
-		"roles":                         []any{everyoneRole},
+		"roles":                         roles,
 		"presences":                     presences,
 		"voice_states":                  []any{},
 		"threads":                       []any{},

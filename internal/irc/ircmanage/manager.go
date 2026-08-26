@@ -522,10 +522,31 @@ func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
 	}
 }
 
+// ChannelMember is one channel occupant from the live NAMES state, with
+// their highest channel-membership mode (q/a/o/h/v per PREFIX, or "" for
+// plain members).
+type ChannelMember struct {
+	Nick string
+	Mode string
+}
+
 // ChannelMembers returns the nicks currently in an IRC channel according
 // to girc's live channel state (fed by NAMES on join plus JOIN/PART/QUIT).
 // Sorted for stable list rendering. Empty when the channel is unknown.
 func (m *Manager) ChannelMembers(userID, networkID, ircName string) []string {
+	detailed := m.ChannelMembersDetailed(userID, networkID, ircName)
+	nicks := make([]string, 0, len(detailed))
+	for _, cm := range detailed {
+		nicks = append(nicks, cm.Nick)
+	}
+	return nicks
+}
+
+// ChannelMembersDetailed is ChannelMembers with each occupant's highest
+// channel-membership mode, resolved through the PREFIX mapping the server
+// advertised (~&@%+ → q a o h v; server-specific prefixes beyond the five
+// standard modes have no Discord role and are ignored).
+func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []ChannelMember {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -541,15 +562,34 @@ func (m *Manager) ChannelMembers(userID, networkID, ircName string) []string {
 		return nil
 	}
 	users := ch.Users(client)
-	nicks := make([]string, 0, len(users))
+	members := make([]ChannelMember, 0, len(users))
 	for _, u := range users {
 		if u == nil {
 			continue
 		}
-		nicks = append(nicks, u.Nick)
+		mode := ""
+		if u.Perms != nil {
+			if perms, ok := u.Perms.Lookup(ch.Name); ok {
+				switch {
+				case perms.Owner:
+					mode = model.IrcModeFounder
+				case perms.Admin:
+					mode = model.IrcModeAdmin
+				case perms.Op:
+					mode = model.IrcModeOp
+				case perms.HalfOp:
+					mode = model.IrcModeHalfOp
+				case perms.Voice:
+					mode = model.IrcModeVoice
+				}
+			}
+		}
+		members = append(members, ChannelMember{Nick: u.Nick, Mode: mode})
 	}
-	sort.Strings(nicks)
-	return nicks
+	sort.Slice(members, func(i, j int) bool {
+		return strings.ToLower(members[i].Nick) < strings.ToLower(members[j].Nick)
+	})
+	return members
 }
 
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).

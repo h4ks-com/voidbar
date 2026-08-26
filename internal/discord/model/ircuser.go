@@ -18,12 +18,19 @@ func IrcAuthorID(authorID string) string {
 	if !strings.HasPrefix(authorID, prefix) {
 		return authorID
 	}
+	return hashSnowflake(authorID)
+}
+
+// hashSnowflake maps an arbitrary seed to a stable snowflake-shaped
+// decimal string. The Android client parses ids as 64-bit integers, so
+// the result must be a plain positive decimal; the value is spread over
+// Discord's 2015..2017 era so ids sort like plausible snowflakes and stay
+// inside a signed int64 after the <<22 shift; low 22 bits carry the rest
+// of the hash.
+func hashSnowflake(seed string) string {
 	h := fnv.New64a()
-	h.Write([]byte(authorID))
+	h.Write([]byte(seed))
 	v := h.Sum64()
-	// Spread over Discord's 2015..2017 era so ids sort like plausible
-	// snowflakes and stay inside a signed int64 after the <<22 shift; low
-	// 22 bits carry the rest of the hash.
 	const epoch = uint64(1420070400000)  // Discord epoch, ms
 	ms := epoch + v%(uint64(63072000000)) // + up to ~2 years
 	sf := (ms << 22) | (v & 0x3FFFFF)
