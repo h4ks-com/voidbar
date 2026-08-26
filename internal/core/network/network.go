@@ -209,6 +209,29 @@ func (s *Service) DMChannelsFor(userID string) []*storage.DMChannel {
 	return dms
 }
 
+// dmPeerFor renders the DM peer so its id matches what the client
+// already saw: a fellow bouncer member is addressed by their real user
+// id everywhere (guild payloads, member rows), while plain IRC nicks use
+// the IrcAuthorID hash. Matching is by live nick first, stored nick
+// second (the server may have renamed them).
+func (s *Service) dmPeerFor(netID, nick string) map[string]any {
+	others, err := s.store.ListMemberships(netID)
+	if err == nil {
+		for _, o := range others {
+			n := o.Nick
+			if s.manager != nil {
+				if live := s.manager.LiveNick(o.UserID, netID); live != "" {
+					n = live
+				}
+			}
+			if strings.EqualFold(n, nick) {
+				return model.DMPeerID(nick, o.UserID)
+			}
+		}
+	}
+	return model.DMPeer(nick)
+}
+
 // DMChannelPayloads shapes the user's DM threads for the client (READY
 // private_channels and GET /users/@me/channels share the wire form).
 func (s *Service) DMChannelPayloads(userID string) []any {
@@ -221,7 +244,7 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 			"flags":                       0,
 			"last_message_id":             nil,
 			"last_message_timestamp":      nil,
-			"recipients":                  []any{model.DMPeer(dm.Nick)},
+			"recipients":                  []any{s.dmPeerFor(dm.NetworkID, dm.Nick)},
 			"is_message_request":           false,
 			"is_message_request_timestamp": nil,
 			"is_spam":                      false,
@@ -234,6 +257,68 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 // nick on a network.
 func (s *Service) EnsureDMChannel(userID, netID, nick string) (*storage.DMChannel, error) {
 	return s.store.EnsureDMChannel(userID, netID, nick, s.sf.New)
+}
+
+// ErrUnknownRecipient reports a DM recipient the bouncer can't resolve to
+// an IRC nick on any of the user's networks.
+var ErrUnknownRecipient = errors.New("unknown recipient")
+
+// CreateDMChannel answers POST /users/@me/channels: resolve the recipient
+// id back to an IRC nick on one of the user's networks and open (or
+// return) the DM thread. The ids the client can pick came from payloads we
+// built - synthetic IRC-author snowflakes from the member sidebar or a
+// fellow bouncer member's user id - so the reverse mapping only needs the
+// live NAMES state plus the network's membership list.
+func (s *Service) CreateDMChannel(userID, recipientID string) (map[string]any, error) {
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range memberships {
+		// Fellow bouncer members show up with their real user id; their
+		// DM peer nick is whatever they hold on the wire right now.
+		others, err := s.store.ListMemberships(m.NetworkID)
+		if err == nil {
+			for _, o := range others {
+				if o.UserID != recipientID || o.UserID == userID {
+					continue
+				}
+				nick := o.Nick
+				if s.manager != nil {
+					if live := s.manager.LiveNick(o.UserID, m.NetworkID); live != "" {
+						nick = live
+					}
+				}
+				return s.dmPayloadFor(userID, m.NetworkID, nick)
+			}
+		}
+		// IRC occupants: their payload ids are IrcAuthorID("irc:"+nick).
+		for _, cm := range s.ircOccupants(userID, m.NetworkID, m.AutoJoin) {
+			if model.IrcAuthorID("irc:"+cm.Nick) == recipientID {
+				return s.dmPayloadFor(userID, m.NetworkID, cm.Nick)
+			}
+		}
+	}
+	return nil, ErrUnknownRecipient
+}
+
+// dmPayloadFor opens the DM thread and shapes it like DMChannelPayloads.
+func (s *Service) dmPayloadFor(userID, netID, nick string) (map[string]any, error) {
+	dm, err := s.EnsureDMChannel(userID, netID, nick)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"id":                          dm.ID,
+		"type":                        1,
+		"flags":                       0,
+		"last_message_id":             nil,
+		"last_message_timestamp":      nil,
+		"recipients":                  []any{s.dmPeerFor(netID, dm.Nick)},
+		"is_message_request":           false,
+		"is_message_request_timestamp": nil,
+		"is_spam":                     false,
+	}, nil
 }
 
 // TouchDMChannel bumps a DM thread's activity timestamp.

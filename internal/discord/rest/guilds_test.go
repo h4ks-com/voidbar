@@ -190,3 +190,81 @@ func TestJoinInvite(t *testing.T) {
 		t.Fatalf("guild: %v", out)
 	}
 }
+
+// TestCreateDM: POST /users/@me/channels with a fellow member's user id
+// opens a 1:1 channel (recipient resolved through the network's
+// membership list); unknown ids are rejected; the channel then shows up
+// in GET /users/@me/channels.
+func TestCreateDM(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buddy, _, err := svc.Register("ircbuddy", "ircbuddy@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+
+	const conn = "ircs://irc.libera.chat:6697/#go?name=Libera"
+	if _, err := netSvc.Join(user.ID, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := netSvc.Join(buddy.ID, conn); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, out := do(t, h, "POST", "/api/v9/users/@me/channels", token, map[string]any{
+		"recipient_id": buddy.ID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create dm: %d %v", rec.Code, out)
+	}
+	dm := out
+	if dm["type"] != float64(1) {
+		t.Fatalf("dm type: %v", dm["type"])
+	}
+	recipients, _ := dm["recipients"].([]any)
+	if len(recipients) != 1 {
+		t.Fatalf("recipients: %v", dm["recipients"])
+	}
+	peer, _ := recipients[0].(map[string]any)
+	if peer["id"] != buddy.ID || peer["username"] != "ircbuddy" {
+		t.Fatalf("peer: %v", peer)
+	}
+
+	// Same recipient returns the same channel (idempotent open).
+	rec, out2 := do(t, h, "POST", "/api/v9/users/@me/channels", token, map[string]any{
+		"recipient_id": buddy.ID,
+	})
+	if rec.Code != http.StatusOK || out2["id"] != dm["id"] {
+		t.Fatalf("idempotent dm: %d %v vs %v", rec.Code, out2["id"], dm["id"])
+	}
+
+	rec, _ = do(t, h, "POST", "/api/v9/users/@me/channels", token, map[string]any{
+		"recipient_id": "123456789012345678",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown recipient: %d", rec.Code)
+	}
+
+	rec, raw3 := doAny(t, h, "GET", "/api/v9/users/@me/channels", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list dms: %d", rec.Code)
+	}
+	list, _ := raw3.([]any)
+	if len(list) != 1 || list[0].(map[string]any)["id"] != dm["id"] {
+		t.Fatalf("dm list: %v", raw3)
+	}
+}

@@ -230,6 +230,64 @@ type sendMessageRequest struct {
 	Nonce   any    `json:"nonce"`
 }
 
+// flexID accepts a snowflake as string OR bare JSON number: the Android
+// client serializes some ids as numbers (see the gateway op 8/14 quirk),
+// and a plain string field would fail the whole body decode.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "null" || s == "" {
+		*f = ""
+		return nil
+	}
+	*f = flexID(s)
+	return nil
+}
+
+// createDMRequest is the Create DM body: recipient_id (v9) or the first
+// entry of recipients (v10+ shape, same effect for 1:1 threads).
+type createDMRequest struct {
+	RecipientID flexID   `json:"recipient_id"`
+	Recipients  []flexID `json:"recipients"`
+}
+
+func (r createDMRequest) recipient() string {
+	if r.RecipientID != "" {
+		return string(r.RecipientID)
+	}
+	if len(r.Recipients) > 0 {
+		return string(r.Recipients[0])
+	}
+	return ""
+}
+
+// handleCreateDM answers POST /users/@me/channels: the client's
+// "new DM" picker hands us a user id; we resolve it back to an IRC nick
+// (or a fellow bouncer member) and return the 1:1 channel.
+func (s *Server) handleCreateDM(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	var req createDMRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	recipient := req.recipient()
+	if recipient == "" {
+		jsonError(w, http.StatusBadRequest, "recipient_id is required")
+		return
+	}
+	payload, err := s.net.CreateDMChannel(u.ID, recipient)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "unknown recipient")
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 // messagePayload builds the full stock Discord message shape shared by the
 // send response, gateway MESSAGE_CREATE fanout and buffered history reads.
 func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any) map[string]any {

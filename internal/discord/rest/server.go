@@ -62,6 +62,7 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	// The client fetches a guild preview when opening guild screens.
 	mux.HandleFunc("GET /api/v9/guilds/{guild}/preview", s.requireAuth(s.handleGuildPreview))
 	mux.HandleFunc("GET /api/v9/users/@me/channels", s.requireAuth(s.handleUserChannels))
+	mux.HandleFunc("POST /api/v9/users/@me/channels", s.requireAuth(s.handleCreateDM))
 	mux.HandleFunc("POST /api/v9/guilds", s.requireAuth(s.handleCreateGuild))
 	mux.HandleFunc("POST /api/v9/guilds/{guild}/channels", s.requireAuth(s.handleCreateChannel))
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}", s.requireAuth(s.handleDeleteChannel))

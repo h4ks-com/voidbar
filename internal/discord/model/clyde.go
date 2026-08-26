@@ -12,6 +12,14 @@ const ClydeID = "901392366394585088"
 // The service nick "Clyde" is special-cased to the real Clyde identity so
 // system notices render as the bot himself.
 func DMPeer(nick string) map[string]any {
+	return DMPeerID(nick, IrcAuthorID("irc:"+nick))
+}
+
+// DMPeerID is DMPeer with an explicit peer id, for peers whose payload id
+// is not the IRC-author hash (fellow bouncer members show their real user
+// id in guild payloads, so their DM peer must match or the client treats
+// it as a different user).
+func DMPeerID(nick, id string) map[string]any {
 	if nick == "Clyde" {
 		return map[string]any{
 			"id":            ClydeID,
@@ -21,7 +29,7 @@ func DMPeer(nick string) map[string]any {
 		}
 	}
 	return map[string]any{
-		"id":            IrcAuthorID("irc:" + nick),
+		"id":            id,
 		"username":      nick,
 		"discriminator": "0",
 		"bot":           false,
