@@ -20,6 +20,34 @@ type Session struct {
 	seq    int64
 	events []eventRecord
 	send   chan []byte
+
+	// memberLists tracks which lazy member lists this session asked for
+	// via op 14 (key "<guild>\x00<channel>", empty channel = the
+	// guild-wide everyone list). Live occupancy pushes are only sent for
+	// lists the session actually holds, mirroring real Discord's
+	// subscription semantics.
+	memberLists map[string]bool
+}
+
+// watchMemberList records an op 14 subscription.
+func (s *Session) watchMemberList(guildID, channelID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.memberLists == nil {
+		s.memberLists = make(map[string]bool)
+	}
+	s.memberLists[guildID+"\x00"+channelID] = true
+}
+
+// memberListSet returns a copy of the session's op 14 subscriptions.
+func (s *Session) memberListSet() map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]bool, len(s.memberLists))
+	for k := range s.memberLists {
+		out[k] = true
+	}
+	return out
 }
 
 func (s *Session) attach(ch chan []byte) {

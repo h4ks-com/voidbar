@@ -27,7 +27,7 @@ func TestJoinCreatesMembershipAndGuilds(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 
 	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go,#rust?name=Libera")
 	if err != nil {
@@ -75,7 +75,7 @@ func TestJoinIdempotentSameGuild(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 
 	a, _ := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
 	b, _ := svc.Join("user1", "ircs://irc.libera.chat:6697/#rust")
@@ -96,7 +96,7 @@ func TestCreateAndRemoveChannel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 
 	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
 	if err != nil {
@@ -171,7 +171,7 @@ func TestLeaveRemovesMembershipAndGCsNetwork(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 
 	net, err := svc.Join("user2", "ircs://irc.libera.chat:6697/#go?name=Libera")
 	if err != nil {
@@ -225,7 +225,7 @@ func TestLeaveKeepsNetworkWhileOtherMembersRemain(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 
 	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
 	if err != nil {

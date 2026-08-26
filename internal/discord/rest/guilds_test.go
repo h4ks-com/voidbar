@@ -95,7 +95,7 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 	}
 	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 	gw.SetGuildProviders(
 		func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil },
 		netSvc.GuildCreateForUser,

@@ -328,6 +328,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 			}
 			// Channels omitted (or empty) = the guild-wide "everyone" list.
 			if len(d.Channels) == 0 {
+				sess.watchMemberList(guildID, "")
 				if payload := s.memberListForUser(sess.UserID, guildID, ""); payload != nil {
 					if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
 						s.log.Error("member list dispatch failed", "err", err)
@@ -336,6 +337,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				continue
 			}
 			for channelID := range d.Channels {
+				sess.watchMemberList(guildID, channelID)
 				payload := s.memberListForUser(sess.UserID, guildID, channelID)
 				if payload == nil {
 					continue
@@ -423,6 +425,38 @@ func (s *Server) findSession(id string) *Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sessions[id]
+}
+
+// MemberListSpec identifies one lazy member list: the channel's own
+// (ChannelID empty = the guild-wide everyone list).
+type MemberListSpec struct {
+	GuildID   string
+	ChannelID string
+}
+
+// RequestedMemberLists returns the union of op 14 subscriptions across
+// all of the user's live sessions - the lists worth pushing occupancy
+// updates for.
+func (s *Server) RequestedMemberLists(userID string) []MemberListSpec {
+	s.mu.RLock()
+	sessions := make([]*Session, 0, len(s.byUser[userID]))
+	for _, sess := range s.byUser[userID] {
+		sessions = append(sessions, sess)
+	}
+	s.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []MemberListSpec
+	for _, sess := range sessions {
+		for k := range sess.memberListSet() {
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			guild, channel, _ := strings.Cut(k, "\x00")
+			out = append(out, MemberListSpec{GuildID: guild, ChannelID: channel})
+		}
+	}
+	return out
 }
 
 func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {

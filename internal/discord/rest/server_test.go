@@ -31,7 +31,7 @@ func newServer(t *testing.T, registration string) http.Handler {
 	svc := auth.New(store, util.NewSnowflake(0, 0), registration)
 	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
-	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager)
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
 	gw.SetGuildProviders(
 		func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil },
 		netSvc.GuildCreateForUser,

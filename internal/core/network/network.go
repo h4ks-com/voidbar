@@ -7,6 +7,7 @@ package network
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -32,10 +33,14 @@ type Service struct {
 	gw      *gateway.Server
 	sf      *util.Snowflake
 	manager *ircmanage.Manager
+	log     *slog.Logger
 }
 
-func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, manager *ircmanage.Manager) *Service {
-	return &Service{store: store, gw: gw, sf: sf, manager: manager}
+func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, manager *ircmanage.Manager, log *slog.Logger) *Service {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Service{store: store, gw: gw, sf: sf, manager: manager, log: log}
 }
 
 // AppendBufferedMessage records a message into the channel's replay buffer
@@ -546,6 +551,34 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 		out = append(out, ircmanage.ChannelMember{Nick: n, Mode: best[n]})
 	}
 	return out
+}
+
+// RefreshOccupancy is the ircmanage occupancy callback: an upstream
+// membership event changed who sits in ircChannel (empty = everything
+// changed, i.e. QUIT/NICK). Every member list the user's sessions
+// actually subscribed to (op 14) and that the event touches gets a
+// fresh GUILD_MEMBER_LIST_UPDATE SYNC - a full replace, so no INSERT/
+// DELETE index arithmetic against the client's flattened rows.
+func (s *Service) RefreshOccupancy(userID, guildID, ircChannel string) {
+	if s.gw == nil {
+		return
+	}
+	specs := s.gw.RequestedMemberLists(userID)
+	s.log.Info("occupancy refresh", "user", userID, "guild", guildID, "channel", ircChannel, "subscribed", len(specs))
+	for _, spec := range specs {
+		if spec.GuildID != guildID {
+			continue
+		}
+		if ircChannel != "" && spec.ChannelID != "" {
+			ch, err := s.store.GetChannel(spec.ChannelID)
+			if err != nil || !strings.EqualFold(ch.IRCName, ircChannel) {
+				continue
+			}
+		}
+		if payload := s.MemberListPayload(userID, spec.GuildID, spec.ChannelID); payload != nil {
+			s.gw.Dispatch(userID, "GUILD_MEMBER_LIST_UPDATE", payload)
+		}
+	}
 }
 
 // MemberChunkPayload answers op 8 (Request Guild Members) with a single

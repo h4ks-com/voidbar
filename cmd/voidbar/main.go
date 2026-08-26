@@ -88,7 +88,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
 	gw := gateway.New(authSvc, cfg, log, nil, nil)
 	manager := ircmanage.New(store, gw, log, sf)
-	netSvc := network.NewService(store, gw, sf, manager)
+	netSvc := network.NewService(store, gw, sf, manager, log)
 	manager.EnsureAll()
 	// A single gateway instance: the manager dispatches IRC events into it,
 	// and the network service supplies the READY/GUILD_CREATE payloads.
@@ -99,6 +99,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	gw.SetDMChannelsProvider(netSvc.DMChannelPayloads)
 	gw.SetMemberListProvider(netSvc.MemberListPayload)
 	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
+	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

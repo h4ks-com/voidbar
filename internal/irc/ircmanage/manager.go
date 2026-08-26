@@ -27,6 +27,13 @@ type Manager struct {
 	log   *slog.Logger
 	sf    *util.Snowflake
 
+	// occupancy (optional) is notified when upstream membership events
+	// change who sits in a channel (JOIN/PART/QUIT/KICK/MODE/NICK), so
+	// the network service can push fresh member lists. An empty
+	// ircChannel means "everything this user sees changed" (QUIT/NICK
+	// affect every shared channel at once).
+	occupancy func(userID, networkID, ircChannel string)
+
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
 
@@ -229,6 +236,25 @@ func (m *Manager) Drop(userID, networkID string) {
 	}
 }
 
+// SetOccupancyNotifier installs the callback fired on upstream
+// membership events (JOIN/PART/QUIT/KICK/MODE/NICK). Wire it after both
+// the manager and the network service exist (same late-wiring pattern
+// as the gateway providers).
+func (m *Manager) SetOccupancyNotifier(fn func(userID, networkID, ircChannel string)) {
+	m.occupancy = fn
+}
+
+// notifyOccupancy fans an occupancy change out to the network service.
+// Runs on the connection's event loop, after girc's own state handlers
+// have applied the event - so list rebuilds observe post-event state.
+func (m *Manager) notifyOccupancy(c *conn, ircChannel string) {
+	if m.occupancy == nil {
+		return
+	}
+	m.log.Info("occupancy change", "user", c.userID, "network", c.networkID, "channel", ircChannel)
+	m.occupancy(c.userID, c.networkID, ircChannel)
+}
+
 func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.PRIVMSG, func(client *girc.Client, e girc.Event) {
 		// girc already filters echoes natively: events whose source equals
@@ -293,6 +319,37 @@ func (m *Manager) registerHandlers(c *conn) {
 		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
 			c.clearPending(e.Params[0])
 		}
+		if len(e.Params) > 0 {
+			m.notifyOccupancy(c, e.Params[0])
+		}
+	})
+	// Someone left (or was kicked from) a channel we're in: the sidebar
+	// rows are stale until resynced.
+	c.client.Handlers.Add(girc.PART, func(client *girc.Client, e girc.Event) {
+		if len(e.Params) > 0 {
+			m.notifyOccupancy(c, e.Params[0])
+		}
+	})
+	c.client.Handlers.Add(girc.KICK, func(client *girc.Client, e girc.Event) {
+		if len(e.Params) > 0 {
+			m.notifyOccupancy(c, e.Params[0])
+		}
+	})
+	// Channel MODE changes (op/voice granted or taken) reshuffle role
+	// sections; user modes elsewhere on the network are irrelevant.
+	c.client.Handlers.Add(girc.MODE, func(client *girc.Client, e girc.Event) {
+		if len(e.Params) > 0 && girc.IsValidChannel(e.Params[0]) {
+			m.notifyOccupancy(c, e.Params[0])
+		}
+	})
+	// QUIT and renames touch every channel the user shared with us; the
+	// affected set isn't recoverable after girc's state handlers ran, so
+	// refresh everything.
+	c.client.Handlers.Add(girc.QUIT, func(client *girc.Client, e girc.Event) {
+		m.notifyOccupancy(c, "")
+	})
+	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
+		m.notifyOccupancy(c, "")
 	})
 
 	// Upstream join failures for pending creates. IRC servers usually just

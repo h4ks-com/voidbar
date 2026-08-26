@@ -421,6 +421,96 @@ func TestChannelMembersModesFromNAMES(t *testing.T) {
 		t.Fatalf("modes: %v", modes)
 	}
 }
+
+// TestOccupancyNotifier: upstream JOIN/PART/QUIT must fire the occupancy
+// callback with the channel (empty for QUIT - it hits every shared
+// channel at once) so the member sidebar can resync.
+func TestOccupancyNotifier(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinable(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "watchguy", Username: "w", Realname: "w",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	events := make(chan string, 8)
+	manager.SetOccupancyNotifier(func(userID, networkID, ircChannel string) {
+		if userID == "u1" && networkID == "net1" {
+			events <- ircChannel
+		}
+	})
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+
+	next := func(want string) {
+		t.Helper()
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("occupancy: got %q, want %q", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("occupancy: no event for %q", want)
+		}
+	}
+	// The fake echoes our autojoin back: consume that notification first.
+	next("#test")
+	if _, err := fake.Write([]byte(":newguy JOIN :#test\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	next("#test")
+	if _, err := fake.Write([]byte(":oldguy PART #test :bye\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	next("#test")
+	if _, err := fake.Write([]byte(":oldguy QUIT :gone\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	next("")
+}
 // the upstream refuses (473 invite-only) must leave no trace in the
 // auto-join list, and Clyde must DM the user the reason. A join the server
 // accepts echoes back and triggers no rollback.
