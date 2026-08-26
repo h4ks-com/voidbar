@@ -271,6 +271,64 @@ func serveJoinable(conn net.Conn) {
 	}()
 }
 
+// awayOf reads a nick's away state on a (user, network) conn; test-only
+// view into conn.away.
+func (m *Manager) awayOf(userID, networkID, nick string) bool {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	return c.isAway(nick)
+}
+
+// serveJoinableWHO extends serveJoinable with a WHO responder: busybee
+// is away (G), everyone else here (H). For the away-seed tests - the
+// connect-time WHO sweep needs server-side answers on the same reader
+// loop (a second reader would race serveJoinable for lines).
+func serveJoinableWHO(conn net.Conn) {
+	go func() {
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		welcomed := false
+		nick := ""
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+			case strings.HasPrefix(line, "NICK"):
+				if !welcomed {
+					nick = strings.TrimPrefix(line, "NICK ")
+					_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome to fake\r\n"))
+					welcomed = true
+				}
+			case strings.HasPrefix(line, "PING"):
+				_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+			case strings.HasPrefix(line, "JOIN"):
+				parts := strings.SplitN(strings.TrimPrefix(line, "JOIN "), " ", 2)
+				channel := parts[0]
+				_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + channel + "\r\n"))
+				_, _ = conn.Write([]byte(":fake 353 " + nick + " = " + channel + " :" + nick + " sleepy busybee\r\n"))
+				_, _ = conn.Write([]byte(":fake 366 " + nick + " " + channel + " :End of NAMES list\r\n"))
+			case strings.HasPrefix(line, "WHO "):
+				channel := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				for _, entry := range []struct{ n, flag string }{
+					{"sleepy", "H"}, {"busybee", "G"}, {nick, "H"},
+				} {
+					_, _ = conn.Write([]byte(":fake 352 " + nick + " " + channel + " u h s " + entry.n + " " + entry.flag + " :0 z\r\n"))
+				}
+				_, _ = conn.Write([]byte(":fake 315 " + nick + " " + channel + " :End of WHO list\r\n"))
+			}
+		}
+	}()
+}
+
 // TestChannelMembersFromNAMES: the fake server sends a NAMES reply for
 // #test after the join echo; ChannelMembers must surface the other
 // occupants (own nick excluded) sorted.
@@ -510,6 +568,242 @@ func TestOccupancyNotifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	next("")
+}
+
+// TestAwaySeedFromWHO: the connect-time WHO sweep (352's H/G flag) must
+// seed per-nick away state, and end-of-WHO (315) must fire the occupancy
+// callback for the channel so subscribed lists resync.
+func TestAwaySeedFromWHO(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinableWHO(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "whoguy", Username: "w", Realname: "w",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	if _, ok := <-conns; !ok {
+		t.Fatal("fake server saw no connection")
+	}
+
+	// Away state lands via the connect-time WHO sweep (352 H/G + 315).
+	deadline := time.Now().Add(5 * time.Second)
+	var got []ChannelMember
+	for time.Now().Before(deadline) {
+		got = manager.ChannelMembersDetailed("u1", "net1", "#test")
+		if len(got) == 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(got) != 3 {
+		t.Fatalf("members: %v", got)
+	}
+	away := map[string]bool{}
+	for _, cm := range got {
+		away[cm.Nick] = cm.Away
+	}
+	if away["sleepy"] || !away["busybee"] || away["whoguy"] {
+		t.Fatalf("away states: %v", away)
+	}
+}
+
+// TestAwayNotifyPush: with the away-notify cap negotiated, AWAY/BACK
+// events must flip the away state live and fire the occupancy callback
+// (empty channel - the affected set isn't knowable).
+func TestAwayNotifyPush(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinableAway(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "pushguy", Username: "p", Realname: "p",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	occupancy := make(chan string, 8)
+	manager.SetOccupancyNotifier(func(userID, networkID, ircChannel string) {
+		if userID == "u1" && networkID == "net1" {
+			occupancy <- ircChannel
+		}
+	})
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+
+	// Wait for the occupant to exist, then flip away and back.
+	deadline := time.Now().Add(5 * time.Second)
+	saw := false
+	for time.Now().Before(deadline) && !saw {
+		if len(manager.ChannelMembers("u1", "net1", "#test")) == 2 {
+			saw = true
+		} else {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !saw {
+		t.Fatal("occupant never arrived")
+	}
+
+	// Drain the connect-time notifications (JOIN echo, WHO-sweep 315)
+	// before asserting on the AWAY pushes.
+	for {
+		select {
+		case <-occupancy:
+			continue
+		case <-time.After(300 * time.Millisecond):
+		}
+		break
+	}
+
+	drain := func() string {
+		select {
+		case got := <-occupancy:
+			return got
+		case <-time.After(5 * time.Second):
+			return ""
+		}
+	}
+	if _, err := fake.Write([]byte(":sleepy AWAY :brb food\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := drain(); got != "" {
+		t.Fatalf("away push occupancy: %q", got)
+	}
+	if !manager.awayOf("u1", "net1", "sleepy") {
+		t.Fatal("sleepy should be away")
+	}
+	if _, err := fake.Write([]byte(":sleepy AWAY\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := drain(); got != "" {
+		t.Fatalf("back push occupancy: %q", got)
+	}
+	if manager.awayOf("u1", "net1", "sleepy") {
+		t.Fatal("sleepy should be back")
+	}
+}
+
+// serveJoinableAway: like serveJoinable but negotiates away-notify (CAP
+// LS advertises it, CAP REQ gets ACKed) and seeds one occupant.
+func serveJoinableAway(conn net.Conn) {
+	go func() {
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		welcomed := false
+		nick := ""
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				_, _ = conn.Write([]byte("CAP * LS :away-notify\r\n"))
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ"))
+				_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
+			case strings.HasPrefix(line, "NICK"):
+				if !welcomed {
+					nick = strings.TrimPrefix(line, "NICK ")
+					_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome to fake\r\n"))
+					welcomed = true
+				}
+			case strings.HasPrefix(line, "PING"):
+				_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+			case strings.HasPrefix(line, "JOIN"):
+				parts := strings.SplitN(strings.TrimPrefix(line, "JOIN "), " ", 2)
+				channel := parts[0]
+				_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + channel + "\r\n"))
+				_, _ = conn.Write([]byte(":fake 353 " + nick + " = " + channel + " :" + nick + " sleepy\r\n"))
+				_, _ = conn.Write([]byte(":fake 366 " + nick + " " + channel + " :End of NAMES list\r\n"))
+			case strings.HasPrefix(line, "WHO "):
+				channel := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				_, _ = conn.Write([]byte(":fake 352 " + nick + " " + channel + " u h s sleepy H :0 z\r\n"))
+				_, _ = conn.Write([]byte(":fake 315 " + nick + " " + channel + " :End of WHO list\r\n"))
+			}
+		}
+	}()
 }
 // the upstream refuses (473 invite-only) must leave no trace in the
 // auto-join list, and Clyde must DM the user the reason. A join the server

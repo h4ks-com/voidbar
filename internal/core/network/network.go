@@ -533,22 +533,22 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	}
 
 	joinedAt := mem.JoinedAt.Format(time.RFC3339)
-	byMode := make(map[string][]string, len(list))
+	byMode := make(map[string][]ircmanage.ChannelMember, len(list))
 	for _, cm := range list {
-		byMode[cm.Mode] = append(byMode[cm.Mode], cm.Nick)
+		byMode[cm.Mode] = append(byMode[cm.Mode], cm)
 	}
 	groups := make([]any, 0, len(model.IrcRoleModes())+1)
 	items := make([]any, 0, len(list)+1)
 	for _, mode := range model.IrcRoleModes() {
-		nicks := byMode[mode]
-		if len(nicks) == 0 {
+		cms := byMode[mode]
+		if len(cms) == 0 {
 			continue
 		}
 		roleID := model.IrcRoleID(mode)
-		groups = append(groups, map[string]any{"id": roleID, "count": len(nicks)})
-		items = append(items, map[string]any{"group": map[string]any{"id": roleID, "count": len(nicks)}})
-		for _, nick := range nicks {
-			items = append(items, memberListItem(nick, joinedAt, mode))
+		groups = append(groups, map[string]any{"id": roleID, "count": len(cms)})
+		items = append(items, map[string]any{"group": map[string]any{"id": roleID, "count": len(cms)}})
+		for _, cm := range cms {
+			items = append(items, memberListItem(cm, joinedAt, mode))
 		}
 	}
 	plain := byMode[""]
@@ -557,8 +557,8 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		// whatever groups we emit, including "Online - 0" headers.
 		groups = append(groups, map[string]any{"id": "online", "count": len(plain)})
 		items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(plain)}})
-		for _, nick := range plain {
-			items = append(items, memberListItem(nick, joinedAt, ""))
+		for _, cm := range plain {
+			items = append(items, memberListItem(cm, joinedAt, ""))
 		}
 	}
 	return map[string]any{
@@ -578,14 +578,16 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 // memberListItem builds one GUILD_MEMBER_LIST_UPDATE member row. COMPAT:
 // presence lives INSIDE the member object here (the item parser only
 // knows the "group"/"member" keys, and GuildMember itself carries a
-// presence field the client reads via StoreStream.handleItem).
-func memberListItem(nick, joinedAt, mode string) map[string]any {
-	uid := model.IrcAuthorID("irc:" + nick)
+// presence field the client reads via StoreStream.handleItem). IRC away
+// maps to Discord "idle".
+func memberListItem(cm ircmanage.ChannelMember, joinedAt, mode string) map[string]any {
+	uid := model.IrcAuthorID("irc:" + cm.Nick)
+	status := presenceStatus(cm.Away)
 	return map[string]any{
 		"member": map[string]any{
 			"user": map[string]any{
 				"id":            uid,
-				"username":      nick,
+				"username":      cm.Nick,
 				"discriminator": "0",
 				"bot":           false,
 			},
@@ -593,10 +595,19 @@ func memberListItem(nick, joinedAt, mode string) map[string]any {
 			"joined_at": joinedAt,
 			"presence": map[string]any{
 				"user":   map[string]any{"id": uid},
-				"status": "online",
+				"status": status,
 			},
 		},
 	}
+}
+
+// presenceStatus maps IRC presence to Discord wire statuses: IRC has two
+// visible states (here, away) and Discord's closest to away is "idle".
+func presenceStatus(away bool) string {
+	if away {
+		return "idle"
+	}
+	return "online"
 }
 
 // ircRoleIDsFor wraps a membership mode's role id for a member payload
@@ -609,12 +620,15 @@ func ircRoleIDsFor(mode string) []any {
 }
 
 // ircOccupants returns the union of channel occupants across ircNames,
-// each with their highest mode across those channels, sorted by nick.
+// each with their highest mode across those channels (away if away in
+// any - IRC away is per-connection, so it's the same everywhere), sorted
+// by nick.
 func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ircmanage.ChannelMember {
 	if s.manager == nil {
 		return nil
 	}
 	best := map[string]string{}
+	away := map[string]bool{}
 	seen := map[string]bool{}
 	var nicks []string
 	for _, chName := range ircNames {
@@ -626,6 +640,9 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 			if model.IrcModeRank(cm.Mode) > model.IrcModeRank(best[cm.Nick]) {
 				best[cm.Nick] = cm.Mode
 			}
+			if cm.Away {
+				away[cm.Nick] = true
+			}
 		}
 	}
 	sort.Slice(nicks, func(i, j int) bool {
@@ -633,7 +650,7 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 	})
 	out := make([]ircmanage.ChannelMember, 0, len(nicks))
 	for _, n := range nicks {
-		out = append(out, ircmanage.ChannelMember{Nick: n, Mode: best[n]})
+		out = append(out, ircmanage.ChannelMember{Nick: n, Mode: best[n], Away: away[n]})
 	}
 	return out
 }
@@ -698,9 +715,10 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 			"roles":     ircRoleIDsFor(cm.Mode),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
+		status := presenceStatus(cm.Away)
 		presences = append(presences, map[string]any{
 			"user":       map[string]any{"id": uid},
-			"status":     "online",
+			"status":     status,
 			"activities": []any{},
 		})
 	}
@@ -840,8 +858,8 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 			"joined_at": m.JoinedAt.Format(time.RFC3339),
 		})
 		presences = append(presences, map[string]any{
-			"user": map[string]any{"id": uid},
-			"status": "online",
+			"user":   map[string]any{"id": uid},
+			"status": presenceStatus(cm.Away),
 		})
 	}
 

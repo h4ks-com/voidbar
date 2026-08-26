@@ -41,6 +41,11 @@ type Manager struct {
 	// an upstream drop; it doubles per consecutive failure (capped at
 	// reconnectBackoffMax) and resets once a link stays up for a while.
 	reconnectBackoff time.Duration
+
+	// awayPollInterval paces the no-away-notify fallback WHO poller (one
+	// channel per tick). Generous by design: away status is cosmetic, and
+	// the bouncer must stay polite to small servers.
+	awayPollInterval time.Duration
 }
 
 const (
@@ -49,6 +54,8 @@ const (
 	// A link that lived at least this long counts as "was healthy":
 	// the next drop retries with the initial backoff again.
 	reconnectHealthyAfter = 30 * time.Second
+	// Fallback away polling cadence (servers without away-notify only).
+	defaultAwayPollInterval = 60 * time.Second
 )
 
 type conn struct {
@@ -64,6 +71,67 @@ type conn struct {
 	// channel we parted long ago must not trigger a rollback.
 	pendMu       sync.Mutex
 	pendingJoins map[string]bool
+
+	// away tracks per-nick away state (true = away/idle). Fed by the
+	// away-notify cap when the server offers it, and by a lazy classic-WHO
+	// sweep otherwise (352's H/G flag); away-notify only pushes CHANGES,
+	// so every join also gets one seeding WHO.
+	awayMu sync.Mutex
+	away   map[string]bool
+}
+
+// setAway records a nick's away state and reports whether it changed.
+func (c *conn) setAway(nick string, away bool) bool {
+	if nick == "" {
+		return false
+	}
+	c.awayMu.Lock()
+	defer c.awayMu.Unlock()
+	if c.away == nil {
+		c.away = make(map[string]bool)
+	}
+	if c.away[nick] == away {
+		return false
+	}
+	if away {
+		c.away[nick] = true
+	} else {
+		delete(c.away, nick)
+	}
+	return true
+}
+
+// isAway reports a nick's away state.
+func (c *conn) isAway(nick string) bool {
+	c.awayMu.Lock()
+	defer c.awayMu.Unlock()
+	return c.away[nick]
+}
+
+// renameAway re-keys the away state when a tracked user renames (away is
+// per-connection, it survives the rename).
+func (c *conn) renameAway(oldNick, newNick string) {
+	if oldNick == "" || newNick == "" || oldNick == newNick {
+		return
+	}
+	c.awayMu.Lock()
+	defer c.awayMu.Unlock()
+	if c.away == nil {
+		return
+	}
+	if away, ok := c.away[oldNick]; ok {
+		delete(c.away, oldNick)
+		if away {
+			c.away[newNick] = true
+		}
+	}
+}
+
+// forgetAway drops a nick's away state (they left the network).
+func (c *conn) forgetAway(nick string) {
+	c.awayMu.Lock()
+	defer c.awayMu.Unlock()
+	delete(c.away, nick)
 }
 
 func (c *conn) markPending(ch string) {
@@ -90,6 +158,7 @@ func New(store *storage.Storage, gw *gateway.Server, log *slog.Logger, sf *util.
 		sf:               sf,
 		conns:            make(map[string]*conn),
 		reconnectBackoff: reconnectBackoffInitial,
+		awayPollInterval: defaultAwayPollInterval,
 	}
 }
 
@@ -133,6 +202,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		cancel:       make(chan struct{}),
 		done:         make(chan struct{}),
 		pendingJoins: make(map[string]bool),
+		away:         make(map[string]bool),
 	}
 	m.conns[k] = c
 
@@ -161,6 +231,26 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 					client.Close()
 					<-attempt
 				case <-attempt:
+				}
+			}()
+
+			// Away fallback poller, for servers without away-notify: one
+			// classic WHO per tick, round-robin over the channels someone
+			// is actually looking at (gateway op 14 subscriptions). Servers
+			// with the cap never get polled - away-notify pushes everything.
+			go func() {
+				ticker := time.NewTicker(m.awayPollInterval)
+				defer ticker.Stop()
+				next := 0
+				for {
+					select {
+					case <-attempt:
+						return
+					case <-c.cancel:
+						return
+					case <-ticker.C:
+					}
+					m.pollAwayOnce(c, client, &next)
 				}
 			}()
 
@@ -236,6 +326,45 @@ func (m *Manager) Drop(userID, networkID string) {
 	}
 }
 
+// pollAwayOnce sends one classic WHO for the next channel worth checking,
+// but only when the server lacks away-notify (with the cap, away-notify
+// pushes every change and polling is pure waste). "Worth checking" means
+// a channel one of the user's live client sessions holds a member-list
+// subscription for - idle sidebars cost nothing.
+func (m *Manager) pollAwayOnce(c *conn, client *girc.Client, next *int) {
+	if m.gw == nil || client.HasCapability("away-notify") {
+		return
+	}
+	mem, err := m.store.GetMembership(c.networkID, c.userID)
+	if err != nil {
+		return
+	}
+	// Resolve the subscribed lists to IRC channel names; the guild-wide
+	// everyone list (empty channel id) means all auto-join channels.
+	var channels []string
+	for _, spec := range m.gw.RequestedMemberLists(c.userID) {
+		if spec.GuildID != c.networkID {
+			continue
+		}
+		if spec.ChannelID == "" {
+			channels = append(channels, mem.AutoJoin...)
+			continue
+		}
+		if ch, err := m.store.GetChannel(spec.ChannelID); err == nil {
+			channels = append(channels, ch.IRCName)
+		}
+	}
+	if len(channels) == 0 {
+		return
+	}
+	if *next >= len(channels) {
+		*next = 0
+	}
+	target := channels[*next]
+	*next++
+	client.Send(&girc.Event{Command: "WHO", Params: []string{target}})
+}
+
 // SetOccupancyNotifier installs the callback fired on upstream
 // membership events (JOIN/PART/QUIT/KICK/MODE/NICK). Wire it after both
 // the manager and the network service exist (same late-wiring pattern
@@ -289,6 +418,12 @@ func (m *Manager) registerHandlers(c *conn) {
 			c.markPending(ch)
 			client.Cmd.Join(ch)
 		}
+		// Seed away state: away-notify only pushes changes, so the users
+		// already in the channels need one classic-WHO sweep (352's H/G).
+		// One burst per connect, no polling.
+		for _, ch := range mem.AutoJoin {
+			client.Send(&girc.Event{Command: "WHO", Params: []string{ch}})
+		}
 		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
 	})
@@ -299,6 +434,9 @@ func (m *Manager) registerHandlers(c *conn) {
 		if e.Source == nil || len(e.Params) == 0 {
 			return
 		}
+		// Away state is per-connection: it follows the user across the
+		// rename (away-notify events for the old nick won't come anymore).
+		c.renameAway(e.Source.Name, e.Params[0])
 		// girc has already updated its tracked nick by the time user
 		// handlers run, so Params[0] == GetNick() only for our own renames.
 		if !strings.EqualFold(e.Params[0], client.GetNick()) {
@@ -346,7 +484,40 @@ func (m *Manager) registerHandlers(c *conn) {
 	// affected set isn't recoverable after girc's state handlers ran, so
 	// refresh everything.
 	c.client.Handlers.Add(girc.QUIT, func(client *girc.Client, e girc.Event) {
+		if e.Source != nil {
+			c.forgetAway(e.Source.Name)
+		}
 		m.notifyOccupancy(c, "")
+	})
+	// away-notify pushes AWAY (with message) / BACK (bare) for users in
+	// shared channels - zero polling, the only source of away truth on
+	// capabale servers. Away shows as Discord "idle".
+	c.client.Handlers.Add(girc.AWAY, func(client *girc.Client, e girc.Event) {
+		if e.Source == nil {
+			return
+		}
+		if c.setAway(e.Source.Name, e.Last() != "") {
+			m.notifyOccupancy(c, "")
+		}
+	})
+	// Classic WHO replies: the H/G flag in params[6] carries away state.
+	// The seed sweep (and the no-away-notify fallback poller) both land
+	// here; end-of-WHO (315) triggers the one list refresh for the burst.
+	c.client.Handlers.Add("352", func(client *girc.Client, e girc.Event) {
+		// <me> <channel> <user> <host> <server> <nick> <flags> :<hop> <real>
+		if len(e.Params) < 7 {
+			return
+		}
+		flags := e.Params[6]
+		if flags == "" {
+			return
+		}
+		c.setAway(e.Params[5], flags[0] == 'G')
+	})
+	c.client.Handlers.Add("315", func(client *girc.Client, e girc.Event) {
+		if len(e.Params) > 1 {
+			m.notifyOccupancy(c, e.Params[1])
+		}
 	})
 	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
 		m.notifyOccupancy(c, "")
@@ -581,10 +752,11 @@ func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
 
 // ChannelMember is one channel occupant from the live NAMES state, with
 // their highest channel-membership mode (q/a/o/h/v per PREFIX, or "" for
-// plain members).
+// plain members) and away state (away-notify / WHO H/G).
 type ChannelMember struct {
 	Nick string
 	Mode string
+	Away bool
 }
 
 // ChannelMembers returns the nicks currently in an IRC channel according
@@ -641,7 +813,7 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 				}
 			}
 		}
-		members = append(members, ChannelMember{Nick: u.Nick, Mode: mode})
+		members = append(members, ChannelMember{Nick: u.Nick, Mode: mode, Away: c.isAway(u.Nick)})
 	}
 	sort.Slice(members, func(i, j int) bool {
 		return strings.ToLower(members[i].Nick) < strings.ToLower(members[j].Nick)
