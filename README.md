@@ -189,24 +189,18 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   history on join ( Ergo/solanum expose it, many networks don't —
   testnet.ergo.chat was probed but its hosting subnets were unreachable).
   History is also capped at 500 messages per channel (ring buffer).
-- **DMs**: IRC queries (PRIVMSG to a nick) are received upstream but skipped
-  with a log line (`irc query skipped`); no DM channels in the client.
-- **Upstream auto-reconnect**: connections are (re)established at boot
-  (`EnsureAll`) and on join, but a dropped upstream link is not retried
-  until the server restarts or the network is re-joined.
-- **Presence / member list**: guild member list (beyond memberships + the
-  owner bot), online/offline presence, typing indicators (`+typing`),
-  unread badges/read state are stubs.
 - **Message features**: edits/deletes (redaction), reactions (`+react`),
-  attachments/file uploads, embeds, mentions, pins (empty stub), search.
+  typing indicators (`+typing`), attachments/file uploads, embeds,
+  mentions, pins (empty stub), search.
 - **Channel management UI**: rename/topic (topic renders as empty), channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
   (re-pasting a string for the same network merges new channels in).
-- **Identity**: no nick change from the client (`/nick`), no away, no SASL
-  (only server password via `pass@` in the connection string), no IRCv3
-  caps negotiation (server-time/msgid/batch/multiline ignored; relayed
-  messages carry receive-time timestamps).
+- **Identity**: no nick change from the client (`/nick`), no away toggle
+  from the client (upstream away of others renders as "idle"), no SASL
+  (only server password via `pass@` in the connection string); relayed
+  messages carry receive-time timestamps (server-time/msgid/batch/
+  multiline tags are not used).
 - **Settings**: legacy client settings are persisted per user
   (`PATCH /users/@me/settings`); the Android client's appearance settings
   are not synced and reset on reload.
@@ -217,6 +211,21 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   no admin UI, no per-user network management beyond the client.
 - Voice/video, threads, forums, stickers, guild discovery — out of scope
   for now (stubs return empty shapes).
+
+### What works end-to-end (Android client)
+
+- Login/register, guild rail from IRC networks, channel create/delete
+  with upstream rollback, message relay both ways, unread badges.
+- **DMs**: both directions, history replay, client-initiated DMs
+  (`POST /users/@me/channels` — recipient resolved from the member
+  sidebar or fellow bouncer users).
+- **Member sidebar**: per-channel lists from live NAMES state, hoisted
+  role sections for IRC prefixes (`~&@%+` → Founder/Admin/Operator/
+  Half-op/Voice, colored names), live JOIN/PART/QUIT/KICK/MODE updates,
+  away shown as "idle" (away-notify cap, WHO seeding, lazy poller
+  fallback for servers without the cap).
+- **Upstream auto-reconnect** with backoff; nick collisions survive
+  (the live wire nick is what the client shows).
 
 ## Known issues / troubleshooting
 
