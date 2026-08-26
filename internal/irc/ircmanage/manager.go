@@ -592,6 +592,24 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 	return members
 }
 
+// LiveNick returns the nick the user's upstream connection currently
+// holds, or "" when there is no live connection. The server may alter
+// the requested nick on connect (collisions get a suffix), so this - not
+// the stored membership nick - is the nick actually visible in NAMES.
+func (m *Manager) LiveNick(userID, networkID string) string {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if client == nil {
+		return ""
+	}
+	return client.GetNick()
+}
+
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).
 func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
 	m.mu.Lock()

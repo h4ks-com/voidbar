@@ -402,8 +402,9 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		// channel's own member_list_id (Channel.memberListId) — the lazy
 		// list map is keyed by exactly this string, and GUILD_MEMBER_LIST_
 		// UPDATE ids must match it or the rows render as shimmer
-		// placeholders forever.
-		"member_list_id": guildID + ":everyone:0,99",
+		// placeholders forever. Per-channel, so lists don't bleed between
+		// channels.
+		"member_list_id": model.MemberListID(guildID, ch.ID),
 	}
 }
 
@@ -461,13 +462,17 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		}
 	}
 	plain := byMode[""]
-	groups = append(groups, map[string]any{"id": "online", "count": len(plain)})
-	items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(plain)}})
-	for _, nick := range plain {
-		items = append(items, memberListItem(nick, joinedAt, ""))
+	if len(plain) > 0 {
+		// Empty sections must not be sent at all: the client renders
+		// whatever groups we emit, including "Online - 0" headers.
+		groups = append(groups, map[string]any{"id": "online", "count": len(plain)})
+		items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(plain)}})
+		for _, nick := range plain {
+			items = append(items, memberListItem(nick, joinedAt, ""))
+		}
 	}
 	return map[string]any{
-		"id":       guildID + ":everyone:0,99",
+		"id":       model.MemberListID(guildID, channelID),
 		"guild_id": guildID,
 		"groups":   groups,
 		"ops": []any{
@@ -663,22 +668,36 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	for _, cm := range occupants {
 		modeByLower[strings.ToLower(cm.Nick)] = cm.Mode
 	}
-	seenUser := map[string]bool{}
+	// A member's visible nick is their LIVE upstream nick: the server may
+	// rename on collision (stored "doesnm" connects as "doesnm_"), and the
+	// stored nick can belong to a different human - matching modes by the
+	// stored nick would hand the member that human's prefixes (and a
+	// duplicate row for the live nick).
+	nickFor := func(mem *storage.Membership) string {
+		if s.manager != nil {
+			if live := s.manager.LiveNick(mem.UserID, net.ID); live != "" {
+				return live
+			}
+		}
+		return mem.Nick
+	}
+	memberNicks := make(map[string]bool, len(all))
 	for _, mem := range all {
-		seenUser[mem.UserID] = true
+		memberNicks[strings.ToLower(nickFor(mem))] = true
 	}
 
 	members := make([]any, 0, len(all)+1)
 	presences := make([]any, 0)
 	for _, mem := range all {
+		nick := nickFor(mem)
 		members = append(members, map[string]any{
 			"user": map[string]any{
 				"id":            mem.UserID,
-				"username":      mem.Nick,
+				"username":      nick,
 				"discriminator": "0",
 				"bot":           false,
 			},
-			"roles":     ircRoleIDsFor(modeByLower[strings.ToLower(mem.Nick)]),
+			"roles":     ircRoleIDsFor(modeByLower[strings.ToLower(nick)]),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 	}
@@ -687,10 +706,11 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	members = append(members, model.ClydeMember(net.CreatedAt.Format(time.RFC3339)))
 
 	for _, cm := range occupants {
-		uid := model.IrcAuthorID("irc:" + cm.Nick)
-		if seenUser[uid] {
+		// Occupants that ARE a member's live nick were emitted above.
+		if memberNicks[strings.ToLower(cm.Nick)] {
 			continue
 		}
+		uid := model.IrcAuthorID("irc:" + cm.Nick)
 		members = append(members, map[string]any{
 			"user": map[string]any{
 				"id":            uid,

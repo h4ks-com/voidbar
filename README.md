@@ -225,6 +225,13 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   client logs. Non-fatal, login by email/password works.
 - The client is RU-localized in our test profile; UI labels in this README
   are the Russian ones ("Добавить сервер" etc.).
+- **Profile shows IRC channel modes as guild-wide roles (wontfix).** IRC
+  membership prefixes are per-channel; Discord roles are guild-global.
+  The channel member list always shows the per-channel truth, but a
+  member profile shows their highest mode across channels. Splitting the
+  user id per channel (one Discord user per channel) would break DMs,
+  mentions and message authorship continuity, so we keep one identity
+  per nick and accept the imprecise profile.
 
 ## Planned stack
 

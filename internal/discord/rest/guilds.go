@@ -209,7 +209,7 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 			"type":            0,
 			"position":        i,
 			"topic":           nil,
-			"member_list_id":  guildID + ":everyone:0,99",
+			"member_list_id":  model.MemberListID(guildID, ch.ID),
 		})
 	}
 	// Keep the role set in sync with GUILD_CREATE: the member sidebar's

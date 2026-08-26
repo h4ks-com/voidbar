@@ -301,8 +301,8 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 		case OpGuildSubscriptions:
 			// Lazy request: the client opened a channel and wants its
 			// member list. Reply with a GUILD_MEMBER_LIST_UPDATE SYNC per
-			// requested channel (list id "<guild>:everyone:<start>,<end>"
-			// for channels without permission overwrites).
+			// requested channel; the list id is the channel's own
+			// member_list_id (per-channel, see model.MemberListID).
 			if sess == nil {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
 				return
