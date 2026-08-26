@@ -244,6 +244,30 @@ func (s *Storage) TouchDMChannel(id string) error {
 	})
 }
 
+// DeleteDMChannel removes a DM thread (record + owner index). History in
+// the replay buffer is left in place: a new query from the same peer
+// recreates the thread with the old snowflake and the conversation
+// continues where it left off.
+func (s *Storage) DeleteDMChannel(id string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(dmKey(id))
+		if err != nil {
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				return nil
+			}
+			return err
+		}
+		var dm DMChannel
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &dm) }); err != nil {
+			return err
+		}
+		if err := txn.Delete(dmKey(id)); err != nil {
+			return err
+		}
+		return txn.Delete(dmOwnerKey(dm.OwnerID, dm.NetworkID, dm.Nick))
+	})
+}
+
 // Membership ties a user to a network with their per-connection identity.
 // Upstream connections live on (user, network): each member connects with
 // their own nick, never sharing a socket.
@@ -415,6 +439,92 @@ func (s *Storage) DeleteMembership(netID, userID string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(memberKey(netID, userID))
 	})
+}
+
+// MembershipAddChannel merges an IRC channel into the member's auto-join
+// list (case-insensitive dedup). Returns the updated membership.
+func (s *Storage) MembershipAddChannel(netID, userID, ircName string) (*Membership, error) {
+	var m Membership
+	err := s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(memberKey(netID, userID))
+		if err != nil {
+			return err
+		}
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &m) }); err != nil {
+			return err
+		}
+		for _, ch := range m.AutoJoin {
+			if strings.EqualFold(ch, ircName) {
+				return nil
+			}
+		}
+		m.AutoJoin = append(m.AutoJoin, ircName)
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return txn.Set(memberKey(netID, userID), b)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// MembershipRemoveChannel drops an IRC channel from the member's auto-join
+// list (channel delete / failed-join rollback). Idempotent.
+func (s *Storage) MembershipRemoveChannel(netID, userID, ircName string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(memberKey(netID, userID))
+		if err != nil {
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				return nil
+			}
+			return err
+		}
+		var m Membership
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &m) }); err != nil {
+			return err
+		}
+		out := m.AutoJoin[:0]
+		for _, ch := range m.AutoJoin {
+			if !strings.EqualFold(ch, ircName) {
+				out = append(out, ch)
+			}
+		}
+		m.AutoJoin = out
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return txn.Set(memberKey(netID, userID), b)
+	})
+}
+
+// GetChannelByIRC resolves a channel by its (network, irc name) without
+// creating one (unlike EnsureChannel). Used by join-failure rollback.
+func (s *Storage) GetChannelByIRC(netID, ircName string) (*Channel, error) {
+	var ch Channel
+	err := s.db.View(func(txn *badger.Txn) error {
+		idx, err := txn.Get(chanNetKey(netID, ircName))
+		if err != nil {
+			return err
+		}
+		return idx.Value(func(id []byte) error {
+			item, err := txn.Get(chanKey(string(id)))
+			if err != nil {
+				return err
+			}
+			return item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) })
+		})
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
 }
 
 // DeleteNetworkCascade garbage-collects a network nobody is a member of

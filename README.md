@@ -45,6 +45,11 @@ Covered:
 - **Leave/delete server**: membership removal + upstream disconnect, and the
   network (channels, replay buffers) is garbage-collected when the last
   member leaves
+- **Channel management**: create channels from the client (IRC servers
+  create channels on JOIN, so creates are optimistic; an upstream refusal —
+  invite-only, banned, account-required, +k, full — rolls the channel back
+  and Clyde DMs the reason) and delete them (PART; history is kept, so
+  re-adding the channel recovers it)
 - **Discord → IRC**: typing in the client reaches the IRC channel (own nick,
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
@@ -187,9 +192,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   unread badges/read state are stubs.
 - **Message features**: edits/deletes (redaction), reactions (`+react`),
   attachments/file uploads, embeds, mentions, pins (empty stub), search.
-- **Channel management UI**: joining/parting channels at runtime from the
-  client, channel create/rename/topic (topic renders as empty), channel
-  categories — auto-join channels from the connection string only
+- **Channel management UI**: rename/topic (topic renders as empty), channel
+  categories, keyed channels (+k) — auto-join channels from the connection
+  string and runtime create/delete are covered
   (re-pasting a string for the same network merges new channels in).
 - **Identity**: no nick change from the client (`/nick`), no away, no SASL
   (only server password via `pass@` in the connection string), no IRCv3

@@ -233,6 +233,153 @@ func serveRegistration(conn net.Conn) {
 	}()
 }
 
+// serveJoinable extends serveRegistration with JOIN semantics: #secret is
+// invite-only (473), everything else echoes the join back.
+func serveJoinable(conn net.Conn) {
+	go func() {
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		welcomed := false
+		nick := ""
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+			case strings.HasPrefix(line, "NICK"):
+				if !welcomed {
+					nick = strings.TrimPrefix(line, "NICK ")
+					_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome to fake\r\n"))
+					welcomed = true
+				}
+			case strings.HasPrefix(line, "PING"):
+				_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+			case strings.HasPrefix(line, "JOIN"):
+				parts := strings.SplitN(strings.TrimPrefix(line, "JOIN "), " ", 2)
+				channel := parts[0]
+				if strings.EqualFold(channel, "#secret") {
+					_, _ = conn.Write([]byte(":fake 473 " + nick + " #secret :Cannot join channel (+i)\r\n"))
+				} else {
+					_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + channel + "\r\n"))
+				}
+			}
+		}
+	}()
+}
+
+// TestJoinRejectedRollsBackAndClydeExplains: an optimistic channel-create
+// the upstream refuses (473 invite-only) must leave no trace in the
+// auto-join list, and Clyde must DM the user the reason. A join the server
+// accepts echoes back and triggers no rollback.
+func TestJoinRejectedRollsBackAndClydeExplains(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinable(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "joiner", Username: "j", Realname: "j",
+		AutoJoin: []string{}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	if _, ok := <-conns; !ok {
+		t.Fatal("fake server saw no connection")
+	}
+
+	// Service-level optimistic create for a channel the server refuses.
+	if _, err := store.MembershipAddChannel("net1", "u1", "#secret"); err != nil {
+		t.Fatal(err)
+	}
+	manager.JoinChannel("u1", "net1", "#secret")
+	waitFor(t, sink, "irc join rejected")
+
+	// Rollback: auto-join is clean again.
+	mem, err := store.GetMembership("net1", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.AutoJoin) != 0 {
+		t.Fatalf("autojoin after rejected join: %v", mem.AutoJoin)
+	}
+
+	// Clyde DMed the reason.
+	dms, err := store.ListDMChannels("u1")
+	if err != nil || len(dms) != 1 {
+		t.Fatalf("dm list: %v %v", dms, err)
+	}
+	if dms[0].Nick != "Clyde" {
+		t.Fatalf("dm peer: %+v", dms[0])
+	}
+	msgs := store.ChannelMessages(dms[0].ID, "", "", 10)
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "#secret") || !strings.Contains(msgs[0].Content, "invite-only") {
+		t.Fatalf("clyde message: %+v", msgs)
+	}
+	if msgs[0].AuthorName != "Clyde" {
+		t.Fatalf("clyde author: %+v", msgs[0])
+	}
+
+	// An accepted join (echo) triggers no rollback.
+	if _, err := store.MembershipAddChannel("net1", "u1", "#open"); err != nil {
+		t.Fatal(err)
+	}
+	manager.JoinChannel("u1", "net1", "#open")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.count("irc join rejected") == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n := sink.count("irc join rejected"); n != 1 {
+		t.Fatalf("accepted join must not roll back; rejected count = %d:\n%s", n, strings.Join(sink.lines, "\n"))
+	}
+	mem, _ = store.GetMembership("net1", "u1")
+	if len(mem.AutoJoin) != 1 || mem.AutoJoin[0] != "#open" {
+		t.Fatalf("autojoin after accepted join: %v", mem.AutoJoin)
+	}
+}
+
 // TestReconnectAfterDrop verifies bouncer semantics on the upstream side:
 // when the TCP link dies, the supervisor dials again (fresh client, backoff)
 // and the CONNECTED handler re-joins the auto-join channels.

@@ -282,6 +282,73 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleCreateChannel is the client's "create channel": optimistic — IRC
+// servers create channels on JOIN, so the channel returns immediately and
+// upstream refusals roll back asynchronously (Clyde DM explains why).
+func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	guildID := r.PathValue("guild")
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	payload, err := s.net.CreateChannel(u.ID, guildID, req.Name)
+	if err != nil {
+		if errors.Is(err, network.ErrBadChannelName) {
+			jsonError(w, http.StatusBadRequest, "Invalid channel name for IRC")
+			return
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonError(w, http.StatusNotFound, "Unknown Guild")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "create failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// handleDeleteChannel covers both guild channels (PART upstream, registry
+// kept for history recovery) and DM closes.
+func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	channelID := r.PathValue("channel")
+	// DM close: drop the thread record; IRC queries recreate it on contact.
+	if dm, err := s.net.DMChannelByID(channelID); err == nil {
+		if dm.OwnerID != u.ID {
+			jsonError(w, http.StatusNotFound, "unknown channel")
+			return
+		}
+		if err := s.net.DeleteDMChannel(channelID); err != nil {
+			jsonError(w, http.StatusInternalServerError, "close failed")
+			return
+		}
+		if s.gw != nil {
+			s.gw.Dispatch(u.ID, "CHANNEL_DELETE", map[string]any{"id": channelID, "type": 1})
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := s.net.RemoveChannel(u.ID, channelID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonError(w, http.StatusNotFound, "Unknown Channel")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleGuildPreview answers GET /guilds/:id/preview — the client fetches
 // this when opening guild screens (e.g. settings). Minimal GuildPreview.
 func (s *Server) handleGuildPreview(w http.ResponseWriter, r *http.Request, u *storage.User) {

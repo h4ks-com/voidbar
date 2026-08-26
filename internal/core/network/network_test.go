@@ -84,6 +84,80 @@ func TestJoinIdempotentSameGuild(t *testing.T) {
 	}
 }
 
+func TestCreateAndRemoveChannel(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.CreateUser(&storage.User{ID: "user1", Username: "doesnm", Email: "d@e.com"}); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager)
+
+	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create: optimistic — registry + autojoin grow even with no live IRC
+	// connection (the JOIN is a no-op offline, retried on next connect).
+	payload, err := svc.CreateChannel("user1", net.ID, "rust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["name"] != "rust" || payload["guild_id"] != net.ID {
+		t.Fatalf("payload: %+v", payload)
+	}
+	mem, _ := svc.MembershipFor("user1", net.ID)
+	found := false
+	for _, ch := range mem.AutoJoin {
+		if ch == "#rust" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("autojoin after create: %v", mem.AutoJoin)
+	}
+
+	// Name validation: bad names rejected, # added, case kept.
+	if _, err := svc.CreateChannel("user1", net.ID, "has space"); err == nil {
+		t.Fatal("expected name rejection")
+	}
+	if p, err := svc.CreateChannel("user1", net.ID, "#elixir"); err != nil || p["name"] != "elixir" {
+		t.Fatalf("create with #: %v %v", p, err)
+	}
+	if mem, _ := svc.MembershipFor("user1", net.ID); len(mem.AutoJoin) != 3 {
+		t.Fatalf("autojoin: %v", mem.AutoJoin)
+	}
+
+	// Remove: autojoin drops, registry stays (history recovery), repeat is
+	// idempotent.
+	ch, err := store.GetChannelByIRC(net.ID, "#rust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveChannel("user1", ch.ID); err != nil {
+		t.Fatal(err)
+	}
+	mem, _ = svc.MembershipFor("user1", net.ID)
+	for _, c := range mem.AutoJoin {
+		if c == "#rust" {
+			t.Fatalf("autojoin after remove: %v", mem.AutoJoin)
+		}
+	}
+	if _, err := store.GetChannelByIRC(net.ID, "#rust"); err != nil {
+		t.Fatalf("registry must survive remove: %v", err)
+	}
+	// Removing a channel on a network you're not in fails cleanly.
+	if err := svc.RemoveChannel("user1", "999999"); err == nil {
+		t.Fatal("expected not-found")
+	}
+}
+
 func TestLeaveRemovesMembershipAndGCsNetwork(t *testing.T) {
 	store, err := storage.Open(t.TempDir())
 	if err != nil {

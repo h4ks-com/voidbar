@@ -49,6 +49,28 @@ type conn struct {
 	client    *girc.Client
 	cancel    chan struct{}
 	done      chan struct{}
+
+	// pendingJoins tracks channels this connection is trying to join
+	// (lowercased). Optimistic channel-creates only roll back on upstream
+	// error numerics while their channel is pending; a stale numeric for a
+	// channel we parted long ago must not trigger a rollback.
+	pendMu       sync.Mutex
+	pendingJoins map[string]bool
+}
+
+func (c *conn) markPending(ch string) {
+	c.pendMu.Lock()
+	c.pendingJoins[strings.ToLower(ch)] = true
+	c.pendMu.Unlock()
+}
+
+func (c *conn) clearPending(ch string) bool {
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	k := strings.ToLower(ch)
+	ok := c.pendingJoins[k]
+	delete(c.pendingJoins, k)
+	return ok
 }
 
 // New creates the manager.
@@ -98,10 +120,11 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		cfg.ServerPass = net.Password
 	}
 	c := &conn{
-		userID:    userID,
-		networkID: networkID,
-		cancel:    make(chan struct{}),
-		done:      make(chan struct{}),
+		userID:       userID,
+		networkID:    networkID,
+		cancel:       make(chan struct{}),
+		done:         make(chan struct{}),
+		pendingJoins: make(map[string]bool),
 	}
 	m.conns[k] = c
 
@@ -231,10 +254,14 @@ func (m *Manager) registerHandlers(c *conn) {
 					m.log.Info("irc nick synced", "user", c.userID, "nick", actual)
 				}
 			}
-			channels = strings.Join(mem.AutoJoin, ",")
-			for _, ch := range mem.AutoJoin {
-				client.Cmd.Join(ch)
-			}
+		channels = strings.Join(mem.AutoJoin, ",")
+		for _, ch := range mem.AutoJoin {
+			// Pending so a rejection on reconnect (channel went +i, we got
+			// banned...) also rolls the channel back instead of silently
+			// shadowing it from the client.
+			c.markPending(ch)
+			client.Cmd.Join(ch)
+		}
 		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
 	})
@@ -259,6 +286,106 @@ func (m *Manager) registerHandlers(c *conn) {
 			}
 		}
 	})
+
+	c.client.Handlers.Add(girc.JOIN, func(client *girc.Client, e girc.Event) {
+		// Our own join echo confirms a pending optimistic channel-create.
+		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
+			c.clearPending(e.Params[0])
+		}
+	})
+
+	// Upstream join failures for pending creates. IRC servers usually just
+	// create channels, but +i/+b/+R/+k/+l and bad names do reject JOINs —
+	// the optimistic channel in the client must be rolled back.
+	for numeric, why := range joinErrorReasons {
+		reason := why
+		c.client.Handlers.Add(numeric, func(client *girc.Client, e girc.Event) {
+			// Layout for all of these: <our-nick> <channel> [:text]
+			if len(e.Params) < 2 {
+				return
+			}
+			m.rollbackJoin(c, e.Params[1], reason)
+		})
+	}
+}
+
+// joinErrorReasons maps IRC numerics that reject JOIN to user-facing text.
+var joinErrorReasons = map[string]string{
+	"403": "the channel does not exist on this server",
+	"471": "the channel is full (+l)",
+	"473": "the channel is invite-only (+i)",
+	"474": "you are banned from that channel (+b)",
+	"475": "the channel requires a key (+k), which Voidbar does not support yet",
+	"476": "that is not a valid channel name for this server",
+	"477": "the channel requires a registered account (+R)",
+}
+
+// rollbackJoin undoes a join the upstream refused (optimistic create or
+// auto-join on reconnect): drop the auto-join entry, CHANNEL_DELETE the
+// channel out of the client, and have Clyde explain the refusal in a DM.
+// The registry record and replay buffer are kept — if the channel becomes
+// joinable again (invite granted, ban lifted), re-adding it recovers the
+// history.
+func (m *Manager) rollbackJoin(c *conn, ircName, reason string) {
+	if !c.clearPending(ircName) {
+		return // not ours / not pending
+	}
+	m.log.Warn("irc join rejected", "user", c.userID, "network", c.networkID, "channel", ircName, "reason", reason)
+	_ = m.store.MembershipRemoveChannel(c.networkID, c.userID, ircName)
+	if ch, err := m.store.GetChannelByIRC(c.networkID, ircName); err == nil {
+		m.gw.Dispatch(c.userID, "CHANNEL_DELETE", map[string]any{
+			"id":       ch.ID,
+			"guild_id": c.networkID,
+		})
+	}
+	m.clydeSay(c.userID, c.networkID, "Не удалось присоединиться к **"+ircName+"**: "+reason+".")
+}
+
+// clydeSay delivers a system notice as a DM from Clyde (bot), creating the
+// thread on first contact like a real query would.
+func (m *Manager) clydeSay(userID, networkID, text string) {
+	dm, err := m.store.EnsureDMChannel(userID, networkID, "Clyde", m.sf.New)
+	if err != nil {
+		m.log.Warn("clyde dm ensure failed", "err", err, "user", userID)
+		return
+	}
+	if time.Since(dm.CreatedAt) < 3*time.Second {
+		m.gw.Dispatch(userID, "CHANNEL_CREATE", m.dmChannelPayload(dm))
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	msgID := m.sf.New()
+	m.gw.Dispatch(userID, "MESSAGE_CREATE", map[string]any{
+		"id":               msgID,
+		"channel_id":       dm.ID,
+		"content":          text,
+		"timestamp":        ts,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nil,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
+		"author":           model.DMPeer("Clyde"),
+	})
+	if err := m.store.AppendMessage(storage.BufferedMessage{
+		ID:         msgID,
+		ChannelID:  dm.ID,
+		AuthorID:   "irc:Clyde",
+		AuthorName: "Clyde",
+		Content:    text,
+		Timestamp:  ts,
+		Type:       0,
+	}); err != nil {
+		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
+	}
+	_ = m.store.TouchDMChannel(dm.ID)
 }
 
 func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
@@ -384,16 +511,13 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts string) {
 // type 1, recipients = [peer]).
 func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
 	return map[string]any{
-		"id":       dm.ID,
-		"type":     1,
-		"flags":    0,
-		"last_message_id": nil,
-		"recipients": []any{map[string]any{
-			"id":            model.IrcAuthorID("irc:" + dm.Nick),
-			"username":      dm.Nick,
-			"discriminator": "0",
-			"bot":           false,
-		}},
+		"id":                   dm.ID,
+		"type":                 1,
+		"flags":                0,
+		"last_message_id":      nil,
+		"recipients":           []any{model.DMPeer(dm.Nick)},
+		"is_message_request":   false,
+		"is_spam":              false,
 	}
 }
 
@@ -431,7 +555,26 @@ func (m *Manager) JoinChannel(userID, networkID, channel string) {
 	if !ok || client == nil {
 		return
 	}
+	// Marked pending so an upstream refusal (numerics) can roll the
+	// optimistic create back.
+	c.markPending(channel)
 	client.Cmd.Join(channel)
+}
+
+// PartChannel leaves an IRC channel upstream (Discord channel delete).
+func (m *Manager) PartChannel(userID, networkID, channel string) {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok || client == nil {
+		return
+	}
+	c.clearPending(channel)
+	client.Cmd.Part(channel)
 }
 
 // SendChannel relays a Discord message into an IRC channel. Between a drop

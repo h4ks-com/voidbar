@@ -210,17 +210,12 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 	out := make([]any, 0, len(dms))
 	for _, dm := range dms {
 		out = append(out, map[string]any{
-			"id":               dm.ID,
-			"type":             1,
-			"flags":            0,
-			"last_message_id":  nil,
-			"last_message_timestamp": nil,
-			"recipients": []any{map[string]any{
-				"id":            model.IrcAuthorID("irc:" + dm.Nick),
-				"username":      dm.Nick,
-				"discriminator": "0",
-				"bot":           false,
-			}},
+			"id":                          dm.ID,
+			"type":                        1,
+			"flags":                       0,
+			"last_message_id":             nil,
+			"last_message_timestamp":      nil,
+			"recipients":                  []any{model.DMPeer(dm.Nick)},
 			"is_message_request":           false,
 			"is_message_request_timestamp": nil,
 			"is_spam":                      false,
@@ -244,6 +239,14 @@ func (s *Service) TouchDMChannel(id string) {
 		// Ordering-only metadata: never fatal, the caller has no logger.
 		_ = err
 	}
+}
+
+// DeleteDMChannel closes a DM thread (client "close DM").
+func (s *Service) DeleteDMChannel(id string) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.DeleteDMChannel(id)
 }
 
 // NewMessageID mints a snowflake id for a message.
@@ -298,6 +301,108 @@ func (s *Service) Leave(userID, guildID string) error {
 	}
 	return nil
 }
+
+// ValidateChannelName normalizes a client-supplied channel name to IRC form
+// ("#name"). Returns "" when the name can't work as an IRC channel.
+func ValidateChannelName(raw string) string {
+	name := strings.TrimSpace(raw)
+	name = strings.TrimPrefix(name, "#")
+	name = strings.TrimPrefix(name, "&")
+	if name == "" || len(name) > 50 {
+		return ""
+	}
+	// RFC 1459 channel-name exclusions, plus the practical ones (spaces
+	// break the wire protocol, commas break lists).
+	if strings.ContainsAny(name, " ,\x07:*!@") {
+		return ""
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7F {
+			return ""
+		}
+	}
+	return "#" + name
+}
+
+// CreateChannel is the client's "create channel" action: IRC servers create
+// channels on JOIN (no reserved names), so the channel appears in the
+// client immediately and the JOIN goes upstream; a refusal (invite-only,
+// banned, account-required...) rolls back via the IRC manager's error
+// handlers, with Clyde explaining in a DM.
+func (s *Service) CreateChannel(userID, guildID, rawName string) (map[string]any, error) {
+	if _, err := s.store.GetMembership(guildID, userID); err != nil {
+		return nil, err
+	}
+	ircName := ValidateChannelName(rawName)
+	if ircName == "" {
+		return nil, ErrBadChannelName
+	}
+	if _, err := s.store.MembershipAddChannel(guildID, userID, ircName); err != nil {
+		return nil, err
+	}
+	ch, err := s.store.EnsureChannel(guildID, ircName, s.sf.New)
+	if err != nil {
+		return nil, err
+	}
+	if s.manager != nil {
+		s.manager.JoinChannel(userID, guildID, ircName)
+	}
+	payload := s.channelPayload(guildID, ch, 0)
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_CREATE", payload)
+	}
+	return payload, nil
+}
+
+// RemoveChannel is the client's channel delete: PART upstream, drop the
+// auto-join entry, CHANNEL_DELETE to the client. The registry record and
+// replay buffer are kept — re-adding the channel recovers its history,
+// matching bouncer semantics.
+func (s *Service) RemoveChannel(userID, channelID string) error {
+	ch, err := s.store.GetChannel(channelID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.GetMembership(ch.NetworkID, userID); err != nil {
+		return err
+	}
+	if err := s.store.MembershipRemoveChannel(ch.NetworkID, userID, ch.IRCName); err != nil {
+		return err
+	}
+	if s.manager != nil {
+		s.manager.PartChannel(userID, ch.NetworkID, ch.IRCName)
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_DELETE", map[string]any{
+			"id":       channelID,
+			"guild_id": ch.NetworkID,
+		})
+	}
+	return nil
+}
+
+// channelPayload is the wire shape shared by guild assembly and
+// CHANNEL_CREATE for an IRC-backed text channel.
+func (s *Service) channelPayload(guildID string, ch *storage.Channel, position int) map[string]any {
+	return map[string]any{
+		"id":                    ch.ID,
+		"guild_id":              guildID,
+		"name":                  ch.Name,
+		"type":                  0,
+		"position":              position,
+		"topic":                 nil,
+		"last_message_id":       "0",
+		"permission_overwrites": []any{},
+		"rate_limit_per_user":   0,
+		"nsfw":                  false,
+		"flags":                 0,
+		"parent_id":             nil,
+	}
+}
+
+// ErrBadChannelName reports a client-supplied channel name that can't be an
+// IRC channel.
+var ErrBadChannelName = errors.New("invalid channel name")
 
 // GuildCreatePayloads returns full GUILD_CREATE payloads for every network
 // the user belongs to, dispatched by the gateway right after READY. Channels
@@ -386,7 +491,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		"icon":          nil,
 		"unicode_emoji": nil,
 		"position":      0,
-		"permissions":   "104324673682433", // everything, owner-oriented bouncer
+		"permissions":   "104324673682449", // everything incl. MANAGE_CHANNELS, owner-oriented bouncer
 		"managed":       false,
 		"mentionable":   false,
 		"flags":         0,
