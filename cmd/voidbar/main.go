@@ -97,6 +97,8 @@ func serveCmd(args []string, log *slog.Logger) error {
 		netSvc.GuildCreateForUser,
 	)
 	gw.SetDMChannelsProvider(netSvc.DMChannelPayloads)
+	gw.SetMemberListProvider(netSvc.MemberListPayload)
+	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

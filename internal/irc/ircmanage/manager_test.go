@@ -271,7 +271,79 @@ func serveJoinable(conn net.Conn) {
 	}()
 }
 
-// TestJoinRejectedRollsBackAndClydeExplains: an optimistic channel-create
+// TestChannelMembersFromNAMES: the fake server sends a NAMES reply for
+// #test after the join echo; ChannelMembers must surface the other
+// occupants (own nick excluded) sorted.
+func TestChannelMembersFromNAMES(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveJoinable(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "listguy", Username: "l", Realname: "l",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+	// NAMES for #test: two other users + ourselves (the member list shows
+	// the requester too, like Discord's own list).
+	if _, err := fake.Write([]byte(":fake 353 listguy = #test :listguy alice bob\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var got []string
+	for time.Now().Before(deadline) {
+		got = manager.ChannelMembers("u1", "net1", "#test")
+		if len(got) == 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(got) != 3 || got[0] != "alice" || got[1] != "bob" || got[2] != "listguy" {
+		t.Fatalf("members: %v", got)
+	}
+}
 // the upstream refuses (473 invite-only) must leave no trace in the
 // auto-join list, and Clyde must DM the user the reason. A join the server
 // accepts echoes back and triggers no rollback.

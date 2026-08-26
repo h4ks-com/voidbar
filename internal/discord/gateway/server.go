@@ -30,6 +30,8 @@ type Server struct {
 	guildsForUser      func(userID string) ([]any, error)
 	guildCreateForUser func(userID string) []any
 	dmChannelsForUser  func(userID string) []any
+	memberListForUser  func(userID, guildID, channelID string) any
+	memberChunkForUser func(userID, guildID, nonce string, userIDs []string) any
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -48,6 +50,18 @@ func (s *Server) SetGuildProviders(guildsForUser func(userID string) ([]any, err
 // late-wiring rationale as SetGuildProviders.
 func (s *Server) SetDMChannelsProvider(dmChannelsForUser func(userID string) []any) {
 	s.dmChannelsForUser = dmChannelsForUser
+}
+
+// SetMemberListProvider installs the GUILD_MEMBER_LIST_UPDATE hook serving
+// op 14 (lazy request) — the client's channel member list ask.
+func (s *Server) SetMemberListProvider(memberListForUser func(userID, guildID, channelID string) any) {
+	s.memberListForUser = memberListForUser
+}
+
+// SetMemberChunkProvider installs the GUILD_MEMBERS_CHUNK hook serving
+// op 8 (Request Guild Members, documented).
+func (s *Server) SetMemberChunkProvider(memberChunkForUser func(userID, guildID, nonce string, userIDs []string) any) {
+	s.memberChunkForUser = memberChunkForUser
 }
 
 // New creates the gateway server. guildsForUser (optional) supplies the
@@ -235,10 +249,100 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 		case OpHeartbeat:
 			ack, _ := json.Marshal(opFrame{Op: OpHeartbeatACK})
 			ch <- ack
-		case OpPresenceUpdate, OpVoiceStateUpdate, OpRequestGuildMembers:
+		case OpPresenceUpdate, OpVoiceStateUpdate:
 			if sess == nil {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
 				return
+			}
+		case OpRequestGuildMembers:
+			// Documented member fetch (userdocs: Request Guild Members):
+			// this client's StoreGuildMemberRequester fires it when a
+			// channel opens. Reply with one GUILD_MEMBERS_CHUNK built from
+			// the same IRC NAMES state the lazy list uses.
+			if sess == nil {
+				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
+				return
+			}
+			var d struct {
+				GuildID  json.RawMessage   `json:"guild_id"`
+				UserIDs  []json.RawMessage `json:"user_ids"`
+				Query    string            `json:"query"`
+				Limit    int               `json:"limit"`
+				Presences bool             `json:"presences"`
+				Nonce    string            `json:"nonce"`
+			}
+			if err := json.Unmarshal(p.D, &d); err != nil {
+				continue
+			}
+			if s.memberChunkForUser == nil {
+				continue
+			}
+			guildIDs := rawIDsToStrings(d.GuildID)
+			userIDs := make([]string, 0, len(d.UserIDs))
+			for _, raw := range d.UserIDs {
+				userIDs = append(userIDs, rawIDsToStrings(raw)...)
+			}
+			s.log.Info("op8 request", "guilds", guildIDs, "users", userIDs, "query", d.Query, "limit", d.Limit)
+			for _, gid := range guildIDs {
+				if payload := s.memberChunkForUser(sess.UserID, gid, d.Nonce, userIDs); payload != nil {
+					if _, err := sess.dispatch("GUILD_MEMBERS_CHUNK", payload, true); err != nil {
+						s.log.Error("member chunk dispatch failed", "err", err, "guild", gid)
+					}
+				}
+			}
+		case OpCallConnect:
+			// Call-connect sync: the client fires it per open channel with
+			// a numeric channel_id. Text channels never have calls, so the
+			// correct answer is silence.
+			if sess == nil {
+				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
+				return
+			}
+		case OpGuildSubscriptions:
+			// Lazy request: the client opened a channel and wants its
+			// member list. Reply with a GUILD_MEMBER_LIST_UPDATE SYNC per
+			// requested channel (list id "<guild>:everyone:<start>,<end>"
+			// for channels without permission overwrites).
+			if sess == nil {
+				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
+				return
+			}
+			// guild_id is numeric here too (see rawIDsToStrings).
+			var d struct {
+				GuildID  json.RawMessage        `json:"guild_id"`
+				Channels map[string][][]float64 `json:"channels"`
+			}
+			if err := json.Unmarshal(p.D, &d); err != nil || len(d.GuildID) == 0 {
+				s.log.Warn("op13/14 decode failed", "err", err, "raw", string(p.D))
+				continue
+			}
+			gids := rawIDsToStrings(d.GuildID)
+			if len(gids) == 0 {
+				s.log.Warn("op13/14 decode failed: no guild id", "raw", string(p.D))
+				continue
+			}
+			s.log.Info("op14 request", "guild", gids[0], "channels", len(d.Channels))
+			guildID := gids[0]
+			if s.memberListForUser == nil {
+				continue
+			}
+			// Channels omitted (or empty) = the guild-wide "everyone" list.
+			if len(d.Channels) == 0 {
+				if payload := s.memberListForUser(sess.UserID, guildID, ""); payload != nil {
+					if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
+						s.log.Error("member list dispatch failed", "err", err)
+					}
+				}
+				continue
+			}
+			for channelID := range d.Channels {
+				payload := s.memberListForUser(sess.UserID, guildID, channelID)
+				if payload == nil {
+					continue
+				}
+				if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
+					s.log.Error("member list dispatch failed", "err", err, "channel", channelID)
+				}
 			}
 		default:
 			// Tolerate unknown opcodes (the client sends some pre-IDENTIFY
@@ -261,6 +365,38 @@ func authToken(t string) string {
 		return strings.TrimSpace(rest)
 	}
 	return t
+}
+
+// rawIDsToStrings accepts a JSON snowflake that may be a string, a number
+// or an array of either, and normalizes it to decimal strings.
+//
+// COMPAT QUIRK: the docs say snowflakes are strings, but the Android client
+// serializes snowflake fields in OUTGOING gateway payloads as bare JSON
+// numbers (op 8 guild_id/user_ids look like [1541479714630139904]). Any
+// handler that reads a client-sent snowflake must go through this helper
+// (or otherwise accept both) — unmarshalling into a plain string field
+// silently yields "" and the request looks empty.
+func rawIDsToStrings(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return []string{s}
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return []string{n.String()}
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			out = append(out, rawIDsToStrings(item)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func (s *Server) closeWS(conn *websocket.Conn, code int, reason string) {

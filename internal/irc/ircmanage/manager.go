@@ -7,6 +7,7 @@ package ircmanage
 import (
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -338,7 +339,7 @@ func (m *Manager) rollbackJoin(c *conn, ircName, reason string) {
 			"guild_id": c.networkID,
 		})
 	}
-	m.clydeSay(c.userID, c.networkID, "Не удалось присоединиться к **"+ircName+"**: "+reason+".")
+	m.clydeSay(c.userID, c.networkID, "Could not join **"+ircName+"**: "+reason+".")
 }
 
 // clydeSay delivers a system notice as a DM from Clyde (bot), creating the
@@ -519,6 +520,36 @@ func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
 		"is_message_request":   false,
 		"is_spam":              false,
 	}
+}
+
+// ChannelMembers returns the nicks currently in an IRC channel according
+// to girc's live channel state (fed by NAMES on join plus JOIN/PART/QUIT).
+// Sorted for stable list rendering. Empty when the channel is unknown.
+func (m *Manager) ChannelMembers(userID, networkID, ircName string) []string {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok || client == nil {
+		return nil
+	}
+	ch := client.LookupChannel(ircName)
+	if ch == nil {
+		return nil
+	}
+	users := ch.Users(client)
+	nicks := make([]string, 0, len(users))
+	for _, u := range users {
+		if u == nil {
+			continue
+		}
+		nicks = append(nicks, u.Nick)
+	}
+	sort.Strings(nicks)
+	return nicks
 }
 
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).

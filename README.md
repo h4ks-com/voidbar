@@ -82,6 +82,13 @@ worth knowing about:
 - **Sends are right-trimmed**: the Android compose box appends a trailing
   newline to every message; real Discord trims it server-side, so the
   bouncer does too.
+- **Snowflakes arrive as JSON numbers**: although the Discord docs specify
+  snowflake IDs as strings, this client serializes them as bare numbers in
+  outgoing gateway payloads (op 8 `guild_id`/`user_ids` arrive as
+  `[1541479714630139904]`). Never unmarshal client-sent snowflakes into a
+  string field — normalize through `rawIDsToStrings`
+  (`internal/discord/gateway/server.go`), which accepts string, number and
+  arrays of either.
 - Post-login probes are stubbed so they don't 404-loop:
   `POST /auth/fingerprint`, `GET /users/{id}/profile`,
   `GET /users/@me/survey`, `POST /users/@me/devices`,

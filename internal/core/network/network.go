@@ -7,6 +7,7 @@ package network
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -397,7 +398,165 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		"nsfw":                  false,
 		"flags":                 0,
 		"parent_id":             nil,
+		// COMPAT: the client resolves the member sidebar through the
+		// channel's own member_list_id (Channel.memberListId) — the lazy
+		// list map is keyed by exactly this string, and GUILD_MEMBER_LIST_
+		// UPDATE ids must match it or the rows render as shimmer
+		// placeholders forever.
+		"member_list_id": guildID + ":everyone:0,99",
 	}
+}
+
+// MemberListPayload answers op 14 (lazy request) with a
+// GUILD_MEMBER_LIST_UPDATE SYNC for one channel (or the guild-wide
+// everyone-list when channelID is empty). Members come from the upstream
+// NAMES state; presence is online for everyone (IRC has no per-user
+// offline: you see exactly who is in the channel).
+func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
+	mem, err := s.store.GetMembership(guildID, userID)
+	if err != nil {
+		return nil
+	}
+	ircName := ""
+	if channelID != "" {
+		ch, err := s.store.GetChannel(channelID)
+		if err != nil {
+			return nil
+		}
+		ircName = ch.IRCName
+	}
+	var nicks []string
+	if s.manager != nil {
+		if ircName != "" {
+			nicks = s.manager.ChannelMembers(userID, guildID, ircName)
+		} else {
+			// Guild-wide list: union across the member's channels.
+			seen := map[string]bool{}
+			for _, chName := range mem.AutoJoin {
+				for _, n := range s.manager.ChannelMembers(userID, guildID, chName) {
+					if !seen[n] {
+						seen[n] = true
+						nicks = append(nicks, n)
+					}
+				}
+			}
+			sort.Strings(nicks)
+		}
+	}
+	if len(nicks) > 99 {
+		nicks = nicks[:99]
+	}
+
+	items := make([]any, 0, len(nicks)+1)
+	items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(nicks)}})
+	for _, nick := range nicks {
+		uid := model.IrcAuthorID("irc:" + nick)
+		// COMPAT: presence lives INSIDE the member object here (the item
+		// parser only knows the "group"/"member" keys, and GuildMember
+		// itself carries a presence field the client reads via
+		// StoreStream.handleItem).
+		items = append(items, map[string]any{
+			"member": map[string]any{
+				"user": map[string]any{
+					"id":            uid,
+					"username":      nick,
+					"discriminator": "0",
+					"bot":           false,
+				},
+				"roles":     []any{},
+				"joined_at": mem.JoinedAt.Format(time.RFC3339),
+				"presence": map[string]any{
+					"user":   map[string]any{"id": uid},
+					"status": "online",
+				},
+			},
+		})
+	}
+	return map[string]any{
+		"id":       guildID + ":everyone:0,99",
+		"guild_id": guildID,
+		"groups": []any{
+			map[string]any{"id": "online", "count": len(nicks)},
+		},
+		"ops": []any{
+			map[string]any{
+				"op":    "SYNC",
+				"range": []int{0, 99},
+				"items": items,
+			},
+		},
+	}
+}
+
+// MemberChunkPayload answers op 8 (Request Guild Members) with a single
+// GUILD_MEMBERS_CHUNK (userdocs shape). With userIDs set, only those
+// members are returned (the client resolves message authors it has seen);
+// without, the union of occupants across the member's channels.
+func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []string) any {
+	mem, err := s.store.GetMembership(guildID, userID)
+	if err != nil {
+		return nil
+	}
+	want := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		want[id] = true
+	}
+	var nicks []string
+	if s.manager != nil {
+		seen := map[string]bool{}
+		for _, chName := range mem.AutoJoin {
+			for _, n := range s.manager.ChannelMembers(userID, guildID, chName) {
+				if !seen[n] {
+					seen[n] = true
+					nicks = append(nicks, n)
+				}
+			}
+		}
+		sort.Strings(nicks)
+	}
+	members := make([]any, 0, len(nicks))
+	presences := make([]any, 0, len(nicks))
+	for _, nick := range nicks {
+		uid := model.IrcAuthorID("irc:" + nick)
+		if len(want) > 0 && !want[uid] {
+			continue
+		}
+		user := map[string]any{
+			"id":            uid,
+			"username":      nick,
+			"discriminator": "0",
+			"bot":           false,
+		}
+		members = append(members, map[string]any{
+			"user":      user,
+			"roles":     []any{},
+			"joined_at": mem.JoinedAt.Format(time.RFC3339),
+		})
+		presences = append(presences, map[string]any{
+			"user":       map[string]any{"id": uid},
+			"status":     "online",
+			"activities": []any{},
+		})
+	}
+	if len(members) == 0 && len(want) > 0 {
+		// Requested users are not in any channel right now: per the docs
+		// they'd come back in not_found so the client stops asking.
+		members = []any{}
+		presences = []any{}
+	}
+	out := map[string]any{
+		"guild_id":    guildID,
+		"members":     members,
+		"chunk_index": 0,
+		"chunk_count": 1,
+	}
+	if len(presences) > 0 {
+		out["presences"] = presences
+	}
+	if nonce != "" {
+		out["nonce"] = nonce
+	}
+	return out
 }
 
 // ErrBadChannelName reports a client-supplied channel name that can't be an
@@ -447,23 +606,11 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	}
 	channels := make([]any, 0, len(chans))
 	for i, ch := range chans {
-		channels = append(channels, map[string]any{
-			"id":                    ch.ID,
-			"guild_id":              net.ID,
-			"name":                  ch.Name,
-			"type":                  0,
-			"position":              i,
-			"topic":                 nil,
-			"last_message_id":       "0",
-			"permission_overwrites": []any{},
-			"rate_limit_per_user":   0,
-			"nsfw":                  false,
-			"flags":                 0,
-			"parent_id":             nil,
-		})
+		channels = append(channels, s.channelPayload(net.ID, ch, i))
 	}
 
 	members := make([]any, 0, len(all)+1)
+	presences := make([]any, 0)
 	for _, mem := range all {
 		members = append(members, map[string]any{
 			"user": map[string]any{
@@ -479,6 +626,48 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// The owner is always Clyde: users only ever join networks (the
 	// "Delete server" owner flow stays hidden, "Leave server" shows).
 	members = append(members, model.ClydeMember(net.CreatedAt.Format(time.RFC3339)))
+
+	// IRC occupants ride along as guild members. The client only lazy-loads
+	// the member sidebar (op 14 lazy list) for "large" guilds; with
+	// large:false it renders straight from GUILD_CREATE's members/presences,
+	// so the NAMES state has to be inlined here too.
+	seenUser := map[string]bool{}
+	for _, mem := range all {
+		seenUser[mem.UserID] = true
+	}
+	if s.manager != nil {
+		seenNick := map[string]bool{}
+		var occupants []string
+		for _, chName := range m.AutoJoin {
+			for _, nick := range s.manager.ChannelMembers(m.UserID, net.ID, chName) {
+				if !seenNick[nick] {
+					seenNick[nick] = true
+					occupants = append(occupants, nick)
+				}
+			}
+		}
+		sort.Strings(occupants)
+		for _, nick := range occupants {
+			uid := model.IrcAuthorID("irc:" + nick)
+			if seenUser[uid] {
+				continue
+			}
+			members = append(members, map[string]any{
+				"user": map[string]any{
+					"id":            uid,
+					"username":      nick,
+					"discriminator": "0",
+					"bot":           false,
+				},
+				"roles":     []any{},
+				"joined_at": m.JoinedAt.Format(time.RFC3339),
+			})
+			presences = append(presences, map[string]any{
+				"user": map[string]any{"id": uid},
+				"status": "online",
+			})
+		}
+	}
 
 	// Every Discord guild has an @everyone role whose id equals the guild id;
 	// the client computes channel permissions through it, and without the
@@ -505,10 +694,10 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
 		"channels":                      channels,
 		"members":                       members,
-		"member_count":                  len(all) + 1,
+		"member_count":                  len(members),
 		"large":                         false,
 		"roles":                         []any{everyoneRole},
-		"presences":                     []any{},
+		"presences":                     presences,
 		"voice_states":                  []any{},
 		"threads":                       []any{},
 		"emojis":                        []any{},

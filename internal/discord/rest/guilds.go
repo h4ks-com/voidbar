@@ -203,12 +203,13 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 	channels := make([]any, 0, len(chans))
 	for i, ch := range chans {
 		channels = append(channels, map[string]any{
-			"id":       ch.ID,
-			"guild_id": guildID,
-			"name":     ch.Name,
-			"type":     0,
-			"position": i,
-			"topic":    nil,
+			"id":              ch.ID,
+			"guild_id":        guildID,
+			"name":            ch.Name,
+			"type":            0,
+			"position":        i,
+			"topic":           nil,
+			"member_list_id":  guildID + ":everyone:0,99",
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
