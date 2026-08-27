@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lrstanley/girc"
@@ -34,6 +35,10 @@ type Manager struct {
 	// ircChannel means "everything this user sees changed" (QUIT/NICK
 	// affect every shared channel at once).
 	occupancy func(userID, networkID, ircChannel string)
+
+	// linkChange (optional) is notified on upstream link state
+	// transitions so the Discord side can mark guilds (un)available.
+	linkChange func(userID, networkID string, up bool)
 
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
@@ -65,6 +70,11 @@ type conn struct {
 	client    *girc.Client
 	cancel    chan struct{}
 	done      chan struct{}
+
+	// linkUp tracks upstream connection health (set on CONNECTED, cleared
+	// when the read loop dies); drives guild (un)availability on the
+	// Discord side.
+	linkUp atomic.Bool
 
 	// pendingJoins tracks channels this connection is trying to join
 	// (lowercased). Optimistic channel-creates only roll back on upstream
@@ -311,11 +321,17 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 				}
 			}()
 
-			m.log.Info("irc connecting", "user", userID, "network", networkID, "server", net.Host)
-			started := time.Now()
-			cErr := client.Connect()
-			lived := time.Since(started)
-			close(attempt)
+		m.log.Info("irc connecting", "user", userID, "network", networkID, "server", net.Host)
+		started := time.Now()
+		cErr := client.Connect()
+		lived := time.Since(started)
+		close(attempt)
+		// Link died: flip the guild to unavailable on the Discord side.
+		// Transitions only - a failed connect attempt after a down phase
+		// must not re-notify.
+		if c.linkUp.Swap(false) {
+			m.fireLinkChange(c, false)
+		}
 
 			select {
 			case <-c.cancel:
@@ -426,8 +442,32 @@ func (m *Manager) pollAwayOnce(c *conn, client *girc.Client, next *int) {
 // membership events (JOIN/PART/QUIT/KICK/MODE/NICK). Wire it after both
 // the manager and the network service exist (same late-wiring pattern
 // as the gateway providers).
-func (m *Manager) SetOccupancyNotifier(fn func(userID, networkID, ircChannel string)) {
-	m.occupancy = fn
+func (m *Manager) SetOccupancyNotifier(fn func(userID, networkID, ircChannel string)) {	m.occupancy = fn
+}
+
+// SetLinkNotifier installs the callback fired on upstream link state
+// transitions (down -> up, up -> down). The Discord side maps these to
+// GUILD_UNAVAILABLE / GUILD_CREATE so clients grey the guild out instead
+// of hammering member requests against a dead link.
+func (m *Manager) SetLinkNotifier(fn func(userID, networkID string, up bool)) {
+	m.linkChange = fn
+}
+
+// fireLinkChange notifies the network service of a link state transition.
+func (m *Manager) fireLinkChange(c *conn, up bool) {
+	if m.linkChange == nil {
+		return
+	}
+	m.linkChange(c.userID, c.networkID, up)
+}
+
+// LinkUp reports whether the (user, network) upstream link is currently
+// connected. Missing connections report down.
+func (m *Manager) LinkUp(userID, networkID string) bool {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	return ok && c.linkUp.Load()
 }
 
 // notifyOccupancy fans an occupancy change out to the network service.
@@ -483,6 +523,11 @@ func (m *Manager) registerHandlers(c *conn) {
 	})
 
 	c.client.Handlers.Add(girc.CONNECTED, func(client *girc.Client, e girc.Event) {
+		// Registration completed: the guild is available again. Push a
+		// fresh GUILD_CREATE so clients re-render and re-subscribe.
+		if !c.linkUp.Swap(true) {
+			m.fireLinkChange(c, true)
+		}
 		channels := ""
 		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil {
 			// The server may have renamed us during registration (nick

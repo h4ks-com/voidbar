@@ -100,6 +100,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	gw.SetMemberListProvider(netSvc.MemberListPayload)
 	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
 	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)
+	manager.SetLinkNotifier(netSvc.OnLinkChange)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

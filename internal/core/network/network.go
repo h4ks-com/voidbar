@@ -511,6 +511,12 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	if err != nil {
 		return nil
 	}
+	// Dead upstream: the guild is flagged unavailable on the Discord side;
+	// answering member asks with empty sets just makes clients re-request
+	// forever against state they know used to be richer.
+	if !s.linkUp(userID, guildID) {
+		return nil
+	}
 	ircName := ""
 	if channelID != "" {
 		ch, err := s.store.GetChannel(channelID)
@@ -705,6 +711,10 @@ func (s *Service) StartTyping(userID, channelID string) error {
 func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []string) any {
 	mem, err := s.store.GetMembership(guildID, userID)
 	if err != nil {
+		return nil
+	}
+	// See MemberListPayload: no member answers for dead upstreams.
+	if !s.linkUp(userID, guildID) {
 		return nil
 	}
 	want := make(map[string]bool, len(userIDs))
@@ -922,7 +932,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 			"hashes":   map[string]any{},
 			"guild_id": net.ID,
 		},
-		"unavailable": false,
+		"unavailable": !s.linkUp(m.UserID, net.ID),
 	}
 }
 
@@ -953,9 +963,41 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 		guilds = append(guilds, map[string]any{
 			"id":          net.ID,
 			"name":        net.Name,
-			"unavailable": false,
+			"unavailable": !s.linkUp(m.UserID, net.ID),
 			"joined_at":   m.JoinedAt.Format(time.RFC3339),
 		})
 	}
 	return guilds, nil
+}
+
+// linkUp reports upstream health for a membership; a nil manager (tests)
+// counts as up so payloads stay available.
+func (s *Service) linkUp(userID, networkID string) bool {
+	if s.manager == nil {
+		return true
+	}
+	return s.manager.LinkUp(userID, networkID)
+}
+
+// OnLinkChange is the manager's link-state hook: dead upstreams flip their
+// guild to GUILD_UNAVAILABLE (clients grey it out and stop requesting
+// members instead of hammering a zombie link), restored ones get a fresh
+// GUILD_CREATE.
+func (s *Service) OnLinkChange(userID, networkID string, up bool) {
+	if s.gw == nil {
+		return
+	}
+	if up {
+		if mem, err := s.store.GetMembership(networkID, userID); err == nil {
+			if net, err := s.store.GetNetwork(networkID); err == nil {
+				s.gw.Dispatch(userID, "GUILD_CREATE", s.buildGuild(mem, net))
+				return
+			}
+		}
+		return
+	}
+	s.gw.Dispatch(userID, "GUILD_UNAVAILABLE", map[string]any{
+		"guild_id":     networkID,
+		"unavailable":  true,
+	})
 }
