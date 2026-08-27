@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -352,28 +353,29 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		return
 	}
 	buffered := s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
-	channelID := r.PathValue("channel")
-	networkID := ""
-	if ch, err := s.net.ChannelByID(channelID); err == nil {
-		networkID = ch.NetworkID
-	} else if dm, err := s.net.DMChannelByID(channelID); err == nil && dm.OwnerID == u.ID {
-		networkID = dm.NetworkID
-	}
 	out := make([]any, 0, len(buffered))
 	for _, m := range buffered {
 		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce)
-		if networkID != "" && s.irc != nil {
-			if rcs := s.irc.ReactionsFor(u.ID, networkID, u.ID, m.ID); len(rcs) > 0 {
-				list := make([]any, 0, len(rcs))
-				for _, rc := range rcs {
-					list = append(list, map[string]any{
-						"count": rc.Count,
-						"me":    rc.Me,
-						"emoji": map[string]any{"id": nil, "name": rc.Emoji},
-					})
-				}
-				payload["reactions"] = list
+		// Reaction pills come from the persisted state on the message
+		// (updated on every live change), so history is restart-proof.
+		if len(m.Reactions) > 0 {
+			emojis := make([]string, 0, len(m.Reactions))
+			for emoji := range m.Reactions {
+				emojis = append(emojis, emoji)
 			}
+			sort.Strings(emojis)
+			list := make([]any, 0, len(emojis))
+			for _, emoji := range emojis {
+				rc := map[string]any{"count": len(m.Reactions[emoji]), "me": false, "emoji": map[string]any{"id": nil, "name": emoji}}
+				for _, uid := range m.Reactions[emoji] {
+					if uid == u.ID {
+						rc["me"] = true
+						break
+					}
+				}
+				list = append(list, rc)
+			}
+			payload["reactions"] = list
 		}
 		out = append(out, payload)
 	}

@@ -23,6 +23,9 @@ type BufferedMessage struct {
 	Nonce      any    `json:"nonce,omitempty"`
 	Timestamp  string `json:"timestamp"` // RFC3339
 	Type       int    `json:"type"`
+	// Reactions is emoji -> reacting user ids, persisted on every change so
+	// pills survive bouncer restarts (the live-wire msgid registry cannot).
+	Reactions map[string][]string `json:"reactions,omitempty"`
 }
 
 // padID renders a message id so that lexicographic order matches id order:
@@ -73,6 +76,34 @@ func (s *Storage) AppendMessage(m BufferedMessage) error {
 			}
 		}
 		return nil
+	})
+}
+
+// UpdateMessageReactions replaces the reaction set stored on a message
+// (emoji -> user ids). Read-modify-write of the whole blob: reaction
+// traffic is tiny next to message writes, and no schema migration is
+// needed. A trimmed or unknown message is a no-op error for the caller
+// to log.
+func (s *Storage) UpdateMessageReactions(channelID, id string, byEmoji map[string][]string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			return err
+		}
+		var m BufferedMessage
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &m) }); err != nil {
+			return err
+		}
+		if len(byEmoji) == 0 {
+			m.Reactions = nil
+		} else {
+			m.Reactions = byEmoji
+		}
+		val, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return txn.Set(msgKey(channelID, id), val)
 	})
 }
 

@@ -1205,8 +1205,37 @@ type ReactionCount struct {
 	Me    bool
 }
 
+// reactionSnapshot copies a message's live reaction state for persistence.
+func (c *conn) reactionSnapshot(snowflake string) map[string][]string {
+	c.reactMu.Lock()
+	defer c.reactMu.Unlock()
+	byEmoji := c.reactions[snowflake]
+	if len(byEmoji) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(byEmoji))
+	for emoji, users := range byEmoji {
+		ids := make([]string, 0, len(users))
+		for uid := range users {
+			ids = append(ids, uid)
+		}
+		sort.Strings(ids)
+		out[emoji] = ids
+	}
+	return out
+}
+
+// persistReactions stores a message's reaction snapshot. Live-wire only:
+// logged, never fatal.
+func (m *Manager) persistReactions(c *conn, ref msgRef) {
+	if err := m.store.UpdateMessageReactions(ref.ChannelID, ref.Snowflake, c.reactionSnapshot(ref.Snowflake)); err != nil {
+		m.log.Debug("reaction persist failed", "err", err, "msg", ref.Snowflake)
+	}
+}
+
 // trackReaction updates the in-memory reaction state and reports whether
-// anything changed (idempotent repeats are dropped).
+// anything changed (idempotent repeats are dropped). Callers persist the
+// snapshot on change so pills survive restarts.
 func (c *conn) trackReaction(snowflake, emoji, userID string, remove bool) bool {
 	c.reactMu.Lock()
 	defer c.reactMu.Unlock()
@@ -1246,41 +1275,6 @@ func (c *conn) trackReaction(snowflake, emoji, userID string, remove bool) bool 
 	return true
 }
 
-// ReactionsFor returns the aggregated reaction state of a message as seen
-// by viewerID ("me" flags). Registered on the network service so REST
-// message fetches can render them.
-func (m *Manager) ReactionsFor(userID, networkID, viewerID, messageID string) []ReactionCount {
-	m.mu.Lock()
-	c, ok := m.conns[key(userID, networkID)]
-	m.mu.Unlock()
-	if !ok {
-		return nil
-	}
-	c.reactMu.Lock()
-	defer c.reactMu.Unlock()
-	byEmoji := c.reactions[messageID]
-	if len(byEmoji) == 0 {
-		return nil
-	}
-	emojis := make([]string, 0, len(byEmoji))
-	for emoji := range byEmoji {
-		emojis = append(emojis, emoji)
-	}
-	sort.Strings(emojis)
-	out := make([]ReactionCount, 0, len(emojis))
-	for _, emoji := range emojis {
-		rc := ReactionCount{Emoji: emoji}
-		for uid := range byEmoji[emoji] {
-			rc.Count++
-			if uid == viewerID {
-				rc.Me = true
-			}
-		}
-		out = append(out, rc)
-	}
-	return out
-}
-
 // applyReaction bridges an inbound IRC reaction (+draft/react on a TAGMSG
 // with +reply) to MESSAGE_REACTION_ADD / _REMOVE.
 func (m *Manager) applyReaction(c *conn, nick, msgid, emoji string, remove bool) {
@@ -1293,6 +1287,7 @@ func (m *Manager) applyReaction(c *conn, nick, msgid, emoji string, remove bool)
 	if !c.trackReaction(ref.Snowflake, emoji, userID, remove) {
 		return
 	}
+	m.persistReactions(c, ref)
 	m.dispatchReaction(c, ref, userID, emoji, remove)
 }
 
@@ -1358,6 +1353,7 @@ func (m *Manager) SendReaction(userID, networkID, target, messageID, emoji strin
 		}
 	}
 	if c.trackReaction(messageID, emoji, userID, remove) {
+		m.persistReactions(c, ref)
 		m.dispatchReaction(c, ref, userID, emoji, remove)
 	}
 	return nil

@@ -91,7 +91,7 @@ func EveryoneRolePayload(guildID string) map[string]any {
 		"icon":          nil,
 		"unicode_emoji": nil,
 		"position":      0,
-		"permissions":   "104324673674321", // everything the bridge can honour: incl. ADD_REACTIONS (picker UI), excl. MANAGE_MESSAGES (remove-all / delete-others have no IRC mapping)
+		"permissions":   "104324673412177", // exactly what the bridge honours: ADD_REACTIONS yes (picker), MANAGE_MESSAGES no (no IRC mapping), no USE_EXTERNAL_EMOJIS (no custom emojis exist)
 		"managed":       false,
 		"mentionable":   false,
 		"flags":         0,
