@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -351,11 +352,80 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		return
 	}
 	buffered := s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
+	channelID := r.PathValue("channel")
+	networkID := ""
+	if ch, err := s.net.ChannelByID(channelID); err == nil {
+		networkID = ch.NetworkID
+	} else if dm, err := s.net.DMChannelByID(channelID); err == nil && dm.OwnerID == u.ID {
+		networkID = dm.NetworkID
+	}
 	out := make([]any, 0, len(buffered))
 	for _, m := range buffered {
-		out = append(out, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
+		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce)
+		if networkID != "" && s.irc != nil {
+			if rcs := s.irc.ReactionsFor(u.ID, networkID, u.ID, m.ID); len(rcs) > 0 {
+				list := make([]any, 0, len(rcs))
+				for _, rc := range rcs {
+					list = append(list, map[string]any{
+						"count": rc.Count,
+						"me":    rc.Me,
+						"emoji": map[string]any{"id": nil, "name": rc.Emoji},
+					})
+				}
+				payload["reactions"] = list
+			}
+		}
+		out = append(out, payload)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// decodeEmoji unescapes the emoji path segment if it still carries
+// percent-encoding (ServeMux wildcards match escaped paths; non-ASCII
+// emoji arrive encoded) and reduces a custom emoji "name:id" to its name.
+func decodeEmoji(raw string) string {
+	if strings.Contains(raw, "%") {
+		if unescaped, err := url.PathUnescape(raw); err == nil {
+			raw = unescaped
+		}
+	}
+	if i := strings.Index(raw, ":"); i > 0 {
+		raw = raw[:i]
+	}
+	return raw
+}
+
+// handleReactSelf serves PUT/DELETE
+// /channels/{c}/messages/{m}/reactions/{emoji}/@me: the client toggling
+// its own reaction. Relayed upstream as +draft/react / +draft/unreact
+// (with +reply) when the message has a known msgid; the local state and
+// gateway fanout happen regardless so the pill never sticks dead.
+func (s *Server) handleReactSelf(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	channelID := r.PathValue("channel")
+	messageID := r.PathValue("message")
+	emoji := decodeEmoji(r.PathValue("emoji"))
+	if emoji == "" {
+		jsonError(w, http.StatusBadRequest, "missing emoji")
+		return
+	}
+	if s.net == nil || s.irc == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	target, networkID := "", ""
+	if ch, err := s.net.ChannelByID(channelID); err == nil {
+		target, networkID = ch.IRCName, ch.NetworkID
+	} else if dm, err := s.net.DMChannelByID(channelID); err == nil && dm.OwnerID == u.ID {
+		target, networkID = dm.Nick, dm.NetworkID
+	} else {
+		jsonError(w, http.StatusNotFound, "unknown channel")
+		return
+	}
+	if err := s.irc.SendReaction(u.ID, networkID, target, messageID, emoji, r.Method == http.MethodDelete); err != nil {
+		jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleCreateChannel is the client's "create channel": optimistic — IRC
@@ -507,7 +577,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			jsonError(w, http.StatusNotFound, "unknown channel")
 			return
 		}
-		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, req.Content); err != nil {
+		// Snowflake minted before the send: the manager queues it so the
+		// echo-message echo can bind the upstream msgid to it (reactions).
+		msgID := s.net.NewMessageID()
+		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, req.Content, msgID, channelID); err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -515,7 +588,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-		msg := messagePayload(s.net.NewMessageID(), channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
+		msg := messagePayload(msgID, channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
 		if s.gw != nil {
 			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
 		}
@@ -539,7 +612,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusNotFound, "unknown channel")
 		return
 	}
-	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, req.Content); err != nil {
+	// See the DM path: snowflake before the send, for msgid correlation.
+	msgID := s.net.NewMessageID()
+	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, req.Content, msgID, channelID); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -554,7 +629,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := messagePayload(s.net.NewMessageID(), channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
+	msg := messagePayload(msgID, channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
 	// Own messages also arrive via the gateway on real Discord (keeping the
 	// user's other sessions in sync); the client dedupes by id and the
 	// nonce match clears the pending state.

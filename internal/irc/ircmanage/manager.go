@@ -82,8 +82,37 @@ type conn struct {
 	// typingLast throttles inbound draft/typing TAGMSG relays per
 	// (nick, target): clients display typing for several seconds, so
 	// forwarding everything a chatty upstream sends is pure noise.
-	typingMu    sync.Mutex
-	typingLast  map[string]time.Time
+	typingMu   sync.Mutex
+	typingLast map[string]time.Time
+
+	// msgid registry: IRC msgid <-> Discord message identity. Reactions
+	// (draft/react +reply=<msgid>) can only be bridged when the msgid can
+	// be resolved to the Discord snowflake, so every relayed message with
+	// a msgid is registered here. In-memory: reaction state is live-wire
+	// only (a restart drops it, like any IRC session would).
+	msgidMu     sync.Mutex
+	snowToMsgid map[string]string // Discord message id -> IRC msgid
+	msgidToRef  map[string]msgRef // IRC msgid -> message identity
+
+	// pendingSends queues the Discord identity of our own outgoing
+	// PRIVMSGs per target (lowercased, FIFO). With echo-message the
+	// server returns our message stamped with its msgid; the echo pops
+	// the queue head and completes the msgid <-> snowflake mapping.
+	pendSendMu  sync.Mutex
+	pendingSend map[string][]msgRef
+
+	// reactions tracks emoji -> reacting user ids per Discord message id
+	// (count/me rendering for message fetches; live updates go out as
+	// MESSAGE_REACTION_ADD/REMOVE).
+	reactMu   sync.Mutex
+	reactions map[string]map[string]map[string]bool
+}
+
+// msgRef is the Discord identity of one bridged IRC message.
+type msgRef struct {
+	Snowflake string
+	ChannelID string
+	GuildID   string
 }
 
 // setAway records a nick's away state and reports whether it changed.
@@ -200,8 +229,11 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		Name:   mem.Realname,
 		// girc negotiates its known caps itself; draft/typing isn't in its
 		// list, so request it alongside (servers without it just NAK and
-		// typing becomes a no-op).
-		SupportedCaps: map[string][]string{"draft/typing": nil},
+		// typing becomes a no-op). echo-message is in girc's known set but
+		// requested explicitly here for clarity: without it our own
+		// messages never come back and their msgids stay unknown, which
+		// kills reacting to our own messages from IRC peers.
+		SupportedCaps: map[string][]string{"draft/typing": nil, "echo-message": nil},
 	}
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
@@ -214,6 +246,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		pendingJoins: make(map[string]bool),
 		away:         make(map[string]bool),
 		typingLast:   make(map[string]time.Time),
+		snowToMsgid:  make(map[string]string),
+		msgidToRef:   make(map[string]msgRef),
+		pendingSend:  make(map[string][]msgRef),
+		reactions:    make(map[string]map[string]map[string]bool),
 	}
 	m.conns[k] = c
 
@@ -403,7 +439,28 @@ func (m *Manager) registerHandlers(c *conn) {
 		// compare against Config.Nick here - that stays at the configured
 		// nick after a collision rename, which silently ate the foreign
 		// user's messages.
-		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), time.Now().UTC().Format(time.RFC3339))
+		msgid, _ := e.Tags.Get("msgid")
+		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), time.Now().UTC().Format(time.RFC3339), msgid)
+	})
+
+	// Own-message echo (echo-message cap): girc flags them Echo and only
+	// ALL_EVENTS handlers see them. The echo carries the msgid the server
+	// stamped on our PRIVMSG; popping the pending identity for the target
+	// completes the snowflake <-> msgid mapping reactions need.
+	c.client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, e girc.Event) {
+		if !e.Echo || (e.Command != "PRIVMSG" && e.Command != "NOTICE") || len(e.Params) == 0 {
+			return
+		}
+		msgid, _ := e.Tags.Get("msgid")
+		if msgid == "" {
+			return
+		}
+		ref := c.popPendingSend(e.Params[0])
+		if ref.Snowflake == "" {
+			return
+		}
+		c.registerMsgid(ref, msgid)
+		m.log.Debug("msgid mapped", "user", c.userID, "network", c.networkID, "snowflake", ref.Snowflake, "msgid", msgid)
 	})
 
 	c.client.Handlers.Add(girc.CONNECTED, func(client *girc.Client, e girc.Event) {
@@ -533,16 +590,33 @@ func (m *Manager) registerHandlers(c *conn) {
 	// draft/typing: TAGMSG with a +typing client tag ("active" while the
 	// user types, "done" when they stop). Relay "active" to the client as
 	// TYPING_START; "done" has no Discord equivalent (the indicator
-	// auto-expires), and our own echoes never arrive (no echo-message).
+	// auto-expires).
+	// draft/react: TAGMSG with +reply=<msgid> and +draft/react (or
+	// +draft/unreact) is a reaction on that message, bridged to
+	// MESSAGE_REACTION_ADD / MESSAGE_REACTION_REMOVE.
 	c.client.Handlers.Add("TAGMSG", func(client *girc.Client, e girc.Event) {
 		if e.Source == nil || len(e.Params) == 0 {
 			return
 		}
-		state, _ := e.Tags.Get("+typing")
-		if state != "active" {
+		// Our own TAGMSG echoes (react/typing) must not loop back.
+		if strings.EqualFold(e.Source.Name, client.GetNick()) {
 			return
 		}
-		m.dispatchTyping(c, e.Source.Name, e.Params[0])
+		if state, _ := e.Tags.Get("+typing"); state == "active" {
+			m.dispatchTyping(c, e.Source.Name, e.Params[0])
+			return
+		}
+		reply, hasReply := e.Tags.Get("+reply")
+		if !hasReply || reply == "" {
+			return
+		}
+		if emoji, ok := e.Tags.Get("+draft/react"); ok && emoji != "" {
+			m.applyReaction(c, e.Source.Name, reply, emoji, false)
+			return
+		}
+		if emoji, ok := e.Tags.Get("+draft/unreact"); ok && emoji != "" {
+			m.applyReaction(c, e.Source.Name, reply, emoji, true)
+		}
 	})
 	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
 		m.notifyOccupancy(c, "")
@@ -642,10 +716,10 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 	_ = m.store.TouchDMChannel(dm.ID)
 }
 
-func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
+func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid string) {
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
 		// Query (DM): target is our own nick, author is the peer.
-		m.dispatchQuery(c, author, content, ts)
+		m.dispatchQuery(c, author, content, ts, msgid)
 		return
 	}
 	channelID := ""
@@ -684,6 +758,9 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 		},
 	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
+	if msgid != "" {
+		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: c.networkID}, msgid)
+	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	// Persist into the channel's replay buffer (bouncer semantics: history
 	// survives client reconnects and server restarts). The live relay must
@@ -705,7 +782,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts string) {
 // user's DM channel with the peer. The DM channel is created on first
 // contact, announced via CHANNEL_CREATE (so it pops into the DM list) and
 // feeds the same replay buffer as channels.
-func (m *Manager) dispatchQuery(c *conn, author, content, ts string) {
+func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	dm, err := m.store.EnsureDMChannel(c.userID, c.networkID, author, m.sf.New)
 	if err != nil {
 		m.log.Warn("dm channel ensure failed", "err", err, "user", c.userID, "from", author)
@@ -744,6 +821,9 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts string) {
 		},
 	}
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
+	if msgid != "" {
+		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
+	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	if err := m.store.AppendMessage(storage.BufferedMessage{
 		ID:         msgID,
@@ -964,7 +1044,9 @@ func (m *Manager) dispatchTyping(c *conn, nick, target string) {
 }
 
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).
-func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
+// msgRef identifies the Discord message so the echo (echo-message) can be
+// correlated with the msgid the server stamps on it.
+func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, channelID string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -977,6 +1059,9 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
 	}
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	if msgID != "" {
+		c.pushPendingSend(nick, msgRef{Snowflake: msgID, ChannelID: channelID})
 	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
@@ -1026,8 +1111,9 @@ func (m *Manager) PartChannel(userID, networkID, channel string) {
 
 // SendChannel relays a Discord message into an IRC channel. Between a drop
 // and the next successful reconnect this errors (the supervisor swaps
-// c.client under mu, so it is read under the same lock).
-func (m *Manager) SendChannel(userID, networkID, channel, content string) error {
+// c.client under mu, so it is read under the same lock). msgRef identifies
+// the Discord message for echo/msgid correlation.
+func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID, channelID string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -1041,11 +1127,232 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string) error 
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
 	}
+	if msgID != "" {
+		c.pushPendingSend(channel, msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: networkID})
+	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
 	if typingAllowed(client) {
 		sendTypingTag(client, channel, "done")
 	}
 	client.Cmd.Message(channel, content)
+	return nil
+}
+
+// registerMsgid records the msgid <-> Discord identity mapping.
+func (c *conn) registerMsgid(ref msgRef, msgid string) {
+	c.msgidMu.Lock()
+	defer c.msgidMu.Unlock()
+	c.snowToMsgid[ref.Snowflake] = msgid
+	c.msgidToRef[msgid] = ref
+}
+
+// lookupMsgid resolves a Discord message id to its IRC msgid.
+func (c *conn) lookupMsgid(snowflake string) (string, bool) {
+	c.msgidMu.Lock()
+	defer c.msgidMu.Unlock()
+	msgid, ok := c.snowToMsgid[snowflake]
+	return msgid, ok
+}
+
+// lookupRef resolves an IRC msgid to the Discord message identity.
+func (c *conn) lookupRef(msgid string) (msgRef, bool) {
+	c.msgidMu.Lock()
+	defer c.msgidMu.Unlock()
+	ref, ok := c.msgidToRef[msgid]
+	return ref, ok
+}
+
+// pushPendingSend queues our outgoing message identity for a target; the
+// echo-message echo pops it (FIFO: IRC writes on one connection are
+// ordered, and so are their echoes).
+func (c *conn) pushPendingSend(target string, ref msgRef) {
+	c.pendSendMu.Lock()
+	defer c.pendSendMu.Unlock()
+	k := strings.ToLower(target)
+	c.pendingSend[k] = append(c.pendingSend[k], ref)
+}
+
+// popPendingSend takes the oldest queued identity for a target.
+func (c *conn) popPendingSend(target string) msgRef {
+	c.pendSendMu.Lock()
+	defer c.pendSendMu.Unlock()
+	k := strings.ToLower(target)
+	q := c.pendingSend[k]
+	if len(q) == 0 {
+		return msgRef{}
+	}
+	ref := q[0]
+	q = q[1:]
+	if len(q) == 0 {
+		delete(c.pendingSend, k)
+	} else {
+		c.pendingSend[k] = q
+	}
+	return ref
+}
+
+// ReactionCount is one emoji's aggregated reaction state on a message.
+type ReactionCount struct {
+	Emoji string
+	Count int
+	Me    bool
+}
+
+// trackReaction updates the in-memory reaction state and reports whether
+// anything changed (idempotent repeats are dropped).
+func (c *conn) trackReaction(snowflake, emoji, userID string, remove bool) bool {
+	c.reactMu.Lock()
+	defer c.reactMu.Unlock()
+	byEmoji := c.reactions[snowflake]
+	if byEmoji == nil {
+		if remove {
+			return false
+		}
+		byEmoji = make(map[string]map[string]bool)
+		c.reactions[snowflake] = byEmoji
+	}
+	users := byEmoji[emoji]
+	if users == nil {
+		if remove {
+			return false
+		}
+		users = make(map[string]bool)
+		byEmoji[emoji] = users
+	}
+	if remove {
+		if !users[userID] {
+			return false
+		}
+		delete(users, userID)
+		if len(users) == 0 {
+			delete(byEmoji, emoji)
+		}
+		if len(byEmoji) == 0 {
+			delete(c.reactions, snowflake)
+		}
+		return true
+	}
+	if users[userID] {
+		return false
+	}
+	users[userID] = true
+	return true
+}
+
+// ReactionsFor returns the aggregated reaction state of a message as seen
+// by viewerID ("me" flags). Registered on the network service so REST
+// message fetches can render them.
+func (m *Manager) ReactionsFor(userID, networkID, viewerID, messageID string) []ReactionCount {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	c.reactMu.Lock()
+	defer c.reactMu.Unlock()
+	byEmoji := c.reactions[messageID]
+	if len(byEmoji) == 0 {
+		return nil
+	}
+	emojis := make([]string, 0, len(byEmoji))
+	for emoji := range byEmoji {
+		emojis = append(emojis, emoji)
+	}
+	sort.Strings(emojis)
+	out := make([]ReactionCount, 0, len(emojis))
+	for _, emoji := range emojis {
+		rc := ReactionCount{Emoji: emoji}
+		for uid := range byEmoji[emoji] {
+			rc.Count++
+			if uid == viewerID {
+				rc.Me = true
+			}
+		}
+		out = append(out, rc)
+	}
+	return out
+}
+
+// applyReaction bridges an inbound IRC reaction (+draft/react on a TAGMSG
+// with +reply) to MESSAGE_REACTION_ADD / _REMOVE.
+func (m *Manager) applyReaction(c *conn, nick, msgid, emoji string, remove bool) {
+	ref, ok := c.lookupRef(msgid)
+	if !ok {
+		m.log.Debug("react to unknown msgid", "user", c.userID, "msgid", msgid, "from", nick)
+		return
+	}
+	userID := model.IrcAuthorID("irc:" + nick)
+	if !c.trackReaction(ref.Snowflake, emoji, userID, remove) {
+		return
+	}
+	m.dispatchReaction(c, ref, userID, emoji, remove)
+}
+
+// dispatchReaction emits the gateway reaction event for all sessions.
+func (m *Manager) dispatchReaction(c *conn, ref msgRef, userID, emoji string, remove bool) {
+	payload := map[string]any{
+		"user_id":    userID,
+		"channel_id": ref.ChannelID,
+		"message_id": ref.Snowflake,
+		"emoji":      map[string]any{"id": nil, "name": emoji},
+	}
+	if ref.GuildID != "" {
+		payload["guild_id"] = ref.GuildID
+	}
+	event := "MESSAGE_REACTION_ADD"
+	if remove {
+		event = "MESSAGE_REACTION_REMOVE"
+	}
+	m.gw.Dispatch(c.userID, event, payload)
+}
+
+// SendReaction relays a Discord reaction (REST PUT/DELETE @me) upstream as
+// +draft/react / +draft/unreact TAGMSG with +reply, and mirrors it to the
+// user's sessions. Unknown message ids (pre-restart messages, upstreams
+// without msgid) still update locally so the reacting client is not left
+// with a dead pill.
+func (m *Manager) SendReaction(userID, networkID, target, messageID, emoji string, remove bool) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	msgid, _ := c.lookupMsgid(messageID)
+	if client.HasCapability("message-tags") && msgid != "" {
+		tag := "+draft/react"
+		if remove {
+			tag = "+draft/unreact"
+		}
+		client.Send(&girc.Event{
+			Tags:   girc.Tags{"+reply": msgid, tag: emoji},
+			Command: "TAGMSG",
+			Params: []string{target},
+		})
+	}
+	// Resolve the channel for the dispatch (REST knows only the target it
+	// was given; the registry is authoritative).
+	ref, ok := c.lookupRef(msgid)
+	if !ok {
+		if ch, err := m.store.GetChannelByIRC(networkID, target); err == nil {
+			ref = msgRef{Snowflake: messageID, ChannelID: ch.ID, GuildID: networkID}
+		} else if dm, err := m.store.EnsureDMChannel(userID, networkID, target, m.sf.New); err == nil {
+			ref = msgRef{Snowflake: messageID, ChannelID: dm.ID}
+		} else {
+			ref = msgRef{Snowflake: messageID, ChannelID: target}
+		}
+	}
+	if c.trackReaction(messageID, emoji, userID, remove) {
+		m.dispatchReaction(c, ref, userID, emoji, remove)
+	}
 	return nil
 }
