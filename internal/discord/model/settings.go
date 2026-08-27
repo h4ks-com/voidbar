@@ -34,5 +34,40 @@ func SettingsWithDefaults(persisted map[string]any) map[string]any {
 	for k, v := range persisted {
 		out[k] = v
 	}
+	out["guild_folders"] = normalizeGuildFolders(out["guild_folders"])
+	return out
+}
+
+// normalizeGuildFolders drops guild_ids entries that are not strings.
+// The Android client PATCHes snowflakes as JSON numbers; once unmarshaled
+// into float64 they have already lost precision (snowflakes exceed 2^53),
+// so they cannot be recovered and are discarded instead of being served
+// as wrong ids that would reference nonexistent guilds. Folders left with
+// no resolvable guilds are dropped entirely.
+func normalizeGuildFolders(v any) []any {
+	folders, ok := v.([]any)
+	if !ok {
+		return []any{}
+	}
+	out := make([]any, 0, len(folders))
+	for _, f := range folders {
+		m, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ids, ok := m["guild_ids"].([]any); ok {
+			keep := make([]any, 0, len(ids))
+			for _, id := range ids {
+				if _, ok := id.(string); ok {
+					keep = append(keep, id)
+				}
+			}
+			if len(keep) == 0 {
+				continue
+			}
+			m["guild_ids"] = keep
+		}
+		out = append(out, m)
+	}
 	return out
 }
