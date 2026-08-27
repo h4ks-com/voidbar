@@ -84,6 +84,9 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("GET /.well-known/spacebar/client", s.handleWellKnownClient)
 	mux.HandleFunc("GET /.well-known/spacebar", s.handleWellKnown)
 	mux.HandleFunc("GET /policies/instance/domains", s.handleInstanceDomains)
+	// Default avatar images served from the assets URL the discovery
+	// document advertises (web clients fetch them for every user).
+	mux.HandleFunc("GET /assets/{name}", s.handleAsset)
 	s.registerStubs(mux)
 	s.registerUnknown(mux)
 	return s.withLogging(withCORS(mux))
@@ -197,6 +200,23 @@ func jsonError(w http.ResponseWriter, status int, msg string) {
 
 func unauthorized(w http.ResponseWriter) {
 	jsonError(w, http.StatusUnauthorized, "401: Unauthorized")
+}
+
+// handleAsset serves the default avatar images: oldcord-lineage web
+// clients fetch <assets>/assets/<hash>.png for every user without a
+// custom avatar. The five historical hash names map to runtime-generated
+// colored discs (Discord's real assets are copyrighted, so they are
+// redrawn instead of embedded); anything else 404s.
+func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
+	data, ok := defaultAvatarPNG(r.PathValue("name"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -557,7 +557,21 @@ func (s *Server) handleLeaveGuild(w http.ResponseWriter, r *http.Request, u *sto
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	channelID := r.PathValue("channel")
 	var req sendMessageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Web clients (Flicker) always send multipart/form-data - their send
+	// path doubles as the upload path - while the Android client sends
+	// plain JSON. Accept both shapes.
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
+			jsonError(w, http.StatusBadRequest, "attachments not supported yet")
+			return
+		}
+		req.Content = r.FormValue("content")
+		req.Nonce = r.FormValue("nonce")
+	} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
