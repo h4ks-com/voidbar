@@ -587,6 +587,10 @@ func memberListItem(cm ircmanage.ChannelMember, joinedAt, mode string) map[strin
 	status := presenceStatus(cm.Away)
 	return map[string]any{
 		"member": map[string]any{
+			// Discord's op14 member carries the user id at both levels;
+			// strict web-client schemas require member.id (and the member
+			// list React keys derive from it).
+			"id": uid,
 			"user": map[string]any{
 				"id":            uid,
 				"username":      cm.Nick,
