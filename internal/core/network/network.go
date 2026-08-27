@@ -61,12 +61,14 @@ func (s *Service) ChannelMessages(channelID, before, after string, limit int) []
 	return s.store.ChannelMessages(channelID, before, after, limit)
 }
 
-// UserSettings returns the persisted legacy client settings for a user.
+// UserSettings returns the persisted legacy client settings for a user,
+// merged over the defaults so clients validating the full shape (web
+// clients with zod schemas) always see a complete object.
 func (s *Service) UserSettings(userID string) map[string]any {
 	if s.store == nil {
-		return map[string]any{}
+		return model.SettingsWithDefaults(nil)
 	}
-	return s.store.UserSettings(userID)
+	return model.SettingsWithDefaults(s.store.UserSettings(userID))
 }
 
 // MergeUserSettings persists a settings PATCH body for a user.
