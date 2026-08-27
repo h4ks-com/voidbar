@@ -14,6 +14,7 @@ const (
 	OpHeartbeatACK        = 11
 	OpCallConnect         = 13 // GUILD_SUBSCRIPTIONS_UPDATE: re-subscribe (same body as 14)
 	OpGuildSubscriptions  = 14 // GUILD_SUBSCRIPTIONS: "lazy request", the client's member-list ask
+	OpGuildMembersApps    = 24 // guild subscriptions v2 (applications flag + nonce); unanswered retries destabilize the Android client
 )
 
 const (
