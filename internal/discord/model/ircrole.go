@@ -81,8 +81,14 @@ func IrcRolePayloads() []any {
 
 // EveryoneRolePayload builds the @everyone role every guild carries; its
 // id must equal the guild id and the client computes channel permissions
-// through it.
-func EveryoneRolePayload(guildID string) map[string]any {
+// through it. reactCapable gates ADD_REACTIONS: on upstreams without
+// msgids (no MSGREFTYPES in ISUPPORT) reactions cannot bridge, so the
+// client's picker is hidden rather than offering taps that go nowhere.
+func EveryoneRolePayload(guildID string, reactCapable bool) map[string]any {
+	perms := "104324673412113" // exactly what the bridge honours; no ADD_REACTIONS
+	if reactCapable {
+		perms = "104324673412177" // + ADD_REACTIONS (picker UI)
+	}
 	return map[string]any{
 		"id":            guildID,
 		"name":          "@everyone",
@@ -91,7 +97,7 @@ func EveryoneRolePayload(guildID string) map[string]any {
 		"icon":          nil,
 		"unicode_emoji": nil,
 		"position":      0,
-		"permissions":   "104324673412177", // exactly what the bridge honours: ADD_REACTIONS yes (picker), MANAGE_MESSAGES no (no IRC mapping), no USE_EXTERNAL_EMOJIS (no custom emojis exist)
+		"permissions":   perms, // never MANAGE_MESSAGES (no IRC mapping), never USE_EXTERNAL_EMOJIS (no custom emojis exist)
 		"managed":       false,
 		"mentionable":   false,
 		"flags":         0,

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -23,6 +24,10 @@ type BufferedMessage struct {
 	Nonce      any    `json:"nonce,omitempty"`
 	Timestamp  string `json:"timestamp"` // RFC3339
 	Type       int    `json:"type"`
+	// MsgID is the upstream IRC msgid of this message (msgid-expriment
+	// networks), persisted so reactions can anchor to messages that
+	// predate a bouncer restart.
+	MsgID string `json:"irc_msgid,omitempty"`
 	// Reactions is emoji -> reacting user ids, persisted on every change so
 	// pills survive bouncer restarts (the live-wire msgid registry cannot).
 	Reactions map[string][]string `json:"reactions,omitempty"`
@@ -45,6 +50,72 @@ func msgKey(channelID, id string) []byte {
 
 func msgPrefix(channelID string) []byte {
 	return []byte("msg:" + channelID + ":")
+}
+
+func msgidKey(networkID, msgid string) []byte {
+	return []byte("ircmsgid:" + networkID + ":" + msgid)
+}
+
+// SetMessageMsgID binds a buffered message to its upstream IRC msgid and
+// indexes it for reverse lookup. Idempotent.
+func (s *Storage) SetMessageMsgID(networkID, channelID, id, msgid string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			return err
+		}
+		var m BufferedMessage
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &m) }); err != nil {
+			return err
+		}
+		if m.MsgID != msgid {
+			m.MsgID = msgid
+			val, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(msgKey(channelID, id), val); err != nil {
+				return err
+			}
+		}
+		return txn.Set(msgidKey(networkID, msgid), []byte(channelID+"\x00"+id))
+	})
+}
+
+// LookupMessageByMsgID resolves an IRC msgid to (channel, message id).
+func (s *Storage) LookupMessageByMsgID(networkID, msgid string) (channelID, messageID string, ok bool) {
+	_ = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgidKey(networkID, msgid))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if i := bytes.IndexByte(val, 0); i > 0 {
+				channelID, messageID, ok = string(val[:i]), string(val[i+1:]), true
+			}
+			return nil
+		})
+	})
+	return channelID, messageID, ok
+}
+
+// MessageMsgID returns the upstream msgid bound to a buffered message, if any.
+func (s *Storage) MessageMsgID(channelID, id string) string {
+	var msgid string
+	_ = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			var m BufferedMessage
+			if json.Unmarshal(val, &m) == nil {
+				msgid = m.MsgID
+			}
+			return nil
+		})
+	})
+	return msgid
 }
 
 // AppendMessage stores a message and trims the channel ring to

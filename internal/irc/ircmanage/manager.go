@@ -466,6 +466,9 @@ func (m *Manager) registerHandlers(c *conn) {
 			return
 		}
 		c.registerMsgid(ref, msgid)
+		if err := m.store.SetMessageMsgID(c.networkID, ref.ChannelID, ref.Snowflake, msgid); err != nil {
+			m.log.Debug("msgid persist failed", "err", err, "msg", ref.Snowflake)
+		}
 		m.log.Debug("msgid mapped", "user", c.userID, "network", c.networkID, "snowflake", ref.Snowflake, "msgid", msgid)
 	})
 
@@ -613,6 +616,11 @@ func (m *Manager) registerHandlers(c *conn) {
 			return
 		}
 		reply, hasReply := e.Tags.Get("+reply")
+		if !hasReply || reply == "" {
+			// Draft-stage name for the same tag; Halloy sends both, other
+			// clients may send only this form.
+			reply, hasReply = e.Tags.Get("+draft/reply")
+		}
 		if !hasReply || reply == "" {
 			return
 		}
@@ -766,6 +774,9 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: c.networkID}, msgid)
+		if err := m.store.SetMessageMsgID(c.networkID, channelID, msgID, msgid); err != nil {
+			m.log.Debug("msgid persist failed", "err", err, "channel", channelID, "msg", msgID)
+		}
 	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	// Persist into the channel's replay buffer (bouncer semantics: history
@@ -829,6 +840,9 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
+		if err := m.store.SetMessageMsgID(c.networkID, dm.ID, msgID, msgid); err != nil {
+			m.log.Debug("msgid persist failed", "err", err, "dm", dm.ID, "msg", msgID)
+		}
 	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	if err := m.store.AppendMessage(storage.BufferedMessage{
@@ -1169,6 +1183,18 @@ func (c *conn) lookupRef(msgid string) (msgRef, bool) {
 	return ref, ok
 }
 
+// refBySnowflake resolves a Discord message id to its full identity.
+func (c *conn) refBySnowflake(snowflake string) (msgRef, bool) {
+	c.msgidMu.Lock()
+	defer c.msgidMu.Unlock()
+	msgid, ok := c.snowToMsgid[snowflake]
+	if !ok {
+		return msgRef{}, false
+	}
+	ref, ok := c.msgidToRef[msgid]
+	return ref, ok
+}
+
 // pushPendingSend queues our outgoing message identity for a target; the
 // echo-message echo pops it (FIFO: IRC writes on one connection are
 // ordered, and so are their echoes).
@@ -1275,10 +1301,50 @@ func (c *conn) trackReaction(snowflake, emoji, userID string, remove bool) bool 
 	return true
 }
 
+// ReactionsSupported reports whether the upstream can anchor reactions:
+// msgid-referencing needs message ids, advertised as MSGREFTYPES
+// containing "msgid" in ISUPPORT (chathistory networks: eris fork, ergo,
+// soju). Networks without it get no reaction picker in the client.
+func (m *Manager) ReactionsSupported(userID, networkID string) bool {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if client == nil {
+		return false
+	}
+	refTypes, _ := client.GetServerOption("MSGREFTYPES")
+	for _, t := range strings.Split(refTypes, ",") {
+		if strings.TrimSpace(t) == "msgid" {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveRef maps an IRC msgid to the Discord message identity, from the
+// live registry first, then from storage (messages that predate the
+// current connection - restarts wipe the in-memory maps).
+func (m *Manager) resolveRef(c *conn, msgid string) (msgRef, bool) {
+	if ref, ok := c.lookupRef(msgid); ok {
+		return ref, true
+	}
+	channelID, messageID, ok := m.store.LookupMessageByMsgID(c.networkID, msgid)
+	if !ok {
+		return msgRef{}, false
+	}
+	ref := msgRef{Snowflake: messageID, ChannelID: channelID, GuildID: c.networkID}
+	c.registerMsgid(ref, msgid)
+	return ref, true
+}
+
 // applyReaction bridges an inbound IRC reaction (+draft/react on a TAGMSG
 // with +reply) to MESSAGE_REACTION_ADD / _REMOVE.
 func (m *Manager) applyReaction(c *conn, nick, msgid, emoji string, remove bool) {
-	ref, ok := c.lookupRef(msgid)
+	ref, ok := m.resolveRef(c, msgid)
 	if !ok {
 		m.log.Debug("react to unknown msgid", "user", c.userID, "msgid", msgid, "from", nick)
 		return
@@ -1314,7 +1380,7 @@ func (m *Manager) dispatchReaction(c *conn, ref msgRef, userID, emoji string, re
 // user's sessions. Unknown message ids (pre-restart messages, upstreams
 // without msgid) still update locally so the reacting client is not left
 // with a dead pill.
-func (m *Manager) SendReaction(userID, networkID, target, messageID, emoji string, remove bool) error {
+func (m *Manager) SendReaction(userID, networkID, target, messageID, channelID, emoji string, remove bool) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -1329,20 +1395,23 @@ func (m *Manager) SendReaction(userID, networkID, target, messageID, emoji strin
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
 	}
 	msgid, _ := c.lookupMsgid(messageID)
+	if msgid == "" && channelID != "" {
+		msgid = m.store.MessageMsgID(channelID, messageID)
+	}
 	if client.HasCapability("message-tags") && msgid != "" {
 		tag := "+draft/react"
 		if remove {
 			tag = "+draft/unreact"
 		}
 		client.Send(&girc.Event{
-			Tags:   girc.Tags{"+reply": msgid, tag: emoji},
+			Tags:   girc.Tags{"+reply": msgid, "+draft/reply": msgid, tag: emoji},
 			Command: "TAGMSG",
 			Params: []string{target},
 		})
 	}
 	// Resolve the channel for the dispatch (REST knows only the target it
 	// was given; the registry is authoritative).
-	ref, ok := c.lookupRef(msgid)
+	ref, ok := c.refBySnowflake(messageID)
 	if !ok {
 		if ch, err := m.store.GetChannelByIRC(networkID, target); err == nil {
 			ref = msgRef{Snowflake: messageID, ChannelID: ch.ID, GuildID: networkID}

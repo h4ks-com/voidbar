@@ -216,7 +216,8 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 	}
 	// Keep the role set in sync with GUILD_CREATE: the member sidebar's
 	// role sections and name colors resolve through the guild's roles.
-	roles := append([]any{model.EveryoneRolePayload(guildID)}, model.IrcRolePayloads()...)
+	// ADD_REACTIONS only on msgid-capable upstreams (no picker otherwise).
+	roles := append([]any{model.EveryoneRolePayload(guildID, s.irc != nil && s.irc.ReactionsSupported(u.ID, net.ID))}, model.IrcRolePayloads()...)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":           guildID,
 		"name":         net.Name,
@@ -423,7 +424,7 @@ func (s *Server) handleReactSelf(w http.ResponseWriter, r *http.Request, u *stor
 		jsonError(w, http.StatusNotFound, "unknown channel")
 		return
 	}
-	if err := s.irc.SendReaction(u.ID, networkID, target, messageID, emoji, r.Method == http.MethodDelete); err != nil {
+	if err := s.irc.SendReaction(u.ID, networkID, target, messageID, channelID, emoji, r.Method == http.MethodDelete); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}

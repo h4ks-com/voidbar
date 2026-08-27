@@ -881,8 +881,9 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// Every Discord guild has an @everyone role whose id equals the guild id;
 	// the client computes channel permissions through it, and without the
 	// role channels appear inaccessible. The IRC prefix roles ride along so
-	// member name colors and hoisted sidebar sections resolve.
-	roles := append([]any{model.EveryoneRolePayload(net.ID)}, model.IrcRolePayloads()...)
+	// member name colors and hoisted sidebar sections resolve. ADD_REACTIONS
+	// only where the upstream can anchor them (MSGREFTYPES msgid).
+	roles := append([]any{model.EveryoneRolePayload(net.ID, s.manager != nil && s.manager.ReactionsSupported(m.UserID, net.ID))}, model.IrcRolePayloads()...)
 
 	return map[string]any{
 		"id":                            net.ID,
