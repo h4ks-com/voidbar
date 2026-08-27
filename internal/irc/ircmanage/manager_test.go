@@ -781,7 +781,7 @@ func serveJoinableAway(conn net.Conn) {
 			case strings.HasPrefix(line, "CAP LS"):
 				_, _ = conn.Write([]byte("CAP * LS :away-notify\r\n"))
 			case strings.HasPrefix(line, "CAP REQ"):
-				req := strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ"))
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 				_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
 			case strings.HasPrefix(line, "NICK"):
 				if !welcomed {

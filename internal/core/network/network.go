@@ -683,6 +683,21 @@ func (s *Service) RefreshOccupancy(userID, guildID, ircChannel string) {
 	}
 }
 
+// StartTyping relays a client typing indicator (POST /channels/{id}/typing)
+// upstream as a draft/typing TAGMSG, for both guild channels and DMs.
+func (s *Service) StartTyping(userID, channelID string) error {
+	if s.manager == nil {
+		return nil
+	}
+	if ch, err := s.store.GetChannel(channelID); err == nil {
+		return s.manager.SendTyping(userID, ch.NetworkID, ch.IRCName)
+	}
+	if dm, err := s.store.GetDMChannel(channelID); err == nil {
+		return s.manager.SendTyping(userID, dm.NetworkID, dm.Nick)
+	}
+	return ErrUnknownRecipient
+}
+
 // MemberChunkPayload answers op 8 (Request Guild Members) with a single
 // GUILD_MEMBERS_CHUNK (userdocs shape). With userIDs set, only those
 // members are returned (the client resolves message authors it has seen);

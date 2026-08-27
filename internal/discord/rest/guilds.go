@@ -262,6 +262,19 @@ func (r createDMRequest) recipient() string {
 	return ""
 }
 
+// handleStartTyping answers POST /channels/{id}/typing: the client fires
+// this every few seconds while the user types; we relay it upstream as a
+// draft/typing TAGMSG. Always 204 - a missing upstream indicator must
+// never break the composer.
+func (s *Server) handleStartTyping(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net != nil {
+		if err := s.net.StartTyping(u.ID, r.PathValue("channel")); err != nil {
+			s.log.Warn("typing relay failed", "err", err, "user", u.ID)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleCreateDM answers POST /users/@me/channels: the client's
 // "new DM" picker hands us a user id; we resolve it back to an IRC nick
 // (or a fellow bouncer member) and return the 1:1 channel.

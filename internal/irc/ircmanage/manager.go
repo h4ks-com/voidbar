@@ -78,6 +78,12 @@ type conn struct {
 	// so every join also gets one seeding WHO.
 	awayMu sync.Mutex
 	away   map[string]bool
+
+	// typingLast throttles inbound draft/typing TAGMSG relays per
+	// (nick, target): clients display typing for several seconds, so
+	// forwarding everything a chatty upstream sends is pure noise.
+	typingMu    sync.Mutex
+	typingLast  map[string]time.Time
 }
 
 // setAway records a nick's away state and reports whether it changed.
@@ -192,6 +198,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		Nick:   mem.Nick,
 		User:   mem.Username,
 		Name:   mem.Realname,
+		// girc negotiates its known caps itself; draft/typing isn't in its
+		// list, so request it alongside (servers without it just NAK and
+		// typing becomes a no-op).
+		SupportedCaps: map[string][]string{"draft/typing": nil},
 	}
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
@@ -203,6 +213,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		done:         make(chan struct{}),
 		pendingJoins: make(map[string]bool),
 		away:         make(map[string]bool),
+		typingLast:   make(map[string]time.Time),
 	}
 	m.conns[k] = c
 
@@ -518,6 +529,20 @@ func (m *Manager) registerHandlers(c *conn) {
 		if len(e.Params) > 1 {
 			m.notifyOccupancy(c, e.Params[1])
 		}
+	})
+	// draft/typing: TAGMSG with a +typing client tag ("active" while the
+	// user types, "done" when they stop). Relay "active" to the client as
+	// TYPING_START; "done" has no Discord equivalent (the indicator
+	// auto-expires), and our own echoes never arrive (no echo-message).
+	c.client.Handlers.Add("TAGMSG", func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) == 0 {
+			return
+		}
+		state, _ := e.Tags.Get("+typing")
+		if state != "active" {
+			return
+		}
+		m.dispatchTyping(c, e.Source.Name, e.Params[0])
 	})
 	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
 		m.notifyOccupancy(c, "")
@@ -839,6 +864,80 @@ func (m *Manager) LiveNick(userID, networkID string) string {
 	return client.GetNick()
 }
 
+// SendTyping relays a Discord typing indicator upstream as a
+// draft/typing TAGMSG ("active"). No-op when the upstream didn't
+// negotiate the cap (typing simply doesn't exist there).
+func (m *Manager) SendTyping(userID, networkID, target string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	if !client.HasCapability("draft/typing") {
+		return nil
+	}
+	sendTypingTag(client, target, "active")
+	return nil
+}
+
+// sendTypingTag emits one draft/typing TAGMSG.
+func sendTypingTag(client *girc.Client, target, state string) {
+	client.Send(&girc.Event{
+		Tags:   girc.Tags{"+typing": state},
+		Command: "TAGMSG",
+		Params: []string{target},
+	})
+}
+
+// dispatchTyping converts an inbound typing TAGMSG into a TYPING_START
+// for this user's client sessions: channel targets map to the channel's
+// Discord id, queries (TAGMSG to our nick) to the DM thread. Throttled
+// per (nick, target) - the client keeps the indicator up for seconds.
+func (m *Manager) dispatchTyping(c *conn, nick, target string) {
+	k := strings.ToLower(nick) + "\x00" + strings.ToLower(target)
+	c.typingMu.Lock()
+	if time.Since(c.typingLast[k]) < 3*time.Second {
+		c.typingMu.Unlock()
+		return
+	}
+	c.typingLast[k] = time.Now()
+	c.typingMu.Unlock()
+
+	channelID, guildID := "", ""
+	if ch, err := m.store.GetChannelByIRC(c.networkID, target); err == nil {
+		channelID, guildID = ch.ID, c.networkID
+	} else {
+		// Not a known channel: a query typing (TAGMSG to our nick).
+		mem, err := m.store.GetMembership(c.networkID, c.userID)
+		if err != nil || !strings.EqualFold(target, mem.Nick) {
+			return
+		}
+		dm, err := m.store.EnsureDMChannel(c.userID, c.networkID, nick, m.sf.New)
+		if err != nil {
+			return
+		}
+		channelID = dm.ID
+	}
+	payload := map[string]any{
+		"type":       1,
+		"channel_id": channelID,
+		"user_id":    model.IrcAuthorID("irc:" + nick),
+		"timestamp":  time.Now().Unix(),
+	}
+	if guildID != "" {
+		payload["guild_id"] = guildID
+	}
+	m.gw.Dispatch(c.userID, "TYPING_START", payload)
+}
+
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).
 func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
 	m.mu.Lock()
@@ -853,6 +952,11 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
 	}
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	// Tell the other side typing is over (draft/typing "done"), then the
+	// message itself.
+	if client.HasCapability("draft/typing") {
+		sendTypingTag(client, nick, "done")
 	}
 	client.Cmd.Message(nick, content)
 	return nil
@@ -911,6 +1015,11 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string) error 
 	}
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	// Tell the other side typing is over (draft/typing "done"), then the
+	// message itself.
+	if client.HasCapability("draft/typing") {
+		sendTypingTag(client, channel, "done")
 	}
 	client.Cmd.Message(channel, content)
 	return nil
