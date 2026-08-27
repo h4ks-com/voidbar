@@ -558,8 +558,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	channelID := r.PathValue("channel")
 	var req sendMessageRequest
 	// Web clients (Flicker) always send multipart/form-data - their send
-	// path doubles as the upload path - while the Android client sends
-	// plain JSON. Accept both shapes.
+	// path doubles as the upload path, with the message object packed
+	// into a payload_json form field (Discord upload semantics) - while
+	// the Android client sends plain JSON. Accept both shapes.
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			jsonError(w, http.StatusBadRequest, "invalid body")
@@ -569,8 +570,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			jsonError(w, http.StatusBadRequest, "attachments not supported yet")
 			return
 		}
-		req.Content = r.FormValue("content")
-		req.Nonce = r.FormValue("nonce")
+		if pj := r.FormValue("payload_json"); pj != "" {
+			if err := json.Unmarshal([]byte(pj), &req); err != nil {
+				jsonError(w, http.StatusBadRequest, "invalid body")
+				return
+			}
+		} else {
+			req.Content = r.FormValue("content")
+			req.Nonce = r.FormValue("nonce")
+		}
 	} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
 		return
