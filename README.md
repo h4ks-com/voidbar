@@ -182,43 +182,7 @@ file already does); clients talk to `127.0.0.1:18084` via the port mapping.
 Env vars can also live in a TOML file (`--config path`); keys mirror them
 (`server.listen`, `auth.registration`, ...).
 
-## Not implemented yet
-
-- **History prefill via `draft/chathistory`**: the bouncer replays only what
-  it saw while connected; it does not ask the upstream server for older
-  history on join ( Ergo/solanum expose it, many networks don't —
-  testnet.ergo.chat was probed but its hosting subnets were unreachable).
-  History is also capped at 500 messages per channel (ring buffer).
-- **Message features**: edits/deletes (redaction), attachments/file
-  uploads, embeds, mentions, pins (empty stub), search.
-  Typing indicators work both ways (`draft/typing` client tag; outbound
-  `pause` is not synthesized - the indicator just expires).
-  Reactions work both ways on msgid-capable upstreams
-  (`+draft/react`/`+draft/unreact` with `+reply`, MSGREFTYPES-gated:
-  eris fork / ergo / soju; mainline eris hides the picker), survive
-  restarts via persisted msgid + reaction state, and render as pills
-  with count/me.
-- **Channel management UI**: rename/topic (topic renders as empty), channel
-  categories, keyed channels (+k) — auto-join channels from the connection
-  string and runtime create/delete are covered
-  (re-pasting a string for the same network merges new channels in).
-- **Identity**: no nick change from the client (`/nick`), no away toggle
-  from the client (upstream away of others renders as "idle"), no SASL
-  (only server password via `pass@` in the connection string); relayed
-  messages carry receive-time timestamps (server-time/msgid/batch/
-  multiline tags are not used).
-- **Settings**: legacy client settings are persisted per user
-  (`PATCH /users/@me/settings`); the Android client's appearance settings
-  are not synced and reset on reload.
-- **Invites**: connection strings only — no shareable invite codes for
-  other users, no invite expiry/uses semantics (the payload claims
-  unlimited).
-- **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
-  no admin UI, no per-user network management beyond the client.
-- Voice/video, threads, forums, stickers, guild discovery — out of scope
-  for now (stubs return empty shapes).
-
-### What works end-to-end (Android client)
+## What works end-to-end (Android client)
 
 - Login/register, guild rail from IRC networks, channel create/delete
   with upstream rollback, message relay both ways, unread badges.
@@ -235,12 +199,44 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
-  `CLIENTTAGDENY`).
+  `CLIENTTAGDENY`; outbound `pause` is not synthesized - the indicator
+  just expires).
 - **Reactions** both ways on msgid upstreams (eris fork, ergo, soju):
   pills with count/me, `+draft/react`/`+draft/unreact` TAGMSGs with
   `+reply`/`+draft/reply`, REST PUT/DELETE bridging, restart-proof
-  (msgid registry + reaction state persisted). Verified live against a
-  locally built eris fork (fastidious/eris) with Halloy as the IRC peer.
+  (msgid registry + reaction state persisted); the picker is hidden on
+  networks without msgids (`MSGREFTYPES`-gated). Verified live against
+  a locally built eris fork (fastidious/eris) with Halloy as the IRC
+  peer.
+
+## Not implemented yet
+
+- **History prefill via `draft/chathistory`**: the bouncer replays only what
+  it saw while connected; it does not ask the upstream server for older
+  history on join ( Ergo/solanum expose it, many networks don't —
+  testnet.ergo.chat was probed but its hosting subnets were unreachable).
+  History is also capped at 500 messages per channel (ring buffer).
+- **Message features**: edits/deletes (redaction), attachments/file
+  uploads, embeds, mentions, pins (empty stub), search.
+- **Channel management UI**: rename/topic (topic renders as empty), channel
+  categories, keyed channels (+k) — auto-join channels from the connection
+  string and runtime create/delete are covered
+  (re-pasting a string for the same network merges new channels in).
+- **Identity**: no nick change from the client (`/nick`), no away toggle
+  from the client (upstream away of others renders as "idle"), no SASL
+  (only server password via `pass@` in the connection string); relayed
+  messages carry receive-time timestamps (server-time is not used for
+  history ordering).
+- **Settings**: legacy client settings are persisted per user
+  (`PATCH /users/@me/settings`); the Android client's appearance settings
+  are not synced and reset on reload.
+- **Invites**: connection strings only — no shareable invite codes for
+  other users, no invite expiry/uses semantics (the payload claims
+  unlimited).
+- **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
+  no admin UI, no per-user network management beyond the client.
+- Voice/video, threads, forums, stickers, guild discovery — out of scope
+  for now (stubs return empty shapes).
 
 ## Known issues / troubleshooting
 
