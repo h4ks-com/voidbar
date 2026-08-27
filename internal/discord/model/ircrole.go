@@ -91,7 +91,7 @@ func EveryoneRolePayload(guildID string) map[string]any {
 		"icon":          nil,
 		"unicode_emoji": nil,
 		"position":      0,
-		"permissions":   "104324673682449", // everything incl. MANAGE_CHANNELS, owner-oriented bouncer
+		"permissions":   "104324673674321", // everything the bridge can honour: incl. ADD_REACTIONS (picker UI), excl. MANAGE_MESSAGES (remove-all / delete-others have no IRC mapping)
 		"managed":       false,
 		"mentionable":   false,
 		"flags":         0,
