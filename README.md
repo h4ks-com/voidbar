@@ -190,8 +190,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   testnet.ergo.chat was probed but its hosting subnets were unreachable).
   History is also capped at 500 messages per channel (ring buffer).
 - **Message features**: edits/deletes (redaction), reactions (`+react`),
-  typing indicators (`+typing`), attachments/file uploads, embeds,
-  mentions, pins (empty stub), search.
+  attachments/file uploads, embeds, mentions, pins (empty stub), search.
+  Typing indicators work both ways (`draft/typing` client tag; outbound
+  `pause` is not synthesized - the indicator just expires).
 - **Channel management UI**: rename/topic (topic renders as empty), channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
@@ -226,6 +227,10 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   fallback for servers without the cap).
 - **Upstream auto-reconnect** with backoff; nick collisions survive
   (the live wire nick is what the client shows).
+- **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
+  (with `done` on send), IRC typing -> `TYPING_START`. Works on any
+  `message-tags` server (no capability advertisement needed; honors
+  `CLIENTTAGDENY`).
 
 ## Known issues / troubleshooting
 
