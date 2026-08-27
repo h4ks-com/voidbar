@@ -36,8 +36,6 @@ type Server struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	byUser   map[string]map[string]*Session
-
-	settingsForUser func(userID string) map[string]any
 }
 
 // SetGuildProviders installs the READY/GUILD_CREATE hooks after
@@ -52,22 +50,6 @@ func (s *Server) SetGuildProviders(guildsForUser func(userID string) ([]any, err
 // late-wiring rationale as SetGuildProviders.
 func (s *Server) SetDMChannelsProvider(dmChannelsForUser func(userID string) []any) {
 	s.dmChannelsForUser = dmChannelsForUser
-}
-
-// SetSettingsProvider installs the READY user_settings hook. Web clients
-// (Flicker etc.) validate user_settings with strict schemas, so READY must
-// always carry the full defaults-overlaid map, not an empty object.
-func (s *Server) SetSettingsProvider(settingsForUser func(userID string) map[string]any) {
-	s.settingsForUser = settingsForUser
-}
-
-func (s *Server) userSettings(userID string) map[string]any {
-	if s.settingsForUser != nil {
-		if m := s.settingsForUser(userID); m != nil {
-			return m
-		}
-	}
-	return model.DefaultUserSettings()
 }
 
 // SetMemberListProvider installs the GUILD_MEMBER_LIST_UPDATE hook serving
@@ -563,8 +545,8 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		Relationships:        []any{},
 		Sessions:             []any{},
 		GeoOrderedRTCRegions: []any{},
-		SessionType:      "normal",
-		UserSettings:     s.userSettings(user.ID),
+		SessionType:          "normal",
+		UserSettings:         map[string]any{},
 		Experiments:          []any{},
 		GuildExperiments:     []any{},
 		UserGuildSettings: &VersionedArray{

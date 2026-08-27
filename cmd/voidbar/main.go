@@ -97,7 +97,6 @@ func serveCmd(args []string, log *slog.Logger) error {
 		netSvc.GuildCreateForUser,
 	)
 	gw.SetDMChannelsProvider(netSvc.DMChannelPayloads)
-	gw.SetSettingsProvider(netSvc.UserSettings)
 	gw.SetMemberListProvider(netSvc.MemberListPayload)
 	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
 	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)

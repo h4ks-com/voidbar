@@ -61,14 +61,12 @@ func (s *Service) ChannelMessages(channelID, before, after string, limit int) []
 	return s.store.ChannelMessages(channelID, before, after, limit)
 }
 
-// UserSettings returns the persisted legacy client settings for a user,
-// merged over the defaults so clients validating the full shape (web
-// clients with zod schemas) always see a complete object.
+// UserSettings returns the persisted legacy client settings for a user.
 func (s *Service) UserSettings(userID string) map[string]any {
 	if s.store == nil {
-		return model.SettingsWithDefaults(nil)
+		return map[string]any{}
 	}
-	return model.SettingsWithDefaults(s.store.UserSettings(userID))
+	return s.store.UserSettings(userID)
 }
 
 // MergeUserSettings persists a settings PATCH body for a user.
@@ -530,23 +528,6 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		// Guild-wide list: union across the member's channels.
 		list = s.ircOccupants(userID, guildID, mem.AutoJoin)
 	}
-	// The bouncer user is always a member of their own guild. With the
-	// upstream link down or mid-reconnect, NAMES is empty and the member
-	// panel would go completely blank; seed ourselves so the list stays
-	// honest (matches Discord, where you never leave your own guild's
-	// member list).
-	if mem.Nick != "" {
-		selfPresent := false
-		for _, cm := range list {
-			if strings.EqualFold(cm.Nick, mem.Nick) {
-				selfPresent = true
-				break
-			}
-		}
-		if !selfPresent {
-			list = append(list, ircmanage.ChannelMember{Nick: mem.Nick})
-		}
-	}
 	if len(list) > 99 {
 		list = list[:99]
 	}
@@ -584,11 +565,6 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		"id":       model.MemberListID(guildID, channelID),
 		"guild_id": guildID,
 		"groups":   groups,
-		// Discord always sends member_count; online_count is the
-		// Spacebar extra web clients use for partial-sync heuristics.
-		// On IRC everyone listed is connected by definition.
-		"member_count": len(list),
-		"online_count": len(list),
 		"ops": []any{
 			map[string]any{
 				"op":    "SYNC",
@@ -609,10 +585,6 @@ func memberListItem(cm ircmanage.ChannelMember, joinedAt, mode string) map[strin
 	status := presenceStatus(cm.Away)
 	return map[string]any{
 		"member": map[string]any{
-			// Discord's op14 member carries the user id at both levels;
-			// strict web-client schemas require member.id (and the member
-			// list React keys derive from it).
-			"id": uid,
 			"user": map[string]any{
 				"id":            uid,
 				"username":      cm.Nick,
