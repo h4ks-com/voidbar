@@ -291,48 +291,17 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				}
 			}
 		case OpGuildMembersApps:
-			// Guild subscriptions v2 (op 24): the Android client sends
-			// {"applications":true,"guild_id":<numeric>,"limit":0,
-			// "nonce":"..."} when it wants the member list, and retries
-			// every couple of seconds when nothing comes back - which
-			// destabilizes the client. Answer both ways the client may
-			// consume: a nonce'd GUILD_MEMBERS_CHUNK (op 8 semantics)
-			// plus a guild-wide GUILD_MEMBER_LIST_UPDATE (op 14
-			// semantics), both built from the same IRC NAMES state.
+			// Guild subscriptions v2 (op 24): the Android client retries
+			// it while its member view is unresolved, but empirically our
+			// answers (nonce'd chunk and/or guild-wide list update)
+			// CRASH the 126.21 client into a launch loop - verified by
+			// logcat: op24 in, answer out, process relaunch, repeat at
+			// 1.7s cadence. Until the expected response shape is known,
+			// stay silent like before; guild unavailability (which stops
+			// the asking for dead upstreams) handles the storm case.
 			if sess == nil {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
 				return
-			}
-			var d struct {
-				GuildID json.RawMessage `json:"guild_id"`
-				Limit   int             `json:"limit"`
-				Nonce   string          `json:"nonce"`
-			}
-			if err := json.Unmarshal(p.D, &d); err != nil || len(d.GuildID) == 0 {
-				s.log.Warn("op24 decode failed", "err", err, "raw", string(p.D))
-				continue
-			}
-			gids := rawIDsToStrings(d.GuildID)
-			if len(gids) == 0 {
-				s.log.Warn("op24 decode failed: no guild id", "raw", string(p.D))
-				continue
-			}
-			s.log.Info("op24 request", "guild", gids[0], "nonce", d.Nonce, "limit", d.Limit)
-			guildID := gids[0]
-			if s.memberChunkForUser != nil {
-				if payload := s.memberChunkForUser(sess.UserID, guildID, d.Nonce, nil); payload != nil {
-					if _, err := sess.dispatch("GUILD_MEMBERS_CHUNK", payload, true); err != nil {
-						s.log.Error("member chunk dispatch failed", "err", err, "guild", guildID)
-					}
-				}
-			}
-			if s.memberListForUser != nil {
-				sess.watchMemberList(guildID, "")
-				if payload := s.memberListForUser(sess.UserID, guildID, ""); payload != nil {
-					if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
-						s.log.Error("member list dispatch failed", "err", err, "guild", guildID)
-					}
-				}
 			}
 		case OpCallConnect:
 			// Call-connect sync: the client fires it per open channel with
