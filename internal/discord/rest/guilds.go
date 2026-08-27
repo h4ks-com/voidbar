@@ -613,7 +613,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-		msg := messagePayload(msgID, channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
+		msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
 		if s.gw != nil {
 			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
 		}
@@ -654,7 +654,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := messagePayload(msgID, channelID, req.Content, time.Now().UTC().Format(time.RFC3339), u.ID, authorName, req.Nonce)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
 	// Own messages also arrive via the gateway on real Discord (keeping the
 	// user's other sessions in sync); the client dedupes by id and the
 	// nonce match clears the pending state.
