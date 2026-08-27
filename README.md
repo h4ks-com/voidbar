@@ -189,10 +189,15 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   history on join ( Ergo/solanum expose it, many networks don't —
   testnet.ergo.chat was probed but its hosting subnets were unreachable).
   History is also capped at 500 messages per channel (ring buffer).
-- **Message features**: edits/deletes (redaction), reactions (`+react`),
-  attachments/file uploads, embeds, mentions, pins (empty stub), search.
+- **Message features**: edits/deletes (redaction), attachments/file
+  uploads, embeds, mentions, pins (empty stub), search.
   Typing indicators work both ways (`draft/typing` client tag; outbound
   `pause` is not synthesized - the indicator just expires).
+  Reactions work both ways on msgid-capable upstreams
+  (`+draft/react`/`+draft/unreact` with `+reply`, MSGREFTYPES-gated:
+  eris fork / ergo / soju; mainline eris hides the picker), survive
+  restarts via persisted msgid + reaction state, and render as pills
+  with count/me.
 - **Channel management UI**: rename/topic (topic renders as empty), channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
@@ -231,6 +236,11 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
   `CLIENTTAGDENY`).
+- **Reactions** both ways on msgid upstreams (eris fork, ergo, soju):
+  pills with count/me, `+draft/react`/`+draft/unreact` TAGMSGs with
+  `+reply`/`+draft/reply`, REST PUT/DELETE bridging, restart-proof
+  (msgid registry + reaction state persisted). Verified live against a
+  locally built eris fork (fastidious/eris) with Halloy as the IRC peer.
 
 ## Known issues / troubleshooting
 
