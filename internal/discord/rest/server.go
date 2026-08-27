@@ -78,6 +78,12 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	if net != nil {
 		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))
 	}
+	// Instance discovery for third-party web clients (Flicker and other
+	// Spacebar-compatible clients): they probe the origin the user typed
+	// and derive the API/gateway/CDN endpoints from these documents.
+	mux.HandleFunc("GET /.well-known/spacebar/client", s.handleWellKnownClient)
+	mux.HandleFunc("GET /.well-known/spacebar", s.handleWellKnown)
+	mux.HandleFunc("GET /policies/instance/domains", s.handleInstanceDomains)
 	s.registerStubs(mux)
 	s.registerUnknown(mux)
 	return s.withLogging(withCORS(mux))
@@ -199,6 +205,61 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"url": s.cfg.GatewayWSURL()})
+}
+
+// instanceBase derives base URLs from the request host so discovery
+// answers with whatever host:port the client actually reached, instead
+// of a configured address that may differ (LAN IP vs localhost).
+func (s *Server) instanceBase(r *http.Request) (httpBase, wsBase string) {
+	scheme, wsScheme := "http", "ws"
+	if r.TLS != nil {
+		scheme, wsScheme = "https", "wss"
+	}
+	return scheme + "://" + r.Host, wsScheme + "://" + r.Host
+}
+
+// handleWellKnownClient serves the modern discovery document (Flicker's
+// first probe): the client uses it verbatim, so the gateway URL must be
+// a ready-to-connect WebSocket address.
+func (s *Server) handleWellKnownClient(w http.ResponseWriter, r *http.Request) {
+	httpBase, wsBase := s.instanceBase(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"api": map[string]any{
+			"baseUrl": httpBase,
+			"apiVersions": map[string]any{
+				"default": "v9",
+				"active":  []string{"v9"},
+			},
+		},
+		"gateway": map[string]any{
+			"baseUrl":     wsBase + "/gateway?v=9&encoding=json",
+			"encoding":    []string{"json"},
+			"compression": []string{"zlib-stream"},
+		},
+		"cdn":   map[string]any{"baseUrl": httpBase},
+		"admin": map[string]any{"baseUrl": httpBase},
+	})
+}
+
+// handleWellKnown serves the legacy Spacebar document (just the API base;
+// the client then asks the API for /policies/instance/domains).
+func (s *Server) handleWellKnown(w http.ResponseWriter, r *http.Request) {
+	httpBase, _ := s.instanceBase(r)
+	writeJSON(w, http.StatusOK, map[string]string{"api": httpBase + "/api"})
+}
+
+// handleInstanceDomains is the Spacebar policies fallback (also re-fetched
+// on every boot by Flicker). defaultApiVersion is the bare number here;
+// the client prefixes the v itself.
+func (s *Server) handleInstanceDomains(w http.ResponseWriter, r *http.Request) {
+	httpBase, wsBase := s.instanceBase(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cdn":                httpBase,
+		"gateway":            wsBase + "/gateway?v=9&encoding=json",
+		"defaultApiVersion":  "9",
+		"apiEndpoint":        httpBase + "/api/v9",
+		"assets":             []string{httpBase},
+	})
 }
 
 type registerRequest struct {
