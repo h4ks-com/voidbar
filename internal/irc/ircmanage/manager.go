@@ -234,6 +234,12 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		// messages never come back and their msgids stay unknown, which
 		// kills reacting to our own messages from IRC peers.
 		SupportedCaps: map[string][]string{"draft/typing": nil, "echo-message": nil},
+		// TLS is decided by the connection string (ircs:// / port), not by
+		// the server: an STS upgrade closes the connection mid-session and
+		// a bare (valueless) "sts" cap - which the eris fork advertises on
+		// plaintext - reads as an invalid policy and girc aborts as if
+		// MITM'd. Deterministic TLS, no auto-upgrades.
+		DisableSTS: true,
 	}
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
