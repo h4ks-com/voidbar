@@ -865,8 +865,10 @@ func (m *Manager) LiveNick(userID, networkID string) string {
 }
 
 // SendTyping relays a Discord typing indicator upstream as a
-// draft/typing TAGMSG ("active"). No-op when the upstream didn't
-// negotiate the cap (typing simply doesn't exist there).
+// draft/typing TAGMSG. draft/typing is a CLIENT-ONLY tag: any server
+// with message-tags relays it (the draft/typing capability is optional
+// and mostly advisory), so the gate is message-tags plus CLIENTTAGDENY.
+// Where denied or unsupported, typing is a silent no-op.
 func (m *Manager) SendTyping(userID, networkID, target string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
@@ -881,11 +883,34 @@ func (m *Manager) SendTyping(userID, networkID, target string) error {
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
 	}
-	if !client.HasCapability("draft/typing") {
+	if !typingAllowed(client) {
 		return nil
 	}
 	sendTypingTag(client, target, "active")
 	return nil
+}
+
+// typingAllowed reports whether the upstream will relay +typing tags:
+// message-tags must be negotiated, and CLIENTTAGDENY (ISUPPORT) must not
+// ban draft/typing ("*" bans everything; "-name" entries are exemptions).
+func typingAllowed(client *girc.Client) bool {
+	if !client.HasCapability("message-tags") {
+		return false
+	}
+	deny, _ := client.GetServerOption("CLIENTTAGDENY")
+	if deny == "" {
+		return true
+	}
+	for _, item := range strings.Split(deny, ",") {
+		item = strings.TrimSpace(item)
+		if item == "*" {
+			return false
+		}
+		if item == "draft/typing" {
+			return false
+		}
+	}
+	return true
 }
 
 // sendTypingTag emits one draft/typing TAGMSG.
@@ -955,7 +980,7 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string) error {
 	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
-	if client.HasCapability("draft/typing") {
+	if typingAllowed(client) {
 		sendTypingTag(client, nick, "done")
 	}
 	client.Cmd.Message(nick, content)
@@ -1018,7 +1043,7 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string) error 
 	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
-	if client.HasCapability("draft/typing") {
+	if typingAllowed(client) {
 		sendTypingTag(client, channel, "done")
 	}
 	client.Cmd.Message(channel, content)

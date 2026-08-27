@@ -287,8 +287,9 @@ func TestCreateDM(t *testing.T) {
 // TestTypingBothWays: draft/typing TAGMSGs flow both directions -
 // inbound TAGMSG (+typing=active) becomes a gateway TYPING_START, and
 // POST /channels/{id}/typing relays out as @+typing=active TAGMSG (a
-// message send follows up with "done"). The fake IRC server negotiates
-// the caps girc plus our SupportedCaps hook request.
+// message send follows up with "done"). The fake advertises ONLY
+// message-tags (eris-style): draft/typing is a client-only tag and
+// relay works without the capability being advertised.
 func TestTypingBothWays(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -320,7 +321,7 @@ func TestTypingBothWays(t *testing.T) {
 					mu.Unlock()
 					switch {
 					case strings.HasPrefix(line, "CAP LS"):
-						_, _ = conn.Write([]byte("CAP * LS :message-tags draft/typing\r\n"))
+						_, _ = conn.Write([]byte("CAP * LS :message-tags\r\n"))
 					case strings.HasPrefix(line, "CAP REQ"):
 						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 						_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
