@@ -5,7 +5,6 @@
 package ircmanage
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -124,9 +123,6 @@ type msgRef struct {
 	Snowflake string
 	ChannelID string
 	GuildID   string
-	// echoed is closed when the echo-message echo for this send arrives;
-	// Send* waits on it to turn delivery into a synchronous guarantee.
-	echoed chan struct{}
 }
 
 // setAway records a nick's away state and reports whether it changed.
@@ -502,17 +498,11 @@ func (m *Manager) registerHandlers(c *conn) {
 			return
 		}
 		msgid, _ := e.Tags.Get("msgid")
-		ref := c.popPendingSend(e.Params[0])
-		if ref.Snowflake == "" {
+		if msgid == "" {
 			return
 		}
-		// Delivery confirmed: the server processed our PRIVMSG. Some
-		// servers echo without a msgid - the confirmation must not depend
-		// on one being stamped.
-		if ref.echoed != nil {
-			close(ref.echoed)
-		}
-		if msgid == "" {
+		ref := c.popPendingSend(e.Params[0])
+		if ref.Snowflake == "" {
 			return
 		}
 		c.registerMsgid(ref, msgid)
@@ -1135,9 +1125,8 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, chan
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
 	}
-	echoed := make(chan struct{})
 	if msgID != "" {
-		c.pushPendingSend(nick, msgRef{Snowflake: msgID, ChannelID: channelID, echoed: echoed})
+		c.pushPendingSend(nick, msgRef{Snowflake: msgID, ChannelID: channelID})
 	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
@@ -1145,34 +1134,7 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, chan
 		sendTypingTag(client, nick, "done")
 	}
 	client.Cmd.Message(nick, content)
-	return c.awaitEcho(echoed, msgID)
-}
-
-// awaitEcho turns an asynchronous PRIVMSG write into a synchronous
-// delivery guarantee when (and only when) the server negotiated
-// echo-message: the caller blocks until the echo arrives. Without the
-// cap there is nothing to wait for - fire-and-forget, as before. A
-// zombie socket (TCP up, server hung) fails the wait, so the REST
-// caller can tell the client the message never left.
-func (c *conn) awaitEcho(echoed chan struct{}, msgID string) error {
-	if msgID == "" || echoed == nil || !c.echoCapable() {
-		return nil
-	}
-	select {
-	case <-echoed:
-		return nil
-	case <-time.After(3 * time.Second):
-		return errors.New("upstream did not confirm delivery")
-	}
-}
-
-// echoCapable reports whether the live connection negotiated
-// echo-message (delivery confirmations require it).
-func (c *conn) echoCapable() bool {
-	if c == nil || c.client == nil {
-		return false
-	}
-	return c.client.HasCapability("echo-message")
+	return nil
 }
 
 // JoinChannel makes the user's upstream connection join an IRC channel
@@ -1230,9 +1192,8 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 	if client == nil {
 		return fmt.Errorf("connection to %s is down, retrying", networkID)
 	}
-	echoed := make(chan struct{})
 	if msgID != "" {
-		c.pushPendingSend(channel, msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: networkID, echoed: echoed})
+		c.pushPendingSend(channel, msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: networkID})
 	}
 	// Tell the other side typing is over (draft/typing "done"), then the
 	// message itself.
@@ -1240,7 +1201,7 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 		sendTypingTag(client, channel, "done")
 	}
 	client.Cmd.Message(channel, content)
-	return c.awaitEcho(echoed, msgID)
+	return nil
 }
 
 // registerMsgid records the msgid <-> Discord identity mapping.
