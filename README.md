@@ -260,10 +260,20 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Profile shows IRC channel modes as guild-wide roles (wontfix).** IRC
   membership prefixes are per-channel; Discord roles are guild-global.
   The channel member list always shows the per-channel truth, but a
-  member profile shows their highest mode across channels. Splitting the
-  user id per channel (one Discord user per channel) would break DMs,
+  member profile shows their highest mode across channels. Splitting
+  the user id per channel (one Discord user per channel) would break DMs,
   mentions and message authorship continuity, so we keep one identity
   per nick and accept the imprecise profile.
+- **Flicker: a deleted message can reappear after scrolling (client-side,
+  wontfix here).** Flicker keeps a local scroll cache that is appended on
+  every render and never evicted on `MESSAGE_DELETE`: delete the newest
+  message and scroll near the bottom, and the cached copy is re-inserted
+  (white copy; messages sent from Flicker itself can additionally leave a
+  gray `temp-<nonce>` ghost). The server side was verified innocent on the
+  wire and with a Playwright e2e, and the same ghosts reproduce against
+  Oldcord Staging - an independent server - so no server payload can fix
+  it; the client must evict its cache on delete. Self-heals on channel
+  switch, reload, or the next message arriving.
 
 ## Planned stack
 
