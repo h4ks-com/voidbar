@@ -168,7 +168,12 @@ func (s *Server) handleNoContentAuthed(w http.ResponseWriter, r *http.Request, _
 // and acknowledges with 204 (Discord's contract for this endpoint).
 func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	patch := map[string]any{}
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	// UseNumber: the Android client PATCHes guild_folders snowflakes as
+	// JSON numbers; float64 parsing rounds them past 2^53 and the exact
+	// ids become unrecoverable, desyncing the client's settings store.
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&patch); err != nil {
 		// Unreadable body: still acknowledge; the client treats 204 as
 		// "synced" and won't retry-spam.
 		w.WriteHeader(http.StatusNoContent)

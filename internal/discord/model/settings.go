@@ -1,5 +1,11 @@
 package model
 
+import (
+	"encoding/json"
+	"math"
+	"strconv"
+)
+
 // DefaultUserSettings is the settings object served to clients that
 // expect a fully-formed user_settings map (web clients validate the
 // READY payload with zod and reject partial objects). Persisted
@@ -38,12 +44,13 @@ func SettingsWithDefaults(persisted map[string]any) map[string]any {
 	return out
 }
 
-// normalizeGuildFolders drops guild_ids entries that are not strings.
-// The Android client PATCHes snowflakes as JSON numbers; once unmarshaled
-// into float64 they have already lost precision (snowflakes exceed 2^53),
-// so they cannot be recovered and are discarded instead of being served
-// as wrong ids that would reference nonexistent guilds. Folders left with
-// no resolvable guilds are dropped entirely.
+// normalizeGuildFolders coerces folder ids and guild_ids entries to their
+// exact string form. The Android client PATCHes snowflakes as JSON
+// numbers; with UseNumber decoding their digits survive exactly and are
+// stringified here. Float64 values (decoded without UseNumber) only
+// recover below 2^53 - a mangled snowflake stays dropped rather than
+// served as an id referencing a nonexistent guild. Folders left with no
+// resolvable guilds are dropped entirely.
 func normalizeGuildFolders(v any) []any {
 	folders, ok := v.([]any)
 	if !ok {
@@ -55,11 +62,14 @@ func normalizeGuildFolders(v any) []any {
 		if !ok {
 			continue
 		}
+		if id, ok := idToString(m["id"]); ok {
+			m["id"] = id
+		}
 		if ids, ok := m["guild_ids"].([]any); ok {
 			keep := make([]any, 0, len(ids))
 			for _, id := range ids {
-				if _, ok := id.(string); ok {
-					keep = append(keep, id)
+				if s, ok := idToString(id); ok {
+					keep = append(keep, s)
 				}
 			}
 			if len(keep) == 0 {
@@ -70,4 +80,24 @@ func normalizeGuildFolders(v any) []any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// idToString returns the exact string form of an id when recoverable:
+// strings pass through, json.Number yields its literal digits (integer
+// values only), float64 survives only where integral and within 2^53.
+func idToString(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, true
+	case json.Number:
+		s := n.String()
+		if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return s, true
+		}
+	case float64:
+		if n == math.Trunc(n) && math.Abs(n) <= 1<<53 {
+			return strconv.FormatInt(int64(n), 10), true
+		}
+	}
+	return "", false
 }
