@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1063,6 +1064,215 @@ func TestDeleteBothWays(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown delete: %d", resp.StatusCode)
+	}
+}
+
+// TestScrollBackfillIntoNetworkHistory: a short ?before= page (buffer
+// floor in sight) transparently asks the upstream for older history via
+// draft/chathistory BEFORE, merges it silently - the scrolling client
+// reads it from the REST response, and attached gateway sessions must NOT
+// see the old messages arrive as MESSAGE_CREATE (they would append at the
+// bottom of every open view).
+func TestScrollBackfillIntoNetworkHistory(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				w := func(s string) { _, _ = conn.Write([]byte(s)) }
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						w("CAP * LS :message-tags echo-message server-time batch draft/chathistory\r\n")
+					case strings.HasPrefix(line, "CAP REQ"):
+						// Strip girc's trailing colon, or the echoed ACK
+						// carries a doubled one and caps never parse.
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						w("CAP * ACK :" + req + "\r\n")
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						w(":fake 001 " + nick + " :Welcome\r\n")
+					case strings.HasPrefix(line, "PING"):
+						w("PONG" + line[4:] + "\r\n")
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
+						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+					case strings.HasPrefix(line, "WHO "):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+					case strings.HasPrefix(line, "CHATHISTORY LATEST"):
+						w(":fake BATCH +bL draft/chathistory #test\r\n")
+						w("@time=2026-01-01T10:00:05.000Z;msgid=L1;batch=bL :bob!b@h PRIVMSG #test :fresh\r\n")
+						w("@time=2026-01-01T10:00:00.000Z;msgid=L2;batch=bL :alice!a@h PRIVMSG #test :oldmsg\r\n")
+						w(":fake BATCH -bL\r\n")
+					case strings.HasPrefix(line, "CHATHISTORY BEFORE"):
+						// Newest first; L2 again must dedup away.
+						w(":fake BATCH +bB draft/chathistory #test\r\n")
+						w("@time=2026-01-01T09:59:00.000Z;msgid=L2;batch=bB :alice!a@h PRIVMSG #test :oldmsg\r\n")
+						w("@time=2026-01-01T09:58:00.000Z;msgid=B1;batch=bB :dan!d@h PRIVMSG #test :ancient1\r\n")
+						w("@time=2026-01-01T09:57:00.000Z;msgid=B2;batch=bB :erin!e@h PRIVMSG #test :ancient2\r\n")
+						w(":fake BATCH -bB\r\n")
+					}
+				}
+			}(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	// Wait for the join prefill to land in the buffer.
+	deadline := time.Now().Add(5 * time.Second)
+	var channelID string
+	var firstPage []map[string]any
+	for time.Now().Before(deadline) && len(firstPage) < 2 {
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			guilds := []map[string]any{}
+			_ = json.Unmarshal(resp, &guilds)
+			if len(guilds) > 0 {
+				if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+guilds[0]["id"].(string), token); err == nil {
+					var detail map[string]any
+					_ = json.Unmarshal(resp, &detail)
+					if chans, ok := detail["channels"].([]any); ok {
+						for _, c := range chans {
+							if cm := c.(map[string]any); cm["name"] == "test" {
+								channelID, _ = cm["id"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+		if channelID != "" {
+			if resp, err := httpGet(srv.URL+"/api/v9/channels/"+channelID+"/messages?limit=50", token); err == nil {
+				_ = json.Unmarshal(resp, &firstPage)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(firstPage) != 2 {
+		t.Fatalf("prefill page: want 2 messages, got %d", len(firstPage))
+	}
+
+	// Attach a gateway session: any wrong dispatch of backfilled history
+	// would land here as MESSAGE_CREATE.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway/?v=9&encoding=json"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = conn.ReadMessage() // HELLO
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": token}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(data, &p)
+		if p["t"] == "READY" {
+			break
+		}
+	}
+
+	// Scroll-up page from above the newest message: the buffer only has
+	// two prefilled rows, so the page is short and the REST layer must
+	// backfill from the network before answering.
+	newestID, _ := strconv.ParseInt(firstPage[0]["id"].(string), 10, 64)
+	before := strconv.FormatInt(newestID+1, 10)
+	resp, err := httpGet(srv.URL+"/api/v9/channels/"+channelID+"/messages?limit=50&before="+before, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := []map[string]any{}
+	_ = json.Unmarshal(resp, &page)
+	want := []string{"fresh", "oldmsg", "ancient1", "ancient2"}
+	if len(page) != len(want) {
+		t.Fatalf("backfilled page: want %d messages, got %d: %+v", len(want), len(page), page)
+	}
+	lastID := int64(0)
+	oldMsgCount := 0
+	for i, m := range page {
+		if m["content"] != want[i] {
+			t.Fatalf("page[%d]: got %q, want %q", i, m["content"], want[i])
+		}
+		if m["content"] == "oldmsg" {
+			oldMsgCount++
+		}
+		id, _ := strconv.ParseInt(m["id"].(string), 10, 64)
+		if i > 0 && id >= lastID {
+			t.Fatalf("page[%d] id %d not below previous %d", i, id, lastID)
+		}
+		lastID = id
+	}
+	if oldMsgCount != 1 {
+		t.Fatalf("dup frame leaked into the page: oldmsg seen %d times", oldMsgCount)
+	}
+
+	// Silence: no MESSAGE_CREATE for the backfilled history on the wire.
+	_ = conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			break // deadline: nothing arrived, as required
+		}
+		var p map[string]any
+		_ = json.Unmarshal(data, &p)
+		if p["t"] == "MESSAGE_CREATE" {
+			if d, _ := p["d"].(map[string]any); strings.HasPrefix(d["content"].(string), "ancient") {
+				t.Fatalf("backfill dispatched live: %v", d)
+			}
+		}
 	}
 }
 

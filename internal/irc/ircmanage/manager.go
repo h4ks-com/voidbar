@@ -123,7 +123,26 @@ type conn struct {
 	// buffer (prefill). Only touched from the connection's event loop.
 	batchMu    sync.Mutex
 	chatBatches map[string]*chatBatch
+
+	// Scroll backfill (CHATHISTORY BEFORE) state. pageCh/pageTarget/
+	// pageBatch/pageIssued are guarded by batchMu (the event loop hands
+	// completed batches off through them); pageMu serializes asks.
+	pageMu     sync.Mutex
+	pageCh     chan struct{}
+	pageTarget string
+	pageBatch  *chatBatch
+	pageCeiling string
+	pageIssued time.Time
+
+	// histCap is the sticky "upstream ACKed a chathistory cap" flag, set
+	// from the CAP ACK line on the connection's event loop. girc's own
+	// capability map can lag the JOIN echo (the ACK is applied
+	// asynchronously), which raced the prefill trigger into skipping
+	// channels; ordering the flag on the same event loop removes the race.
+	histCapUp atomic.Bool
 }
+
+func (c *conn) histCap() bool { return c.histCapUp.Load() }
 
 // msgRef is the Discord identity of one bridged IRC message.
 type msgRef struct {
@@ -556,6 +575,18 @@ func (m *Manager) registerHandlers(c *conn) {
 	// control frames and the batched history PRIVMSGs (own past messages
 	// included - girc flags those Echo too, so they can only be seen here).
 	c.client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, e girc.Event) {
+		if e.Command == "CAP" && len(e.Params) >= 3 && e.Params[1] == "ACK" {
+			// Sticky chathistory marker, ordered on this event loop
+			// (see conn.histCapUp): the ACK line always precedes the
+			// JOIN echo on the wire. Tokens carry a stray ":" prefix if
+			// a server echoed our trailing-colon REQ back doubled.
+			for _, cap := range strings.Fields(e.Params[2]) {
+				cap = strings.TrimPrefix(cap, ":")
+				if cap == "draft/chathistory" || cap == "chathistory" {
+					c.histCapUp.Store(true)
+				}
+			}
+		}
 		if e.Command == "BATCH" {
 			m.chatBatchControl(c, e)
 			return

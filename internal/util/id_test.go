@@ -99,3 +99,40 @@ func TestSnowflakeNewAtOrderAndDistinctness(t *testing.T) {
 		}
 	}
 }
+
+func TestSnowflakeNewBelowStaysUnderCeiling(t *testing.T) {
+	sf := NewSnowflake(0, 0)
+	at := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	ceiling, err := ParseSnowflake(sf.NewAt(at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A burst of same-millisecond frames minted after the ceiling: every
+	// id must still sort strictly below it (and among themselves, in
+	// flush order).
+	var prev int64
+	for i := 0; i < 6; i++ {
+		id, err := ParseSnowflake(sf.NewBelow(at.Add(time.Millisecond), strconv.FormatInt(ceiling, 10)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id >= ceiling {
+			t.Fatalf("id %d not below ceiling %d", id, ceiling)
+		}
+		if i > 0 && id <= prev {
+			t.Fatalf("same-burst ids out of order: %d after %d", id, prev)
+		}
+		prev = id
+	}
+	// Frames from an earlier millisecond mint normally (no clamping).
+	loose, err := ParseSnowflake(sf.NewBelow(at.Add(-time.Second), strconv.FormatInt(ceiling, 10)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loose >= ceiling {
+		t.Fatalf("loose id %d not below ceiling %d", loose, ceiling)
+	}
+	if !SnowflakeTime(loose).Equal(at.Add(-time.Second)) {
+		t.Fatalf("loose id encodes %v, want %v", SnowflakeTime(loose), at.Add(-time.Second))
+	}
+}

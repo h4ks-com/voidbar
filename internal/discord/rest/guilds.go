@@ -355,6 +355,15 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		return
 	}
 	buffered := s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
+	// Scroll-up paging into network history: a short ?before= page means
+	// the buffer floor is in sight - ask the upstream for older history
+	// (draft/chathistory BEFORE) and re-read. Networks without the cap
+	// (or nothing older) insert nothing and the page stands as-is.
+	if q.Get("before") != "" && q.Get("after") == "" && len(buffered) < limit {
+		if s.net.FetchOlderMessages(u.ID, r.PathValue("channel"), q.Get("before"), limit-len(buffered)) > 0 {
+			buffered = s.net.ChannelMessages(r.PathValue("channel"), q.Get("before"), q.Get("after"), limit)
+		}
+	}
 	out := make([]any, 0, len(buffered))
 	for _, m := range buffered {
 		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce)

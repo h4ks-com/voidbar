@@ -114,7 +114,10 @@ func waitFor(t *testing.T, sink *logSink, substr string) {
 
 func waitForCount(t *testing.T, sink *logSink, substr string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Generous: under `go test ./...` all package binaries run in
+	// parallel and the connect/prefill flow competes for CPU with the
+	// websocket-heavy rest tests; 10s flaked there.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if sink.count(substr) >= want {
 			return
@@ -1067,6 +1070,12 @@ func TestQueryRelayCreatesDM(t *testing.T) {
 // serveChathistory: negotiates the prefill caps, echoes JOINs, and answers
 // CHATHISTORY with a newest-first batch. A second, unsolicited batch mixes
 // one overlapping msgid with one new frame to pin the dedup.
+// lastBeforeSelector records the selector of the most recent BEFORE ask,
+// so tests can pin the anchor form (msgid= vs timestamp=).
+var lastBeforeSelector atomic.Value
+
+// serveChathistory is a chathistory-capable fake: it answers a two-batch
+// LATEST prefill on join and a BEFORE batch with older history (one dup).
 func serveChathistory(conn net.Conn, asks *int32) {
 	go func() {
 		defer func() { _ = conn.Close() }()
@@ -1083,7 +1092,11 @@ func serveChathistory(conn net.Conn, asks *int32) {
 			case strings.HasPrefix(line, "CAP LS"):
 				w("CAP * LS :server-time batch draft/chathistory\r\n")
 			case strings.HasPrefix(line, "CAP REQ"):
-				req := strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ"))
+				// girc writes multi-cap requests as a trailing
+				// ("CAP REQ :a b c"); echo the caps without the colon,
+				// or the ACK parses back with a doubled one and no cap
+				// name ever matches.
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 				w("CAP * ACK :" + req + "\r\n")
 			case strings.HasPrefix(line, "NICK"):
 				nick = strings.TrimPrefix(line, "NICK ")
@@ -1092,20 +1105,34 @@ func serveChathistory(conn net.Conn, asks *int32) {
 				w("PONG" + line[4:] + "\r\n")
 			case strings.HasPrefix(line, "JOIN"):
 				w(":" + nick + "!u@h JOIN " + strings.TrimPrefix(line, "JOIN ") + "\r\n")
-			case strings.HasPrefix(line, "CHATHISTORY"):
-				atomic.AddInt32(asks, 1)
-				// Newest first, as LATEST answers arrive. Batch 1 uses the
-				// eris shape (target right after the type); batch 2 uses
-				// the spec-echo shape (subcommand, then target).
-				w(":fake BATCH +b1 draft/chathistory #test\r\n")
-				w("@time=2026-01-01T10:00:05.000Z;msgid=m-new;batch=b1 :bob!b@h PRIVMSG #test :newest\r\n")
-				w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b1 :alice!a@h PRIVMSG #test :oldest\r\n")
-				w(":fake BATCH -b1\r\n")
-				// Overlap (m-old again) plus one new message.
-				w(":fake BATCH +b2 draft/chathistory LATEST #test * 50\r\n")
-				w("@time=2026-01-01T10:00:03.000Z;msgid=m-mid;batch=b2 :carol!c@h PRIVMSG #test :middle\r\n")
-				w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b2 :alice!a@h PRIVMSG #test :oldest\r\n")
-				w(":fake BATCH -b2\r\n")
+		case strings.HasPrefix(line, "CHATHISTORY"):
+			atomic.AddInt32(asks, 1)
+			if strings.HasPrefix(line, "CHATHISTORY BEFORE") {
+				// Newest first: a dup of m-old plus strictly older
+				// messages. Second ask (convergence) answers the same
+				// batch, so everything dedups to zero inserts.
+				if fields := strings.Fields(line); len(fields) >= 4 {
+					lastBeforeSelector.Store(fields[3])
+				}
+				w(":fake BATCH +p1 draft/chathistory #test\r\n")
+				w("@time=2026-01-01T09:59:00.000Z;msgid=m-old;batch=p1 :alice!a@h PRIVMSG #test :oldest\r\n")
+				w("@time=2026-01-01T09:58:00.000Z;msgid=m-anc1;batch=p1 :dan!d@h PRIVMSG #test :ancient1\r\n")
+				w("@time=2026-01-01T09:57:00.000Z;msgid=m-anc2;batch=p1 :erin!e@h PRIVMSG #test :ancient2\r\n")
+				w(":fake BATCH -p1\r\n")
+				continue
+			}
+			// Newest first, as LATEST answers arrive. Batch 1 uses the
+			// eris shape (target right after the type); batch 2 uses
+			// the spec-echo shape (subcommand, then target).
+			w(":fake BATCH +b1 draft/chathistory #test\r\n")
+			w("@time=2026-01-01T10:00:05.000Z;msgid=m-new;batch=b1 :bob!b@h PRIVMSG #test :newest\r\n")
+			w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b1 :alice!a@h PRIVMSG #test :oldest\r\n")
+			w(":fake BATCH -b1\r\n")
+			// Overlap (m-old again) plus one new message.
+			w(":fake BATCH +b2 draft/chathistory LATEST #test * 50\r\n")
+			w("@time=2026-01-01T10:00:03.000Z;msgid=m-mid;batch=b2 :carol!c@h PRIVMSG #test :middle\r\n")
+			w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b2 :alice!a@h PRIVMSG #test :oldest\r\n")
+			w(":fake BATCH -b2\r\n")
 			}
 		}
 	}()
@@ -1203,5 +1230,103 @@ func TestChatHistoryPrefill(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if n := atomic.LoadInt32(&asks); n != 1 {
 		t.Fatalf("reconnect re-asked chathistory: %d requests", n)
+	}
+}
+
+// TestChatHistoryBackfill: FetchOlder pulls one scroll-up step of network
+// history (CHATHISTORY BEFORE) into the buffer silently - deduped, server
+// time, snowflakes anchored to their own time - and a dry network
+// converges (a fully-dup answer inserts nothing, so paging stops).
+func TestChatHistoryBackfill(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var asks int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			serveChathistory(conn, &asks)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "histguy", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitForCount(t, sink, "chathistory prefill applied", 2)
+
+	// Scroll below the buffer floor (oldest prefilled is m-old @10:00).
+	// The floor row carries msgid m-old, so the ask must anchor by msgid -
+	// a timestamp anchor would miss same-second bursts - and insert below
+	// the floor row's own id.
+	anchor := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	ch, err := store.GetChannelByIRC("net1", "#test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefilled := store.ChannelMessages(ch.ID, "", "", 50)
+	if len(prefilled) != 3 {
+		t.Fatalf("prefill left %d messages, want 3", len(prefilled))
+	}
+	floorID := prefilled[len(prefilled)-1].ID
+	if n := manager.FetchOlder("u1", "net1", "#test", "m-old", floorID, anchor, 50); n != 2 {
+		t.Fatalf("FetchOlder inserted %d, want 2 (dup m-old deduped)", n)
+	}
+	if got, _ := lastBeforeSelector.Load().(string); got != "msgid=m-old" {
+		t.Fatalf("BEFORE selector: got %q, want msgid=m-old", got)
+	}
+	msgs := store.ChannelMessages(ch.ID, "", "", 50)
+	want := []struct{ content, ts string }{
+		{"newest", "2026-01-01T10:00:05Z"},
+		{"middle", "2026-01-01T10:00:03Z"},
+		{"oldest", "2026-01-01T10:00:00Z"},
+		{"ancient1", "2026-01-01T09:58:00Z"},
+		{"ancient2", "2026-01-01T09:57:00Z"},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("want %d messages, got %d", len(want), len(msgs))
+	}
+	for i, m := range msgs {
+		if m.Content != want[i].content || m.Timestamp != want[i].ts {
+			t.Fatalf("msg[%d]: got %q @%s, want %q @%s", i, m.Content, m.Timestamp, want[i].content, want[i].ts)
+		}
+		id, _ := util.ParseSnowflake(m.ID)
+		if ts := util.SnowflakeTime(id); ts.Format(time.RFC3339) != want[i].ts {
+			t.Fatalf("msg[%d] snowflake encodes %s, want %s", i, ts.Format(time.RFC3339), want[i].ts)
+		}
+	}
+
+	// Dry network: the same batch again is fully dup, inserts nothing.
+	anc := time.Date(2026, 1, 1, 9, 57, 0, 0, time.UTC)
+	if n := manager.FetchOlder("u1", "net1", "#test", "m-anc2", msgs[len(msgs)-1].ID, anc, 50); n != 0 {
+		t.Fatalf("second FetchOlder inserted %d, want 0 (dry)", n)
 	}
 }

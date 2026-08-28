@@ -75,6 +75,51 @@ func (s *Snowflake) NewAt(t time.Time) string {
 	return strconv.FormatInt((ms<<22)|(s.worker<<17)|(s.process<<12)|seq, 10)
 }
 
+// NewBelow mints a time-anchored snowflake like NewAt, but guaranteed to
+// sort strictly below the ceiling id. Chathistory backfill needs this:
+// frames that share the anchor's millisecond would otherwise mint ABOVE
+// the anchor (NewAt's per-ms sequence is allocation-ordered), landing
+// older messages above newer ones in every id-sorted view. When the
+// natural id for a frame's own millisecond would reach the ceiling, the
+// mint walks backwards into earlier milliseconds - chronology relative
+// to the ceiling survives, off by at most a millisecond.
+func (s *Snowflake) NewBelow(t time.Time, ceiling string) string {
+	var ceil int64
+	if ceiling != "" {
+		if n, err := strconv.ParseInt(ceiling, 10, 64); err == nil && n > 0 {
+			ceil = n
+		}
+	}
+	ms := t.UnixMilli() - discordEpoch
+	if ms < 0 {
+		ms = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.aux == nil {
+		s.aux = make(map[int64]int64)
+	}
+	for ms >= 0 {
+		seq := s.aux[ms] + 1
+		if seq > 0xFFF { // this ms is exhausted: step back one
+			delete(s.aux, ms)
+			ms--
+			continue
+		}
+		id := (ms << 22) | (s.worker << 17) | (s.process << 12) | seq
+		if ceil == 0 || id < ceil {
+			s.aux[ms] = seq
+			return strconv.FormatInt(id, 10)
+		}
+		// The natural slot lands at or above the ceiling: walk back a
+		// millisecond and try again (earlier ms blocks always fit).
+		ms--
+	}
+	// Unreachable for real ceilings (epoch ms 0 clears any Discord-era
+	// snowflake); kept for total safety.
+	return "0"
+}
+
 func ParseSnowflake(v string) (int64, error) {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {

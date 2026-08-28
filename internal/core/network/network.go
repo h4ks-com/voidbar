@@ -197,6 +197,53 @@ func (s *Service) ChannelByID(id string) (*storage.Channel, error) {
 	return s.store.GetChannel(id)
 }
 
+// FetchOlderMessages extends a channel's history downwards when a
+// scroll-up page comes up short: asks the upstream network (via
+// draft/chathistory BEFORE, bridged by the IRC manager) for messages
+// older than the deepest anchor we know - the buffer floor, or the
+// client's ?before cursor when the buffer holds nothing below it. Each
+// round inserts silently and re-anchors at the new floor until the page
+// is satisfied or the network runs dry. Returns how many messages were
+// inserted; 0 means the page stands as-is (no cap, link down, or the
+// network has nothing older).
+func (s *Service) FetchOlderMessages(userID, channelID, before string, need int) int {
+	if s.manager == nil || s.store == nil || need <= 0 {
+		return 0
+	}
+	id, err := util.ParseSnowflake(before)
+	if err != nil {
+		return 0
+	}
+	cursor := util.SnowflakeTime(id)
+	ch, err := s.ChannelByID(channelID)
+	if err != nil || !strings.HasPrefix(ch.IRCName, "#") && !strings.HasPrefix(ch.IRCName, "&") {
+		return 0
+	}
+	total := 0
+	// A full page is <=100; each round needs a strictly older anchor, so
+	// a handful of rounds can never loop: a dry network returns 0.
+	for round := 0; round < 3 && need > 0; round++ {
+		anchorMsgID := ""
+		ceilingID := ""
+		anchor := cursor
+		if all := s.store.ChannelMessages(ch.ID, "", "", storage.MsgBufferCap); len(all) > 0 {
+			floor := all[len(all)-1]
+			anchorMsgID = floor.MsgID
+			ceilingID = floor.ID
+			if ft, err := time.Parse(time.RFC3339, floor.Timestamp); err == nil && ft.Before(anchor) {
+				anchor = ft
+			}
+		}
+		got := s.manager.FetchOlder(userID, ch.NetworkID, ch.IRCName, anchorMsgID, ceilingID, anchor, need)
+		total += got
+		if got == 0 {
+			break
+		}
+		need -= got
+	}
+	return total
+}
+
 // DMChannelByID resolves a snowflake id to a DM thread.
 func (s *Service) DMChannelByID(id string) (*storage.DMChannel, error) {
 	return s.store.GetDMChannel(id)
