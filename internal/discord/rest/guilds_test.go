@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1073,6 +1074,177 @@ func TestDeleteBothWays(t *testing.T) {
 // reads it from the REST response, and attached gateway sessions must NOT
 // see the old messages arrive as MESSAGE_CREATE (they would append at the
 // bottom of every open view).
+// TestChannelTopicUpdate walks the topic round-trip through REST: RPL_TOPIC
+// on join surfaces in the guild channel list, PATCH relays TOPIC upstream
+// (response echoes the request), and the server's broadcast lands on the
+// gateway as CHANNEL_UPDATE with the new topic.
+func TestChannelTopicUpdate(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				w := func(s string) { _, _ = conn.Write([]byte(s)) }
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						w("CAP * LS :\r\n")
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						w("CAP * ACK :" + req + "\r\n")
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						w(":fake 001 " + nick + " :Welcome\r\n")
+					case strings.HasPrefix(line, "PING"):
+						w("PONG" + line[4:] + "\r\n")
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+						w(":fake 332 " + nick + " " + ch + " :join topic\r\n")
+						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
+						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+					case strings.HasPrefix(line, "WHO "):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+					case strings.HasPrefix(line, "TOPIC"):
+						topic := strings.TrimPrefix(line, "TOPIC ")
+						topic = topic[strings.Index(topic, " ")+1:]
+						w(":" + nick + "!u@h TOPIC #test " + topic + "\r\n")
+					}
+				}
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	// Wait for the join + RPL_TOPIC to land, then read the channel out of
+	// the guild detail (the topic arrives via the 332 seed).
+	deadline := time.Now().Add(5 * time.Second)
+	var channelID string
+	for time.Now().Before(deadline) && channelID == "" {
+		if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+net.ID, token); err == nil {
+			var detail map[string]any
+			_ = json.Unmarshal(resp, &detail)
+			if chans, ok := detail["channels"].([]any); ok {
+				for _, c := range chans {
+					if cm := c.(map[string]any); cm["name"] == "test" && cm["topic"] == "join topic" {
+						channelID, _ = cm["id"].(string)
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("guild detail never carried the 332-seeded topic")
+	}
+
+	// Attach a gateway session for the CHANNEL_UPDATE.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway/?v=9&encoding=json"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = ws.ReadMessage() // HELLO
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": token}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// PATCH the topic: the response echoes the request (Discord-style);
+	// the fake echoes the TOPIC back, and that broadcast - not the PATCH -
+	// is what must update the wire.
+	body, _ := json.Marshal(map[string]string{"topic": "edited topic"})
+	req, _ := http.NewRequest("PATCH", srv.URL+"/api/v9/channels/"+channelID, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var patched map[string]any
+	_ = json.Unmarshal(raw, &patched)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH topic: %d %s", resp.StatusCode, raw)
+	}
+	if patched["topic"] != "edited topic" {
+		t.Fatalf("PATCH response topic: %v", patched["topic"])
+	}
+
+	// Gateway: skip session noise until the CHANNEL_UPDATE carrying the
+	// broadcast topic.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("no CHANNEL_UPDATE for the topic broadcast")
+		}
+		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(data, &p)
+		if p["t"] != "CHANNEL_UPDATE" {
+			continue
+		}
+		d, _ := p["d"].(map[string]any)
+		if d == nil || d["id"] != channelID {
+			continue
+		}
+		if d["topic"] != "edited topic" {
+			t.Fatalf("CHANNEL_UPDATE topic: %v", d["topic"])
+		}
+		break
+	}
+}
+
 func TestScrollBackfillIntoNetworkHistory(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

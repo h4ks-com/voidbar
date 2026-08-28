@@ -66,6 +66,7 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("POST /api/v9/guilds", s.requireAuth(s.handleCreateGuild))
 	mux.HandleFunc("POST /api/v9/guilds/{guild}/channels", s.requireAuth(s.handleCreateChannel))
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}", s.requireAuth(s.handleDeleteChannel))
+	mux.HandleFunc("PATCH /api/v9/channels/{channel}", s.requireAuth(s.handleUpdateChannel))
 	mux.HandleFunc("GET /api/v9/invites/{code}", s.requireAuth(s.handleGetInvite))
 	mux.HandleFunc("POST /api/v9/invites/{code}", s.requireAuth(s.handleJoinInvite))
 	mux.HandleFunc("GET /api/v9/channels/{channel}/messages", s.requireAuth(s.handleGetMessages))

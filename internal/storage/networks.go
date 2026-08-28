@@ -33,6 +33,7 @@ type Channel struct {
 	NetworkID string    `json:"network_id"`
 	IRCName   string    `json:"irc_name"` // "#go" or a bare nick for DMs
 	Name      string    `json:"name"`     // "go" / the nick
+	Topic     string    `json:"topic,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -525,6 +526,32 @@ func (s *Storage) GetChannelByIRC(netID, ircName string) (*Channel, error) {
 		return nil, err
 	}
 	return &ch, nil
+}
+
+// SetChannelTopic updates the persisted topic. The network's broadcast is
+// the only writer (RPL_TOPIC on join, live TOPIC incl. our own echo), so
+// the store can never disagree with what IRC users see. No-op if equal,
+// so echo-loops converge immediately.
+func (s *Storage) SetChannelTopic(id, topic string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(chanKey(id))
+		if err != nil {
+			return err
+		}
+		var ch Channel
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) }); err != nil {
+			return err
+		}
+		if ch.Topic == topic {
+			return nil
+		}
+		ch.Topic = topic
+		val, err := json.Marshal(ch)
+		if err != nil {
+			return err
+		}
+		return txn.Set(chanKey(id), val)
+	})
 }
 
 // DeleteNetworkCascade garbage-collects a network nobody is a member of

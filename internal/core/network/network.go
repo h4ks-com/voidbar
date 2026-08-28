@@ -530,7 +530,7 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		"name":                  ch.Name,
 		"type":                  0,
 		"position":              position,
-		"topic":                 nil,
+		"topic":                 ircmanage.TopicValue(ch.Topic),
 		"last_message_id":       "0",
 		"permission_overwrites": []any{},
 		"rate_limit_per_user":   0,

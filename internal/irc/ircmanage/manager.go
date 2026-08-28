@@ -591,6 +591,19 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.chatBatchControl(c, e)
 			return
 		}
+		if e.Command == "TOPIC" && len(e.Params) > 0 {
+			// Every TOPIC broadcast lands here - our own set too, as girc
+			// flags it Echo and only this ALL_EVENTS branch sees echoes.
+			// The broadcast is the authoritative truth (see SetTopic).
+			m.applyTopic(c, e.Params[0], e.Last())
+			return
+		}
+		if e.Command == girc.RPL_TOPIC && len(e.Params) >= 2 {
+			// 332 after JOIN: seed the topic before the client ever opens
+			// the channel (guild assembly then serves it from the store).
+			m.applyTopic(c, e.Params[1], e.Last())
+			return
+		}
 		if e.Command == "PRIVMSG" || e.Command == "NOTICE" {
 			if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.chatBatchActive(ref) {
 				m.chatBatchFrame(c, e, ref)
@@ -1308,6 +1321,91 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 		sendTypingTag(client, channel, "done")
 	}
 	client.Cmd.Message(channel, content)
+	return nil
+}
+
+// TopicValue maps the wire shape: Discord carries unset topics as null,
+// not as an empty string. Shared by every channel-object builder.
+func TopicValue(topic string) any {
+	if topic == "" {
+		return nil
+	}
+	return topic
+}
+
+// applyTopic is the single authoritative topic sink: RPL_TOPIC on join
+// and every live TOPIC broadcast (our own echo included) land here. The
+// PATCH response only echoes what the client asked for - this is what
+// persists and dispatches. A rejected set (+t channel, not op) never
+// broadcasts, so the store keeps the old truth instead of a lie.
+func (m *Manager) applyTopic(c *conn, ircChannel, topic string) {
+	ch, err := m.store.EnsureChannel(c.networkID, ircChannel, m.sf.New)
+	if err != nil {
+		m.log.Warn("topic channel resolve failed", "err", err, "channel", ircChannel)
+		return
+	}
+	if ch.Topic == topic {
+		return
+	}
+	if err := m.store.SetChannelTopic(ch.ID, topic); err != nil {
+		m.log.Warn("topic persist failed", "err", err, "channel", ircChannel)
+		return
+	}
+	ch.Topic = topic
+	m.gw.Dispatch(c.userID, "CHANNEL_UPDATE", m.channelUpdatePayload(c, ch))
+	m.log.Info("channel topic applied", "user", c.userID, "network", c.networkID, "channel", ircChannel, "topic", topic)
+}
+
+// channelUpdatePayload mirrors the guild-assembly channel object (see
+// network.Service.channelPayload); the service layer can't be imported
+// here without a cycle. Position matches the auto-join order the guild
+// payload uses, so the client doesn't reshuffle its sidebar.
+func (m *Manager) channelUpdatePayload(c *conn, ch *storage.Channel) map[string]any {
+	position := 0
+	if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil {
+		for i, name := range mem.AutoJoin {
+			if strings.EqualFold(name, ch.IRCName) {
+				position = i
+				break
+			}
+		}
+	}
+	return map[string]any{
+		"id":                    ch.ID,
+		"guild_id":              c.networkID,
+		"name":                  ch.Name,
+		"type":                  0,
+		"position":              position,
+		"topic":                 TopicValue(ch.Topic),
+		"last_message_id":       "0",
+		"permission_overwrites": []any{},
+		"rate_limit_per_user":   0,
+		"nsfw":                  false,
+		"flags":                 0,
+		"parent_id":             nil,
+		"member_list_id":        model.MemberListID(c.networkID, ch.ID),
+	}
+}
+
+// SetTopic relays a client topic edit upstream. An empty topic clears
+// (girc encodes the empty trailing param as "TOPIC #chan :"). Nothing is
+// persisted here - the server's broadcast echo (applyTopic) is the only
+// writer, keeping the store honest when upstream rejects the change.
+func (m *Manager) SetTopic(userID, networkID, ircChannel, topic string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retry", networkID)
+	}
+	client.Send(&girc.Event{Command: "TOPIC", Params: []string{ircChannel, topic}})
 	return nil
 }
 

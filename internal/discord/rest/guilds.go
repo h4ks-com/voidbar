@@ -211,7 +211,7 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 			"name":            ch.Name,
 			"type":            0,
 			"position":        i,
-			"topic":           nil,
+			"topic":           ircmanage.TopicValue(ch.Topic),
 			"member_list_id":  model.MemberListID(guildID, ch.ID),
 		})
 	}
@@ -226,6 +226,61 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 		"channels":     channels,
 		"roles":        roles,
 		"member_count": len(channels) + 1,
+	})
+}
+
+type updateChannelRequest struct {
+	Name  *string `json:"name"`
+	Topic *string `json:"topic"`
+}
+
+// handleUpdateChannel answers PATCH /channels/:id - the channel settings
+// screen's topic editor. Only the topic relays upstream (rename is a
+// separate IRCv3 feature); the response echoes the request the way
+// Discord does, and the authoritative CHANNEL_UPDATE follows from the
+// server's TOPIC broadcast.
+func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	var req updateChannelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	ch, err := s.net.ChannelByID(r.PathValue("channel"))
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "Unknown Channel")
+		return
+	}
+	topic := ch.Topic
+	if req.Topic != nil {
+		topic = *req.Topic
+		if s.irc != nil {
+			if err := s.irc.SetTopic(u.ID, ch.NetworkID, ch.IRCName, *req.Topic); err != nil {
+				jsonError(w, http.StatusServiceUnavailable, "upstream unavailable")
+				return
+			}
+		}
+	}
+	position := 0
+	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil {
+		for i, name := range mem.AutoJoin {
+			if strings.EqualFold(name, ch.IRCName) {
+				position = i
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":             ch.ID,
+		"guild_id":       ch.NetworkID,
+		"name":           ch.Name,
+		"type":           0,
+		"position":       position,
+		"topic":          ircmanage.TopicValue(topic),
+		"member_list_id": model.MemberListID(ch.NetworkID, ch.ID),
 	})
 }
 

@@ -127,6 +127,120 @@ func waitForCount(t *testing.T, sink *logSink, substr string, want int) {
 	t.Fatalf("timed out waiting for %d log %q; got %d:\n%s", want, substr, sink.count(substr), strings.Join(sink.lines, "\n"))
 }
 
+// TestTopicFlow walks the topic lifecycle: RPL_TOPIC on join seeds the
+// store, a client edit (SetTopic) is confirmed by the server's own-echo
+// broadcast, and a peer's TOPIC updates it further. Only broadcasts
+// persist (the ALL_EVENTS sink), never the outgoing command.
+func TestTopicFlow(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 332 " + nick + " " + ch + " :initial topic\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + "\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+			case strings.HasPrefix(line, "TOPIC"):
+				// Broadcast the set back (own echo) and let a peer change
+				// it right after: two applies from one client command.
+				topic := strings.TrimPrefix(line, "TOPIC ")
+				topic = topic[strings.Index(topic, " ")+1:]
+				w(":" + nick + "!u@h TOPIC #test " + topic + "\r\n")
+				w(":bob!b@h TOPIC #test :bob wins\r\n")
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "histguy", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+
+	storeTopic := func() string {
+		ch, err := store.GetChannelByIRC("net1", "#test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ch.Topic
+	}
+
+	// 332 on join seeds the store before any client saw the channel.
+	waitForCount(t, sink, "channel topic applied", 1)
+	if got := storeTopic(); got != "initial topic" {
+		t.Fatalf("after 332: topic %q, want %q", got, "initial topic")
+	}
+
+	// Client edit: the outgoing TOPIC persists nothing by itself; the
+	// server's broadcast echo does. The fake follows up with a peer
+	// change immediately, so sequence-proof via the apply log instead of
+	// racing the intermediate store state.
+	if err := manager.SetTopic("u1", "net1", "#test", "edited"); err != nil {
+		t.Fatal(err)
+	}
+	waitForCount(t, sink, "channel topic applied", 3)
+	if !sink.has("topic=edited") {
+		t.Fatalf("own echo never applied:\n%s", strings.Join(sink.lines, "\n"))
+	}
+	if got := storeTopic(); got != "bob wins" {
+		t.Fatalf("after peer TOPIC: topic %q, want %q", got, "bob wins")
+	}
+}
+
 // TestNickCollisionDoesNotEatForeignMessages reproduces the reported bug:
 // the member's configured nick (doesnm) collides and the server renames the
 // bouncer to doesnm_. PRIVMSG from the OTHER user holding the original
