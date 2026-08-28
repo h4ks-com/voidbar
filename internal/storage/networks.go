@@ -554,6 +554,55 @@ func (s *Storage) SetChannelTopic(id, topic string) error {
 	})
 }
 
+// RenameChannel rewrites a channel's IRC name (draft/channel-rename): the
+// registry record, the (network, irc name) index and the chathistory
+// prefill watermark, which is keyed by the IRC name. The snowflake id and
+// the message buffers stay put - the Discord side never sees a rename as
+// a different channel.
+func (s *Storage) RenameChannel(netID, oldIRC, newIRC string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		idx, err := txn.Get(chanNetKey(netID, oldIRC))
+		if err != nil {
+			return err
+		}
+		return idx.Value(func(id []byte) error {
+			var ch Channel
+			item, err := txn.Get(chanKey(string(id)))
+			if err != nil {
+				return err
+			}
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) }); err != nil {
+				return err
+			}
+			ch.IRCName = newIRC
+			ch.Name = strings.TrimPrefix(newIRC, "#")
+			val, err := json.Marshal(ch)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set(chanKey(ch.ID), val); err != nil {
+				return err
+			}
+			if err := txn.Delete(chanNetKey(netID, oldIRC)); err != nil {
+				return err
+			}
+			if err := txn.Set(chanNetKey(netID, newIRC), []byte(ch.ID)); err != nil {
+				return err
+			}
+			// Carry the prefill watermark so the renamed channel doesn't
+			// look fresh to the chathistory ask.
+			if wm, err := txn.Get(chatPrefillKey(netID, oldIRC)); err == nil {
+				_ = wm.Value(func(v []byte) error {
+					_ = txn.Set(chatPrefillKey(netID, newIRC), v)
+					return nil
+				})
+				_ = txn.Delete(chatPrefillKey(netID, oldIRC))
+			}
+			return nil
+		})
+	})
+}
+
 // DeleteNetworkCascade garbage-collects a network nobody is a member of
 // anymore: the network record, every channel registry entry (both the
 // chan/<id> record and the channet/<net>/<irc> index) and each channel's

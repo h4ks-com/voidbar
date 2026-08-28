@@ -1153,6 +1153,9 @@ func TestChannelTopicUpdate(t *testing.T) {
 						} else {
 							w(":fake 306 " + nick + " :You have been marked as being away\r\n")
 						}
+					case strings.HasPrefix(line, "RENAME"):
+						parts := strings.SplitN(strings.TrimPrefix(line, "RENAME "), " ", 3)
+						w(":" + nick + "!u@h RENAME " + parts[0] + " " + parts[1] + "\r\n")
 					case strings.HasPrefix(line, "TOPIC"):
 						topic := strings.TrimPrefix(line, "TOPIC ")
 						topic = topic[strings.Index(topic, " ")+1:]
@@ -1337,6 +1340,69 @@ func TestChannelTopicUpdate(t *testing.T) {
 	_, _ = io.Copy(io.Discard, oresp.Body)
 	_ = oresp.Body.Close()
 	waitPresence("online")
+
+	// Rename: PATCH with a name relays RENAME upstream; the broadcast
+	// (the fake echoes it) is what renames the registry and pushes
+	// CHANNEL_UPDATE - same id, new name.
+	nbody, _ := json.Marshal(map[string]string{"name": "renamed"})
+	nreq, _ := http.NewRequest("PATCH", srv.URL+"/api/v9/channels/"+channelID, bytes.NewReader(nbody))
+	nreq.Header.Set("Authorization", "Bearer "+token)
+	nreq.Header.Set("Content-Type", "application/json")
+	nresp, err := http.DefaultClient.Do(nreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nraw, _ := io.ReadAll(nresp.Body)
+	_ = nresp.Body.Close()
+	var patchedName map[string]any
+	_ = json.Unmarshal(nraw, &patchedName)
+	if nresp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH name: %d %s", nresp.StatusCode, nraw)
+	}
+	if patchedName["name"] != "renamed" {
+		t.Fatalf("PATCH name response: %v", patchedName["name"])
+	}
+	waitWire("RENAME #test #renamed")
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("no CHANNEL_UPDATE for the rename broadcast")
+		}
+		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(data, &p)
+		if p["t"] != "CHANNEL_UPDATE" {
+			continue
+		}
+		d, _ := p["d"].(map[string]any)
+		if d == nil || d["id"] != channelID || d["name"] != "renamed" {
+			continue
+		}
+		break
+	}
+	// Guild detail serves the new name afterwards.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("guild detail never carried the renamed channel")
+		}
+		if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+net.ID, token); err == nil {
+			var detail map[string]any
+			_ = json.Unmarshal(resp, &detail)
+			if chans, ok := detail["channels"].([]any); ok {
+				for _, c := range chans {
+					if cm := c.(map[string]any); cm["id"] == channelID && cm["name"] == "renamed" {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func TestScrollBackfillIntoNetworkHistory(t *testing.T) {

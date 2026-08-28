@@ -325,6 +325,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			// polling - including the echo of our own AWAY, which is what
 			// flips the member sidebar when the status picker changes.
 			"away-notify": nil,
+			// draft/channel-rename: without it eris walks us through a
+			// PART/JOIN fallback instead of the RENAME broadcast, which
+			// would tear the channel out of the registry's auto-join.
+			"draft/channel-rename": nil,
 		},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
@@ -625,6 +629,13 @@ func (m *Manager) registerHandlers(c *conn) {
 			// 332 after JOIN: seed the topic before the client ever opens
 			// the channel (guild assembly then serves it from the store).
 			m.applyTopic(c, e.Params[1], e.Last())
+			return
+		}
+		if e.Command == "RENAME" && len(e.Params) >= 2 {
+			// draft/channel-rename broadcast - our own rename included,
+			// girc flags it Echo. Same authoritative-broadcast pattern as
+			// the topic: nothing persists from the outgoing command.
+			m.applyRename(c, e.Params[0], e.Params[1])
 			return
 		}
 		if e.Command == "PRIVMSG" || e.Command == "NOTICE" {
@@ -1530,6 +1541,74 @@ func (m *Manager) SelfPresence(userID, networkID string) (string, bool) {
 		return "", false
 	}
 	return c.selfWireStatus(c.isAway(client.GetNick())), true
+}
+
+// applyRename is the authoritative sink for draft/channel-rename
+// broadcasts. The channel keeps its snowflake id, buffers and msgid
+// mappings; only the IRC name moves - on the wire, in the registry, and
+// in every member's auto-join.
+func (m *Manager) applyRename(c *conn, oldIRC, newIRC string) {
+	// The broadcast carries the server's spelling of the old name; the
+	// registry may hold a different case. Resolve through auto-join so a
+	// case difference doesn't orphan the record.
+	stored := oldIRC
+	if _, err := m.store.GetChannelByIRC(c.networkID, oldIRC); err != nil {
+		if mem, merr := m.store.GetMembership(c.networkID, c.userID); merr == nil {
+			for _, ch := range mem.AutoJoin {
+				if strings.EqualFold(ch, oldIRC) {
+					stored = ch
+					break
+				}
+			}
+		}
+	}
+	if err := m.store.RenameChannel(c.networkID, stored, newIRC); err != nil {
+		m.log.Warn("rename persist failed", "err", err, "from", stored, "to", newIRC)
+		return
+	}
+	// Every member's auto-join follows the channel to its new name.
+	if members, err := m.store.ListMemberships(c.networkID); err == nil {
+		for _, mem := range members {
+			changed := false
+			for i, ch := range mem.AutoJoin {
+				if strings.EqualFold(ch, stored) {
+					mem.AutoJoin[i] = newIRC
+					changed = true
+				}
+			}
+			if changed {
+				if err := m.store.UpsertMembership(mem); err != nil {
+					m.log.Warn("rename autojoin persist failed", "err", err, "user", mem.UserID)
+				}
+			}
+		}
+	}
+	if ch, err := m.store.GetChannelByIRC(c.networkID, newIRC); err == nil {
+		m.gw.Dispatch(c.userID, "CHANNEL_UPDATE", m.channelUpdatePayload(c, ch))
+		m.log.Info("channel renamed", "user", c.userID, "network", c.networkID, "from", stored, "to", newIRC)
+	}
+	m.notifyOccupancy(c, newIRC)
+}
+
+// RenameChannel relays a client rename upstream as draft/channel-rename.
+// Nothing persists here: a rejected rename (not op, name taken) never
+// broadcasts, so the registry keeps the network's truth.
+func (m *Manager) RenameChannel(userID, networkID, oldIRC, newIRC string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retry", networkID)
+	}
+	client.Send(&girc.Event{Command: "RENAME", Params: []string{oldIRC, newIRC}})
+	return nil
 }
 
 // registerMsgid records the msgid <-> Discord identity mapping.

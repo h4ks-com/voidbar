@@ -264,6 +264,25 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 			}
 		}
 	}
+	name := ch.Name
+	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+		raw := strings.TrimSpace(strings.TrimPrefix(*req.Name, "#"))
+		if raw == "" || strings.ContainsAny(raw, " ,:\x07") || len(raw) > 50 {
+			jsonError(w, http.StatusBadRequest, "invalid channel name")
+			return
+		}
+		if !strings.EqualFold(raw, ch.Name) {
+			if s.irc != nil {
+				// draft/channel-rename upstream; the broadcast echo is
+				// what persists (see Manager.applyRename).
+				if err := s.irc.RenameChannel(u.ID, ch.NetworkID, ch.IRCName, "#"+raw); err != nil {
+					jsonError(w, http.StatusServiceUnavailable, "upstream unavailable")
+					return
+				}
+			}
+		}
+		name = raw
+	}
 	position := 0
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil {
 		for i, name := range mem.AutoJoin {
@@ -276,7 +295,7 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":             ch.ID,
 		"guild_id":       ch.NetworkID,
-		"name":           ch.Name,
+		"name":           name,
 		"type":           0,
 		"position":       position,
 		"topic":          ircmanage.TopicValue(topic),

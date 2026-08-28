@@ -426,6 +426,119 @@ func TestStatusAway(t *testing.T) {
 	}
 }
 
+// TestChannelRename: a RENAME broadcast rewrites the registry (same
+// snowflake id) and every membership's auto-join, and our own rename
+// command is only a relay - the broadcast is the writer.
+func TestChannelRename(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + "\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+			case strings.HasPrefix(line, "RENAME"):
+				// The server broadcasts the rename to cap holders, the
+				// renamer included.
+				parts := strings.SplitN(strings.TrimPrefix(line, "RENAME "), " ", 3)
+				w(":" + nick + "!u@h RENAME " + parts[0] + " " + parts[1] + "\r\n")
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "histguy", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected") // joined (no chathistory on this fake)
+	// The registry entry is normally created by the network service at
+	// join time; this test wires the manager alone.
+	old, err := store.EnsureChannel("net1", "#test", func() string { return util.NewSnowflake(0, 0).New() })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.RenameChannel("u1", "net1", "#test", "#renamed"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, sink, "channel renamed")
+
+	// Registry: new name, same snowflake id.
+	renamed, err := store.GetChannelByIRC("net1", "#renamed")
+	if err != nil {
+		t.Fatal("renamed channel missing from registry")
+	}
+	if renamed.ID != old.ID {
+		t.Fatalf("rename minted a new id: %s -> %s", old.ID, renamed.ID)
+	}
+	if renamed.Name != "renamed" {
+		t.Fatalf("renamed Name: %q", renamed.Name)
+	}
+	// Auto-join follows.
+	mem, err := store.GetMembership("net1", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.AutoJoin) != 1 || mem.AutoJoin[0] != "#renamed" {
+		t.Fatalf("auto-join after rename: %v", mem.AutoJoin)
+	}
+}
+
 // TestNickCollisionDoesNotEatForeignMessages reproduces the reported bug:
 // the member's configured nick (doesnm) collides and the server renames the
 // bouncer to doesnm_. PRIVMSG from the OTHER user holding the original
