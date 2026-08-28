@@ -230,15 +230,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ## Not implemented yet
 
-- **Message features**: edits (upstream IRC has no edit to bridge to —
-  wait for the IRCv3 draft), attachments/file uploads, embeds, mentions,
+- **Message features**: attachments/file uploads, embeds, mentions,
   search. Pins serve an empty stub (`GET /channels/:id/pins`), which both
-  clients render as zero pinned messages. Deletes work on msgid-capable
-  upstreams:
-  `DELETE /channels/:id/messages/:id` relays as `draft/message-redaction`
-  (eris-dialect `REDACT <target> <msgid>`), dispatches MESSAGE_DELETE and
-  drops the buffered copy; on upstreams without redaction the delete is
-  bouncer-local (IRC peers keep the original).
+  clients render as zero pinned messages.
 - **Channel management UI**: rename/topic (topic renders as empty), channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
