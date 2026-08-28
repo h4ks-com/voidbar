@@ -12,6 +12,7 @@ import (
 
 	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/model"
+	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 )
 
@@ -429,6 +430,41 @@ func (s *Server) handleReactSelf(w http.ResponseWriter, r *http.Request, u *stor
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteMessage serves DELETE /channels/{c}/messages/{m}: the user
+// deleting their own message. Relayed upstream as draft/message-redaction
+// when the msgid is known and the upstream supports it (eris REDACT);
+// without an upstream path the deletion is bouncer-local — replay and all
+// sessions drop the message, IRC peers keep the original.
+func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	channelID := r.PathValue("channel")
+	messageID := r.PathValue("message")
+	if s.net == nil || s.irc == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	target, networkID := "", ""
+	if ch, err := s.net.ChannelByID(channelID); err == nil {
+		target, networkID = ch.IRCName, ch.NetworkID
+	} else if dm, err := s.net.DMChannelByID(channelID); err == nil && dm.OwnerID == u.ID {
+		target, networkID = dm.Nick, dm.NetworkID
+	} else {
+		jsonError(w, http.StatusNotFound, "unknown channel")
+		return
+	}
+	err := s.irc.DeleteMessage(u.ID, networkID, target, messageID, channelID)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, ircmanage.ErrUnknownMessage):
+		// Discord also answers 404 for unknown message ids.
+		jsonError(w, http.StatusNotFound, "unknown message")
+	case errors.Is(err, ircmanage.ErrNotOwner):
+		jsonError(w, http.StatusForbidden, err.Error())
+	default:
+		jsonError(w, http.StatusConflict, err.Error())
+	}
 }
 
 // handleCreateChannel is the client's "create channel": optimistic — IRC

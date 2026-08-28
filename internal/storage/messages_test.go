@@ -111,3 +111,26 @@ func TestBufferSurvivesReopen(t *testing.T) {
 	defer s2.Close()
 	eq(t, ids(s2.ChannelMessages("c1", "", "", 50)), []int64{5, 4, 3, 2, 1}, "after reopen")
 }
+
+func TestDeleteMessage(t *testing.T) {
+	s := openTest(t)
+	appendSeq(t, s, "c1", 1, 3)
+	if err := s.SetMessageMsgID("net1", "c1", "9000000000000000002", "m-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteMessage("net1", "c1", "9000000000000000002"); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, ids(s.ChannelMessages("c1", "", "", 50)), []int64{3, 1}, "deleted id gone")
+	// The msgid index entry went with it.
+	if _, _, ok := s.LookupMessageByMsgID("net1", "m-2"); ok {
+		t.Fatal("msgid index entry survived delete")
+	}
+	if got := s.MessageMsgID("c1", "9000000000000000002"); got != "" {
+		t.Fatalf("message readable after delete: %q", got)
+	}
+	// Deleting an unknown id is a no-op success.
+	if err := s.DeleteMessage("net1", "c1", "9000000000000000999"); err != nil {
+		t.Fatalf("unknown id delete: %v", err)
+	}
+}

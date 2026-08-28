@@ -150,6 +150,51 @@ func (s *Storage) AppendMessage(m BufferedMessage) error {
 	})
 }
 
+// MessageByID returns a buffered message by id.
+func (s *Storage) MessageByID(channelID, id string) (BufferedMessage, bool) {
+	var m BufferedMessage
+	ok := false
+	_ = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			return nil
+		}
+		return item.Value(func(val []byte) error {
+			if json.Unmarshal(val, &m) == nil {
+				ok = true
+			}
+			return nil
+		})
+	})
+	return m, ok
+}
+
+// DeleteMessage removes a buffered message together with its msgid index
+// entry, so deleted messages stay gone from replay and can no longer be
+// reaction/redaction targets. Unknown ids are a success no-op: callers
+// treat a missing message as already deleted.
+func (s *Storage) DeleteMessage(networkID, channelID, id string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil
+			}
+			return err
+		}
+		var m BufferedMessage
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &m) }); err != nil {
+			return err
+		}
+		if m.MsgID != "" {
+			if err := txn.Delete(msgidKey(networkID, m.MsgID)); err != nil {
+				return err
+			}
+		}
+		return txn.Delete(msgKey(channelID, id))
+	})
+}
+
 // UpdateMessageReactions replaces the reaction set stored on a message
 // (emoji -> user ids). Read-modify-write of the whole blob: reaction
 // traffic is tiny next to message writes, and no schema migration is

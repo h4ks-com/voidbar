@@ -787,3 +787,282 @@ func TestReactBothWays(t *testing.T) {
 		}
 	}
 }
+
+// TestDeleteBothWays: a REST DELETE of an own message relays upstream as
+// draft/message-redaction (REDACT <target> <msgid>) when the upstream
+// advertised the capability, dispatches MESSAGE_DELETE, and drops the
+// buffered copy; an inbound REDACT from an IRC peer does the same to the
+// Discord side; foreign messages are 403, unknown ids 404.
+func TestDeleteBothWays(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	var mu sync.Mutex
+	received := []string{}
+	nextMsgid := 0
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					mu.Lock()
+					received = append(received, line)
+					mu.Unlock()
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						_, _ = conn.Write([]byte("CAP * LS :message-tags echo-message draft/message-redaction\r\n"))
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+					case strings.HasPrefix(line, "PING"):
+						_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + ch + "\r\n"))
+						_, _ = conn.Write([]byte(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n"))
+						_, _ = conn.Write([]byte(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n"))
+					case strings.HasPrefix(line, "WHO "):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+						_, _ = conn.Write([]byte(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n"))
+					case strings.HasPrefix(line, "PRIVMSG"):
+						mu.Lock()
+						nextMsgid++
+						id := fmt.Sprintf("M%d", nextMsgid)
+						mu.Unlock()
+						_, _ = conn.Write([]byte("@msgid=" + id + " :" + nick + "!u@h " + line + "\r\n"))
+					}
+				}
+			}(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	var channelID string
+	for time.Now().Before(deadline) && channelID == "" {
+		guilds := []map[string]any{}
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			_ = json.Unmarshal(resp, &guilds)
+		}
+		if len(guilds) > 0 {
+			if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+guilds[0]["id"].(string), token); err == nil {
+				var detail map[string]any
+				_ = json.Unmarshal(resp, &detail)
+				if chans, ok := detail["channels"].([]any); ok {
+					for _, c := range chans {
+						if cm := c.(map[string]any); cm["name"] == "test" {
+							channelID, _ = cm["id"].(string)
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("channel never registered")
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/gateway/?v=9&encoding=json"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	recv := func() map[string]any {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p map[string]any
+		_ = json.Unmarshal(data, &p)
+		return p
+	}
+	_ = recv() // HELLO
+	if err := conn.WriteJSON(map[string]any{"op": 2, "d": map[string]any{"token": token}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		p := recv()
+		if p["t"] == "READY" {
+			break
+		}
+	}
+
+	fake, ok := <-conns
+	if !ok {
+		t.Fatal("fake server saw no connection")
+	}
+	waitForIRCContains := func(t *testing.T, needle string) {
+		t.Helper()
+		dl := time.Now().Add(5 * time.Second)
+		for time.Now().Before(dl) {
+			mu.Lock()
+			for _, l := range received {
+				if strings.Contains(l, needle) {
+					mu.Unlock()
+					return
+				}
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+		}
+		mu.Lock()
+		dump := append([]string{}, received...)
+		mu.Unlock()
+		t.Fatalf("fake never saw %q; got %q", needle, dump)
+	}
+	waitForIRCContains(t, "WHO #test")
+
+	// Own message: the echo binds the REST snowflake to msgid M1.
+	reqBody := `{"content":"to be deleted"}`
+	req, _ := http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&sent)
+	_ = resp.Body.Close()
+	ownID, _ := sent["id"].(string)
+	waitForIRCContains(t, "PRIVMSG #test")
+	time.Sleep(300 * time.Millisecond) // let the echo bind msgid -> snowflake
+
+	// REST DELETE relays upstream as REDACT with the bound msgid.
+	del, _ := http.NewRequest("DELETE", srv.URL+"/api/v9/channels/"+channelID+"/messages/"+ownID, nil)
+	del.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(del)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("own delete: %d", resp.StatusCode)
+	}
+	waitForIRCContains(t, "REDACT #test M1")
+
+	// The gateway tells every session the message is gone.
+	for {
+		p := recv()
+		if p["t"] == "MESSAGE_DELETE" {
+			d, _ := p["d"].(map[string]any)
+			if d["id"] != ownID || d["channel_id"] != channelID {
+				t.Fatalf("delete payload: %v", d)
+			}
+			break
+		}
+	}
+	// And buffered history agrees.
+	hist, err := httpGet(srv.URL+"/api/v9/channels/"+channelID+"/messages?limit=50", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := []map[string]any{}
+	_ = json.Unmarshal(hist, &msgs)
+	for _, m := range msgs {
+		if m["id"] == ownID {
+			t.Fatal("deleted message still in history")
+		}
+	}
+
+	// A foreign message arrives; deleting someone else's words is 403.
+	if _, err := fake.Write([]byte("@msgid=F1 :sleepy!u@h PRIVMSG #test :not yours\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	var foreignID string
+	for {
+		p := recv()
+		if p["t"] == "MESSAGE_CREATE" {
+			if d, _ := p["d"].(map[string]any); d["author"].(map[string]any)["username"] == "sleepy" {
+				foreignID, _ = d["id"].(string)
+				break
+			}
+		}
+	}
+	time.Sleep(300 * time.Millisecond) // let the buffer persist the foreign copy
+	forbidden, _ := http.NewRequest("DELETE", srv.URL+"/api/v9/channels/"+channelID+"/messages/"+foreignID, nil)
+	forbidden.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(forbidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign delete: %d", resp.StatusCode)
+	}
+
+	// An upstream REDACT of the foreign message bridges to MESSAGE_DELETE.
+	if _, err := fake.Write([]byte(":sleepy!u@h REDACT #test F1 :oops\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		p := recv()
+		if p["t"] == "MESSAGE_DELETE" {
+			d, _ := p["d"].(map[string]any)
+			if d["id"] != foreignID {
+				t.Fatalf("foreign delete payload: %v", d)
+			}
+			break
+		}
+	}
+
+	// Unknown ids answer like Discord: 404.
+	gone, _ := http.NewRequest("DELETE", srv.URL+"/api/v9/channels/"+channelID+"/messages/999", nil)
+	gone.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown delete: %d", resp.StatusCode)
+	}
+}
+

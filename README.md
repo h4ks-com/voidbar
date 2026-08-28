@@ -223,8 +223,13 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   history on join ( Ergo/solanum expose it, many networks don't —
   testnet.ergo.chat was probed but its hosting subnets were unreachable).
   History is also capped at 500 messages per channel (ring buffer).
-- **Message features**: edits/deletes (redaction), attachments/file
-  uploads, embeds, mentions, pins (empty stub), search.
+- **Message features**: edits (upstream IRC has no edit to bridge to —
+  wait for the IRCv3 draft), attachments/file uploads, embeds, mentions,
+  pins (empty stub), search. Deletes work on msgid-capable upstreams:
+  `DELETE /channels/:id/messages/:id` relays as `draft/message-redaction`
+  (eris-dialect `REDACT <target> <msgid>`), dispatches MESSAGE_DELETE and
+  drops the buffered copy; on upstreams without redaction the delete is
+  bouncer-local (IRC peers keep the original).
 - **Channel management UI**: rename/topic (topic renders as empty), channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered

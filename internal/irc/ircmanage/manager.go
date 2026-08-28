@@ -5,6 +5,7 @@
 package ircmanage
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -243,7 +244,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		// requested explicitly here for clarity: without it our own
 		// messages never come back and their msgids stay unknown, which
 		// kills reacting to our own messages from IRC peers.
-		SupportedCaps: map[string][]string{"draft/typing": nil, "echo-message": nil},
+		SupportedCaps: map[string][]string{"draft/typing": nil, "echo-message": nil, "draft/message-redaction": nil},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
 		// a bare (valueless) "sts" cap - which the eris fork advertises on
@@ -676,6 +677,20 @@ func (m *Manager) registerHandlers(c *conn) {
 		if emoji, ok := e.Tags.Get("+draft/unreact"); ok && emoji != "" {
 			m.applyReaction(c, e.Source.Name, reply, emoji, true)
 		}
+	})
+	// draft/message-redaction (eris dialect): REDACT <target> <msgid>
+	// [:reason] from another client deletes that message upstream; bridge
+	// it to MESSAGE_DELETE and drop the buffered copy so replay agrees.
+	c.client.Handlers.Add("REDACT", func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) < 2 {
+			return
+		}
+		// Our own REDACT echoes (the upstream relay includes the sender):
+		// the REST path already deleted and dispatched.
+		if strings.EqualFold(e.Source.Name, client.GetNick()) {
+			return
+		}
+		m.applyRedaction(c, e.Params[1])
 	})
 	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
 		m.notifyOccupancy(c, "")
@@ -1418,6 +1433,94 @@ func (m *Manager) dispatchReaction(c *conn, ref msgRef, userID, emoji string, re
 		event = "MESSAGE_REACTION_REMOVE"
 	}
 	m.gw.Dispatch(c.userID, event, payload)
+}
+
+// ErrUnknownMessage / ErrNotOwner gate the REST delete path: a message the
+// bouncer never buffered cannot be redacted, and IRC semantics let only the
+// author (or a channel op - not bridged yet) take a message back.
+var (
+	ErrUnknownMessage = errors.New("message not found")
+	ErrNotOwner       = errors.New("only the author can delete this message")
+)
+
+// applyRedaction bridges an inbound draft/message-redaction (REDACT from
+// another client) to MESSAGE_DELETE and forgets the buffered copy.
+func (m *Manager) applyRedaction(c *conn, msgid string) {
+	ref, ok := m.resolveRef(c, msgid)
+	if !ok {
+		m.log.Debug("redaction of unknown msgid", "user", c.userID, "msgid", msgid)
+		return
+	}
+	if err := m.store.DeleteMessage(c.networkID, ref.ChannelID, ref.Snowflake); err != nil {
+		m.log.Warn("redaction persist failed", "err", err, "msg", ref.Snowflake)
+	}
+	m.dispatchDelete(c, ref)
+}
+
+// dispatchDelete emits MESSAGE_DELETE for all sessions.
+func (m *Manager) dispatchDelete(c *conn, ref msgRef) {
+	payload := map[string]any{
+		"id":         ref.Snowflake,
+		"channel_id": ref.ChannelID,
+	}
+	if ref.GuildID != "" {
+		payload["guild_id"] = ref.GuildID
+	}
+	m.gw.Dispatch(c.userID, "MESSAGE_DELETE", payload)
+}
+
+// DeleteMessage relays a Discord message deletion (REST DELETE
+// /channels/{c}/messages/{m}) upstream as draft/message-redaction
+// (REDACT <target> <msgid>, the eris dialect), drops the buffered copy,
+// and dispatches MESSAGE_DELETE. Messages whose msgid is unknown (sent
+// before a bouncer restart, or an upstream without msgid) are deleted
+// bouncer-side only - IRC peers keep the original, which is the honest
+// limit of redaction on upstreams that never saw one.
+func (m *Manager) DeleteMessage(userID, networkID, target, messageID, channelID string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retrying", networkID)
+	}
+	msg, known := m.store.MessageByID(channelID, messageID)
+	if !known {
+		return ErrUnknownMessage
+	}
+	if msg.AuthorID != userID {
+		return ErrNotOwner
+	}
+	msgid, _ := c.lookupMsgid(messageID)
+	if msgid == "" {
+		msgid = msg.MsgID
+	}
+	if msgid != "" && client.HasCapability("draft/message-redaction") {
+		client.Send(&girc.Event{
+			Command: "REDACT",
+			Params:  []string{target, msgid, "deleted"},
+		})
+	} else {
+		m.log.Debug("bouncer-local delete: no msgid or upstream lacks redaction",
+			"user", userID, "msg", messageID, "msgid", msgid)
+	}
+	if err := m.store.DeleteMessage(networkID, channelID, messageID); err != nil {
+		m.log.Warn("delete persist failed", "err", err, "msg", messageID)
+	}
+	// Resolve the channel for the dispatch (REST knows only the target it
+	// was given; the registry is authoritative).
+	ref, ok := c.refBySnowflake(messageID)
+	if !ok {
+		ref = msgRef{Snowflake: messageID, ChannelID: channelID, GuildID: networkID}
+	}
+	m.dispatchDelete(c, ref)
+	return nil
 }
 
 // SendReaction relays a Discord reaction (REST PUT/DELETE @me) upstream as
