@@ -27,11 +27,18 @@ the client is the user's own repackaged build.
 
 ## Status
 
-Work in progress. The vertical slice is **working end-to-end against a live IRC
-network** with the Discord **Android** client, 126.21, repackaged with
-[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher):
-login → READY → age gate suppressed → channel
-history renders → send/receive relay in both directions, no crashes.
+Beta. The vertical slice is **working end-to-end against a live IRC
+network** with two client generations at once: the Discord **Android**
+client, 126.21, repackaged with
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher),
+and **web clients** (e.g. Flicker), which discover the instance via
+`/.well-known/spacebar`: login → READY → channel history renders →
+send/receive relay in both directions, no crashes.
+
+**Try it:** register an account, paste an `irc://` connection string as
+an invite, and point your client at the instance —
+[issues](https://github.com/h4ks-com/voidbar/issues) and crash reports
+welcome.
 
 Covered:
 
