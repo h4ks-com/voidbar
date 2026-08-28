@@ -243,15 +243,13 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   (re-pasting a string for the same network merges new channels in).
 - **Identity**: no nick change from the client (`/nick`), no away toggle
   from the client (upstream away of others renders as "idle"), no SASL
-  (only server password via `pass@` in the connection string); relayed
-  messages carry receive-time timestamps (server-time is not used for
-  history ordering).
+  (only server password via `pass@` in the connection string). Live
+  relays stamp receive time; network-fetched history (chathistory
+  prefill/backfill) carries server time, so ids and timestamps stay
+  chronological across both paths.
 - **Settings**: legacy client settings are persisted per user
   (`PATCH /users/@me/settings`); the Android client's appearance settings
   are not synced and reset on reload.
-- **Invites**: connection strings only — no shareable invite codes for
-  other users, no invite expiry/uses semantics (the payload claims
-  unlimited).
 - **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
   no admin UI, no per-user network management beyond the client.
 - Voice/video, threads, forums, stickers, guild discovery — out of scope
