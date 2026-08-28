@@ -47,3 +47,28 @@ func TestSettingsWithDefaultsEmpty(t *testing.T) {
 		t.Fatal("guild_folders not an array")
 	}
 }
+
+func TestSanitizeTheme(t *testing.T) {
+	cases := map[any]string{
+		"light":    "light",
+		"dark":     "dark",
+		"darker":   "dark", // web-only value: poison for 126.21
+		"midnight": "dark", // web-only value
+		"pureEvil": "dark", // old-Android-only value, web schemas reject it
+		"garbage":  "dark",
+		"":         "dark",
+		nil:        "dark",
+		42:         "dark",
+	}
+	for in, want := range cases {
+		if got := SanitizeTheme(in); got != want {
+			t.Fatalf("SanitizeTheme(%#v) = %q, want %q", in, got, want)
+		}
+	}
+	// The overlay path sanitizes: a web client may persist "darker", the
+	// served settings must carry the intersection value.
+	out := SettingsWithDefaults(map[string]any{"theme": "darker"})
+	if out["theme"] != "dark" {
+		t.Fatalf("overlay theme not sanitized: %v", out["theme"])
+	}
+}

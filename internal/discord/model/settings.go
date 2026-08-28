@@ -40,8 +40,22 @@ func SettingsWithDefaults(persisted map[string]any) map[string]any {
 	for k, v := range persisted {
 		out[k] = v
 	}
+	out["theme"] = SanitizeTheme(out["theme"])
 	out["guild_folders"] = normalizeGuildFolders(out["guild_folders"])
 	return out
+}
+
+// SanitizeTheme clamps the theme to the intersection of client
+// generations: old Android clients (126.21) only know dark/light/pureEvil
+// while web schemas know dark/light/darker/midnight. Serving a value
+// outside the intersection in READY sent the Android client into an
+// AppActivity relaunch loop (its theme resolution never settles), so
+// reads normalize: light stays light, everything else becomes dark.
+func SanitizeTheme(v any) string {
+	if s, ok := v.(string); ok && s == "light" {
+		return "light"
+	}
+	return "dark"
 }
 
 // normalizeGuildFolders coerces folder ids and guild_ids entries to their
