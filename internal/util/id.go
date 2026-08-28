@@ -15,6 +15,10 @@ type Snowflake struct {
 	process int64
 	lastMs  int64
 	seq     int64
+	// aux is a separate per-millisecond sequence space for time-anchored
+	// ids (NewAt), so minting ids in the past never disturbs the
+	// wall-clock monotonicity Next relies on.
+	aux map[int64]int64
 }
 
 func NewSnowflake(worker, process int64) *Snowflake {
@@ -40,6 +44,35 @@ func (s *Snowflake) Next() int64 {
 
 func (s *Snowflake) New() string {
 	return strconv.FormatInt(s.Next(), 10)
+}
+
+// NewAt mints a snowflake whose embedded timestamp comes from t instead of
+// the wall clock. Chathistory prefill needs this: fetched messages carry
+// server-time in the past, and both storage ordering and client rendering
+// sort by id, so a prefetched message's id must encode its own (past) time,
+// not the receive time. Time-anchored ids share the worker/process bits but
+// a separate per-ms sequence space starting at 1, so they cannot collide
+// with Next's ids (whose per-ms sequence starts at 0). The one theoretical
+// overlap is a NewAt clamped to "now" landing on a millisecond Next is also
+// bursting through - 50-message prefills make that unreachable in practice.
+func (s *Snowflake) NewAt(t time.Time) string {
+	ms := t.UnixMilli() - discordEpoch
+	if ms < 0 {
+		ms = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.aux == nil {
+		s.aux = make(map[int64]int64)
+	}
+	seq := s.aux[ms] + 1
+	for seq > 0xFFF { // >4096 ids in one ms: spill into the next millisecond
+		delete(s.aux, ms)
+		ms++
+		seq = s.aux[ms] + 1
+	}
+	s.aux[ms] = seq
+	return strconv.FormatInt((ms<<22)|(s.worker<<17)|(s.process<<12)|seq, 10)
 }
 
 func ParseSnowflake(v string) (int64, error) {

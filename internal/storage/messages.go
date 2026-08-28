@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 )
@@ -54,6 +55,34 @@ func msgPrefix(channelID string) []byte {
 
 func msgidKey(networkID, msgid string) []byte {
 	return []byte("ircmsgid:" + networkID + ":" + msgid)
+}
+
+func chatPrefillKey(networkID, ircChannel string) []byte {
+	return []byte("chatprefill:" + networkID + ":" + ircChannel)
+}
+
+// ChatPrefillDone reports whether the chathistory prefill already completed
+// for this channel. Reconnects re-JOIN every channel; without the mark each
+// reconnect would re-request and re-deliver the same history batch.
+func (s *Storage) ChatPrefillDone(networkID, ircChannel string) bool {
+	ok := false
+	_ = s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(chatPrefillKey(networkID, ircChannel))
+		if err == nil {
+			ok = true
+		}
+		return nil
+	})
+	return ok
+}
+
+// MarkChatPrefill records that prefill completed; the value is the
+// completion time, kept for debugging.
+func (s *Storage) MarkChatPrefill(networkID, ircChannel string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(chatPrefillKey(networkID, ircChannel),
+			[]byte(time.Now().UTC().Format(time.RFC3339)))
+	})
 }
 
 // SetMessageMsgID binds a buffered message to its upstream IRC msgid and

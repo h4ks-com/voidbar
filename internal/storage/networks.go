@@ -538,11 +538,15 @@ func (s *Storage) DeleteNetworkCascade(netID string) error {
 		}
 		// Collect first, delete after: mutating while iterating a badger
 		// txn skips entries.
-		var memberKeys, chanIdxKeys, chanIDs [][]byte
+		var memberKeys, chanIdxKeys, chanIDs, prefillKeys [][]byte
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		mp := []byte("member/" + netID + "/")
 		for it.Seek(mp); it.ValidForPrefix(mp); it.Next() {
 			memberKeys = append(memberKeys, it.Item().KeyCopy(nil))
+		}
+		pp := []byte("chatprefill:" + netID + ":")
+		for it.Seek(pp); it.ValidForPrefix(pp); it.Next() {
+			prefillKeys = append(prefillKeys, it.Item().KeyCopy(nil))
 		}
 		cp := []byte("channet/" + netID + "/")
 		for it.Seek(cp); it.ValidForPrefix(cp); it.Next() {
@@ -555,6 +559,11 @@ func (s *Storage) DeleteNetworkCascade(netID string) error {
 		}
 		it.Close()
 		for _, k := range memberKeys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		for _, k := range prefillKeys {
 			if err := txn.Delete(k); err != nil {
 				return err
 			}

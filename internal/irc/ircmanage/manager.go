@@ -117,6 +117,12 @@ type conn struct {
 	// MESSAGE_REACTION_ADD/REMOVE).
 	reactMu   sync.Mutex
 	reactions map[string]map[string]map[string]bool
+
+	// chatBatches holds in-flight draft/chathistory batches by reference;
+	// frames accumulate here until the BATCH close flushes them into the
+	// buffer (prefill). Only touched from the connection's event loop.
+	batchMu    sync.Mutex
+	chatBatches map[string]*chatBatch
 }
 
 // msgRef is the Discord identity of one bridged IRC message.
@@ -124,6 +130,43 @@ type msgRef struct {
 	Snowflake string
 	ChannelID string
 	GuildID   string
+}
+
+// openChatBatch registers a chathistory batch reference.
+func (c *conn) openChatBatch(ref string, acc *chatBatch) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if c.chatBatches == nil {
+		c.chatBatches = make(map[string]*chatBatch)
+	}
+	c.chatBatches[ref] = acc
+}
+
+// closeChatBatch unregisters a batch reference and returns its accumulator.
+func (c *conn) closeChatBatch(ref string) *chatBatch {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	acc := c.chatBatches[ref]
+	delete(c.chatBatches, ref)
+	return acc
+}
+
+// chatBatchActive reports whether a batch reference is being accumulated.
+func (c *conn) chatBatchActive(ref string) bool {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	_, ok := c.chatBatches[ref]
+	return ok
+}
+
+// appendChatFrame adds one frame to a batch reference (no-op for unknown
+// references: frames of untracked batch types are not history).
+func (c *conn) appendChatFrame(ref string, f chatFrame) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if acc, ok := c.chatBatches[ref]; ok {
+		acc.frames = append(acc.frames, f)
+	}
 }
 
 // setAway records a nick's away state and reports whether it changed.
@@ -244,7 +287,16 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		// requested explicitly here for clarity: without it our own
 		// messages never come back and their msgids stay unknown, which
 		// kills reacting to our own messages from IRC peers.
-		SupportedCaps: map[string][]string{"draft/typing": nil, "echo-message": nil, "draft/message-redaction": nil},
+		// server-time + batch + draft/chathistory power the join prefill:
+		// history frames arrive in a batch stamped with @time/@msgid.
+		SupportedCaps: map[string][]string{
+			"draft/typing":          nil,
+			"echo-message":          nil,
+			"draft/message-redaction": nil,
+			"server-time":           nil,
+			"batch":                 nil,
+			"draft/chathistory":     nil,
+		},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
 		// a bare (valueless) "sts" cap - which the eris fork advertises on
@@ -267,6 +319,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		msgidToRef:   make(map[string]msgRef),
 		pendingSend:  make(map[string][]msgRef),
 		reactions:    make(map[string]map[string]map[string]bool),
+		chatBatches:  make(map[string]*chatBatch),
 	}
 	m.conns[k] = c
 
@@ -480,6 +533,11 @@ func (m *Manager) notifyOccupancy(c *conn, ircChannel string) {
 
 func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.PRIVMSG, func(client *girc.Client, e girc.Event) {
+		// Chathistory frames arrive as ordinary PRIVMSGs with a batch tag;
+		// they are backlog, not live traffic - the batch flush owns them.
+		if m.inChatBatch(c, e) {
+			return
+		}
 		// girc already filters echoes natively: events whose source equals
 		// the CURRENT nick (GetID, i.e. post-collision) are flagged Echo and
 		// never reach command handlers (girc conn.go/handler.go). Do NOT
@@ -494,7 +552,20 @@ func (m *Manager) registerHandlers(c *conn) {
 	// ALL_EVENTS handlers see them. The echo carries the msgid the server
 	// stamped on our PRIVMSG; popping the pending identity for the target
 	// completes the snowflake <-> msgid mapping reactions need.
+	// This handler also owns the chathistory batches: BATCH open/close
+	// control frames and the batched history PRIVMSGs (own past messages
+	// included - girc flags those Echo too, so they can only be seen here).
 	c.client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, e girc.Event) {
+		if e.Command == "BATCH" {
+			m.chatBatchControl(c, e)
+			return
+		}
+		if e.Command == "PRIVMSG" || e.Command == "NOTICE" {
+			if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.chatBatchActive(ref) {
+				m.chatBatchFrame(c, e, ref)
+				return
+			}
+		}
 		if !e.Echo || (e.Command != "PRIVMSG" && e.Command != "NOTICE") || len(e.Params) == 0 {
 			return
 		}
@@ -579,6 +650,8 @@ func (m *Manager) registerHandlers(c *conn) {
 		// Our own join echo confirms a pending optimistic channel-create.
 		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
 			c.clearPending(e.Params[0])
+			// Freshly joined: ask the upstream for recent history once.
+			m.maybeChatPrefill(c, e.Params[0])
 		}
 		if len(e.Params) > 0 {
 			m.notifyOccupancy(c, e.Params[0])
@@ -651,6 +724,10 @@ func (m *Manager) registerHandlers(c *conn) {
 	// MESSAGE_REACTION_ADD / MESSAGE_REACTION_REMOVE.
 	c.client.Handlers.Add("TAGMSG", func(client *girc.Client, e girc.Event) {
 		if e.Source == nil || len(e.Params) == 0 {
+			return
+		}
+		// Chathistory frames can be TAGMSGs too: backlog, not live.
+		if m.inChatBatch(c, e) {
 			return
 		}
 		// Our own TAGMSG echoes (react/typing) must not loop back.
@@ -806,37 +883,10 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// Snowflake message id is mandatory: the client's message store drops
 	// MESSAGE_CREATE payloads without one.
 	msgID := m.sf.New()
-	payload := map[string]any{
-		"id":               msgID,
-		"channel_id":       channelID,
-		"content":          content,
-		"timestamp":        ts,
-		"edited_timestamp": nil,
-		"tts":              false,
-		"mention_everyone": false,
-		"mentions":         []any{},
-		"mention_roles":    []any{},
-		"mention_channels": []any{},
-		"attachments":      []any{},
-		"embeds":           []any{},
-		"reactions":        []any{},
-		"nonce":            nil,
-		"pinned":           false,
-		"type":             0,
-		"flags":            0,
-		"author": map[string]any{
-			"id":            model.IrcAuthorID("irc:" + author),
-			"username":      author,
-			"discriminator": "0",
-			"bot":           false,
-		},
-	}
+	payload := buildMessagePayload(msgID, channelID, author, content, ts)
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: c.networkID}, msgid)
-		if err := m.store.SetMessageMsgID(c.networkID, channelID, msgID, msgid); err != nil {
-			m.log.Debug("msgid persist failed", "err", err, "channel", channelID, "msg", msgID)
-		}
 	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	// Persist into the channel's replay buffer (bouncer semantics: history
@@ -850,8 +900,16 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		Content:    content,
 		Timestamp:  ts,
 		Type:       0,
+		MsgID:      msgid,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
+	} else if msgid != "" {
+		// The reverse index needs the buffer row in place first; before
+		// this, foreign relays never persisted their msgid anchor (Set
+		// ran before Append and failed with KeyNotFound, debug-logged).
+		if err := m.store.SetMessageMsgID(c.networkID, channelID, msgID, msgid); err != nil {
+			m.log.Debug("msgid persist failed", "err", err, "channel", channelID, "msg", msgID)
+		}
 	}
 }
 
@@ -900,9 +958,6 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
-		if err := m.store.SetMessageMsgID(c.networkID, dm.ID, msgID, msgid); err != nil {
-			m.log.Debug("msgid persist failed", "err", err, "dm", dm.ID, "msg", msgID)
-		}
 	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	if err := m.store.AppendMessage(storage.BufferedMessage{
@@ -913,8 +968,14 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 		Content:    content,
 		Timestamp:  ts,
 		Type:       0,
+		MsgID:      msgid,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
+	} else if msgid != "" {
+		// The reverse index needs the buffer row in place first.
+		if err := m.store.SetMessageMsgID(c.networkID, dm.ID, msgID, msgid); err != nil {
+			m.log.Debug("msgid persist failed", "err", err, "dm", dm.ID, "msg", msgID)
+		}
 	}
 	if err := m.store.TouchDMChannel(dm.ID); err != nil {
 		m.log.Warn("dm touch failed", "err", err, "dm", dm.ID)

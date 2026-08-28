@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1060,5 +1061,147 @@ func TestQueryRelayCreatesDM(t *testing.T) {
 	msgs := store.ChannelMessages(dms[0].ID, "", "", 50)
 	if len(msgs) != 2 || msgs[1].Content != "hi there" || msgs[0].Content != "again" {
 		t.Fatalf("dm buffer: %+v", msgs)
+	}
+}
+
+// serveChathistory: negotiates the prefill caps, echoes JOINs, and answers
+// CHATHISTORY with a newest-first batch. A second, unsolicited batch mixes
+// one overlapping msgid with one new frame to pin the dedup.
+func serveChathistory(conn net.Conn, asks *int32) {
+	go func() {
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :server-time batch draft/chathistory\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ"))
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK"):
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome to fake\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				w(":" + nick + "!u@h JOIN " + strings.TrimPrefix(line, "JOIN ") + "\r\n")
+			case strings.HasPrefix(line, "CHATHISTORY"):
+				atomic.AddInt32(asks, 1)
+				// Newest first, as LATEST answers arrive. Batch 1 uses the
+				// eris shape (target right after the type); batch 2 uses
+				// the spec-echo shape (subcommand, then target).
+				w(":fake BATCH +b1 draft/chathistory #test\r\n")
+				w("@time=2026-01-01T10:00:05.000Z;msgid=m-new;batch=b1 :bob!b@h PRIVMSG #test :newest\r\n")
+				w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b1 :alice!a@h PRIVMSG #test :oldest\r\n")
+				w(":fake BATCH -b1\r\n")
+				// Overlap (m-old again) plus one new message.
+				w(":fake BATCH +b2 draft/chathistory LATEST #test * 50\r\n")
+				w("@time=2026-01-01T10:00:03.000Z;msgid=m-mid;batch=b2 :carol!c@h PRIVMSG #test :middle\r\n")
+				w("@time=2026-01-01T10:00:00.000Z;msgid=m-old;batch=b2 :alice!a@h PRIVMSG #test :oldest\r\n")
+				w(":fake BATCH -b2\r\n")
+			}
+		}
+	}()
+}
+
+// TestChatHistoryPrefill: joining a channel on a chathistory-capable
+// upstream prefills the replay buffer from the server's history - deduped
+// by msgid, ordered by server time, timestamped from @time, msgid-anchored
+// - and the persisted watermark keeps reconnects from re-asking.
+func TestChatHistoryPrefill(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var asks int32
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			serveChathistory(conn, &asks)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "histguy", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitForCount(t, sink, "chathistory prefill applied", 2) // both batches
+
+	ch, err := store.GetChannelByIRC("net1", "#test")
+	if err != nil {
+		t.Fatalf("channel: %v", err)
+	}
+	msgs := store.ChannelMessages(ch.ID, "", "", 50)
+	if len(msgs) != 3 {
+		t.Fatalf("want 3 prefilled messages (dup deduped), got %d: %+v", len(msgs), msgs)
+	}
+	// Newest first, server-time order restored from a newest-first batch.
+	wantContents := []string{"newest", "middle", "oldest"}
+	wantTS := []string{"2026-01-01T10:00:05Z", "2026-01-01T10:00:03Z", "2026-01-01T10:00:00Z"}
+	for i, m := range msgs {
+		if m.Content != wantContents[i] || m.Timestamp != wantTS[i] {
+			t.Fatalf("msg[%d]: got %q @%s, want %q @%s", i, m.Content, m.Timestamp, wantContents[i], wantTS[i])
+		}
+		id, err := util.ParseSnowflake(m.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ts := util.SnowflakeTime(id); ts.Format(time.RFC3339) != wantTS[i] {
+			t.Fatalf("msg[%d] snowflake encodes %s, want %s", i, ts.Format(time.RFC3339), wantTS[i])
+		}
+	}
+	// msgid anchoring: prefilled messages are reactable/deletable.
+	if got := store.MessageMsgID(ch.ID, msgs[2].ID); got != "m-old" {
+		t.Fatalf("msgid anchor: got %q, want m-old", got)
+	}
+	if !store.ChatPrefillDone("net1", "#test") {
+		t.Fatal("prefill watermark not set")
+	}
+
+	// Reconnect: the watermark must keep the re-JOIN from re-asking.
+	first := <-conns
+	_ = first.Close()
+	waitForCount(t, sink, "irc connected", 2)
+	time.Sleep(500 * time.Millisecond)
+	if n := atomic.LoadInt32(&asks); n != 1 {
+		t.Fatalf("reconnect re-asked chathistory: %d requests", n)
 	}
 }
