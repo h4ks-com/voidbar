@@ -232,7 +232,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 - **Message features**: edits (upstream IRC has no edit to bridge to —
   wait for the IRCv3 draft), attachments/file uploads, embeds, mentions,
-  pins (empty stub), search. Deletes work on msgid-capable upstreams:
+  search. Pins serve an empty stub (`GET /channels/:id/pins`), which both
+  clients render as zero pinned messages. Deletes work on msgid-capable
+  upstreams:
   `DELETE /channels/:id/messages/:id` relays as `draft/message-redaction`
   (eris-dialect `REDACT <target> <msgid>`), dispatches MESSAGE_DELETE and
   drops the buffered copy; on upstreams without redaction the delete is
