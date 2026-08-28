@@ -486,7 +486,7 @@ func (m *Manager) registerHandlers(c *conn) {
 		// nick after a collision rename, which silently ate the foreign
 		// user's messages.
 		msgid, _ := e.Tags.Get("msgid")
-		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), time.Now().UTC().Format(time.RFC3339), msgid)
+		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), model.NowTimestamp(), msgid)
 	})
 
 	// Own-message echo (echo-message cap): girc flags them Echo and only
@@ -739,7 +739,7 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 	if time.Since(dm.CreatedAt) < 3*time.Second {
 		m.gw.Dispatch(userID, "CHANNEL_CREATE", m.dmChannelPayload(dm))
 	}
-	ts := time.Now().UTC().Format(time.RFC3339)
+	ts := model.NowTimestamp()
 	msgID := m.sf.New()
 	m.gw.Dispatch(userID, "MESSAGE_CREATE", map[string]any{
 		"id":               msgID,
