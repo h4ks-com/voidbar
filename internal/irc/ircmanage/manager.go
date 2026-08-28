@@ -309,12 +309,16 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		// server-time + batch + draft/chathistory power the join prefill:
 		// history frames arrive in a batch stamped with @time/@msgid.
 		SupportedCaps: map[string][]string{
-			"draft/typing":          nil,
-			"echo-message":          nil,
+			"draft/typing":            nil,
+			"echo-message":            nil,
 			"draft/message-redaction": nil,
-			"server-time":           nil,
-			"batch":                 nil,
-			"draft/chathistory":     nil,
+			"server-time":             nil,
+			"batch":                   nil,
+			"draft/chathistory":       nil,
+			// Push-based presence: AWAY/BACK broadcasts instead of WHO
+			// polling - including the echo of our own AWAY, which is what
+			// flips the member sidebar when the status picker changes.
+			"away-notify": nil,
 		},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
@@ -605,7 +609,8 @@ func (m *Manager) registerHandlers(c *conn) {
 			// showing our old presence. Handle every AWAY here first; for
 			// other users the dedicated handler then sees an unchanged
 			// state and stays quiet.
-			if c.setAway(e.Source.Name, e.Last() != "") {
+			changed := c.setAway(e.Source.Name, e.Last() != "")
+			if changed {
 				m.notifyOccupancy(c, "")
 			}
 			return
@@ -748,14 +753,18 @@ func (m *Manager) registerHandlers(c *conn) {
 		}
 		m.notifyOccupancy(c, "")
 	})
-	// away-notify pushes AWAY (with message) / BACK (bare) for users in
-	// shared channels - zero polling, the only source of away truth on
-	// capabale servers. Away shows as Discord "idle".
-	c.client.Handlers.Add(girc.AWAY, func(client *girc.Client, e girc.Event) {
-		if e.Source == nil {
-			return
+	// away-notify AWAY/BACK broadcasts for OTHER users are handled in the
+	// ALL_EVENTS branch (see registerHandlers top) - including the echo of
+	// our own AWAY on servers that send it. eris does NOT self-echo; it
+	// confirms with the classic numerics, which are the universal own-away
+	// signal (every server sends 305/306 in response to AWAY):
+	c.client.Handlers.Add(girc.RPL_UNAWAY, func(client *girc.Client, e girc.Event) {
+		if c.setAway(client.GetNick(), false) {
+			m.notifyOccupancy(c, "")
 		}
-		if c.setAway(e.Source.Name, e.Last() != "") {
+	})
+	c.client.Handlers.Add(girc.RPL_NOWAWAY, func(client *girc.Client, e girc.Event) {
+		if c.setAway(client.GetNick(), true) {
 			m.notifyOccupancy(c, "")
 		}
 	})

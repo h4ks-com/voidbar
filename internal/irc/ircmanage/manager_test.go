@@ -283,9 +283,14 @@ func TestStatusAway(t *testing.T) {
 			case strings.HasPrefix(line, "PING"):
 				w("PONG" + line[4:] + "\r\n")
 			case strings.HasPrefix(line, "AWAY"):
-				// away-notify echo: the server broadcasts our own AWAY
-				// back to us - the path the sidebar presence must ride.
-				w(":" + nick + "!u@h " + line + "\r\n")
+				// eris shape: no away-notify self-echo - the AWAY is
+				// confirmed with the classic 305/306 numerics, which is
+				// what the own-presence tracking rides on.
+				if line == "AWAY" {
+					w(":fake 305 " + nick + " :You are no longer marked as being away\r\n")
+				} else {
+					w(":fake 306 " + nick + " :You have been marked as being away\r\n")
+				}
 			case strings.HasPrefix(line, "JOIN"):
 				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
 				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
