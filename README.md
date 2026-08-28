@@ -53,10 +53,14 @@ Covered:
   network (channels, replay buffers) is garbage-collected when the last
   member leaves
 - **Channel management**: create channels from the client (IRC servers
-  create channels on JOIN, so creates are optimistic; an upstream refusal —
-  invite-only, banned, account-required, +k, full — rolls the channel back
-  and Clyde DMs the reason) and delete them (PART; history is kept, so
-  re-adding the channel recovers it)
+  don't offer a create API; creates are optimistic JOINs - an upstream
+  refusal: invite-only, banned, account-required, +k, full - rolls the
+  channel back and Clyde DMs the reason) and delete them (PART; history
+  is kept, so re-adding the channel recovers it). Topics round-trip both
+  ways: client edits relay as `TOPIC`, and every network broadcast
+  (join's RPL_TOPIC, peers, our echo) persists and dispatches
+  `CHANNEL_UPDATE`; a rejection upstream (+t, not op) never corrupts the
+  stored truth.
 - **Discord → IRC**: typing in the client reaches the IRC channel (own nick,
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
@@ -233,7 +237,7 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Message features**: attachments/file uploads, embeds, mentions,
   search. Pins serve an empty stub (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
-- **Channel management UI**: rename/topic (topic renders as empty), channel
+- **Channel management UI**: rename, channel
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
   (re-pasting a string for the same network merges new channels in).
