@@ -65,6 +65,14 @@ Covered:
   (Badger) and served over `GET /channels/:id/messages` with Discord
   pagination (`limit`/`before`/`after`); own sends are buffered too, and
   history survives server restarts
+- **Chathistory prefill**: on upstreams that offer `draft/chathistory`
+  (eris, ergo, soju), joining a channel asks the network for its most
+  recent 50 messages and merges them into the replay buffer - server-time
+  timestamps, time-anchored snowflakes (id order stays chronological),
+  msgid-anchored so prefilled messages are reactable/deletable, deduped
+  against everything the bouncer ever buffered, and one-shot per channel
+  (a persisted watermark keeps reconnects from re-asking). Networks
+  without the cap keep bouncer-only history.
 
 ## Android client
 
@@ -218,11 +226,11 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ## Not implemented yet
 
-- **History prefill via `draft/chathistory`**: the bouncer replays only what
-  it saw while connected; it does not ask the upstream server for older
-  history on join ( Ergo/solanum expose it, many networks don't —
-  testnet.ergo.chat was probed but its hosting subnets were unreachable).
-  History is also capped at 500 messages per channel (ring buffer).
+- **History beyond the prefill**: `draft/chathistory` prefill covers the
+  first 50 messages after a join; scrolling further back stops at the
+  bouncer's own ring buffer (500 per channel) - asking the upstream for
+  progressively older pages ("infinite scroll" into network history) is
+  not bridged yet.
 - **Message features**: edits (upstream IRC has no edit to bridge to —
   wait for the IRCv3 draft), attachments/file uploads, embeds, mentions,
   pins (empty stub), search. Deletes work on msgid-capable upstreams:
