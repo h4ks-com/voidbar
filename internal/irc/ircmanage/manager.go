@@ -90,6 +90,12 @@ type conn struct {
 	awayMu sync.Mutex
 	away   map[string]bool
 
+	// ownStatus remembers WHICH Discord status the user picked while away
+	// (idle vs dnd): IRC's AWAY is a single bit, but the client's bottom
+	// panel renders the exact status back from PRESENCE_UPDATE.
+	statusMu  sync.Mutex
+	ownStatus string
+
 	// typingLast throttles inbound draft/typing TAGMSG relays per
 	// (nick, target): clients display typing for several seconds, so
 	// forwarding everything a chatty upstream sends is pure noise.
@@ -761,11 +767,13 @@ func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.RPL_UNAWAY, func(client *girc.Client, e girc.Event) {
 		if c.setAway(client.GetNick(), false) {
 			m.notifyOccupancy(c, "")
+			m.dispatchSelfPresence(c, "online")
 		}
 	})
 	c.client.Handlers.Add(girc.RPL_NOWAWAY, func(client *girc.Client, e girc.Event) {
 		if c.setAway(client.GetNick(), true) {
 			m.notifyOccupancy(c, "")
+			m.dispatchSelfPresence(c, c.selfWireStatus(true))
 		}
 	})
 	// Classic WHO replies: the H/G flag in params[6] carries away state.
@@ -1465,6 +1473,9 @@ func (m *Manager) applyStatus(c *conn, status string) {
 	if client == nil {
 		return
 	}
+	c.statusMu.Lock()
+	c.ownStatus = status
+	c.statusMu.Unlock()
 	switch status {
 	case "online":
 		client.Send(&girc.Event{Command: "AWAY"})
@@ -1474,6 +1485,51 @@ func (m *Manager) applyStatus(c *conn, status string) {
 		client.Send(&girc.Event{Command: "AWAY", Params: []string{"do not disturb"}})
 	}
 	m.log.Debug("status applied", "user", c.userID, "network", c.networkID, "status", status)
+}
+
+// selfWireStatus is the Discord status the client should render for this
+// connection's own user right now. Away carries the picked status (idle
+// vs dnd); not away is online; invisible never sends AWAY, so the wire
+// never disagrees with the picker's no-op.
+func (c *conn) selfWireStatus(away bool) string {
+	if !away {
+		return "online"
+	}
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	if c.ownStatus == "dnd" {
+		return "dnd"
+	}
+	return "idle"
+}
+
+// dispatchSelfPresence pushes the own-user presence to the client: the
+// bottom panel and the settings sheet render from PRESENCE_UPDATE, not
+// from the member list.
+func (m *Manager) dispatchSelfPresence(c *conn, status string) {
+	m.gw.Dispatch(c.userID, "PRESENCE_UPDATE", map[string]any{
+		"user":          map[string]any{"id": c.userID},
+		"status":        status,
+		"activities":    []any{},
+		"client_status": map[string]any{},
+	})
+}
+
+// SelfPresence reports the Discord wire status of a bouncer user's live
+// connection (for guild presences). Missing connections report false -
+// absence of a presence renders as offline, which is the honest shape.
+func (m *Manager) SelfPresence(userID, networkID string) (string, bool) {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if client == nil {
+		return "", false
+	}
+	return c.selfWireStatus(c.isAway(client.GetNick())), true
 }
 
 // registerMsgid records the msgid <-> Discord identity mapping.

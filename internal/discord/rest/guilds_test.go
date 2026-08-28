@@ -1145,6 +1145,14 @@ func TestChannelTopicUpdate(t *testing.T) {
 					case strings.HasPrefix(line, "WHO "):
 						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
 						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+					case strings.HasPrefix(line, "AWAY"):
+						// eris shape: 305/306 numerics confirm the AWAY;
+						// they are what drives the self PRESENCE_UPDATE.
+						if line == "AWAY" {
+							w(":fake 305 " + nick + " :You are no longer marked as being away\r\n")
+						} else {
+							w(":fake 306 " + nick + " :You have been marked as being away\r\n")
+						}
 					case strings.HasPrefix(line, "TOPIC"):
 						topic := strings.TrimPrefix(line, "TOPIC ")
 						topic = topic[strings.Index(topic, " ")+1:]
@@ -1284,6 +1292,51 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatalf("PATCH settings: %d", sresp.StatusCode)
 	}
 	waitWire("AWAY :do not disturb")
+
+	// The 306 numeric must also push the own-user PRESENCE_UPDATE (the
+	// bottom panel and settings sheet render from it) - carrying the
+	// picked status, not just the away bit.
+	waitPresence := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("no PRESENCE_UPDATE with status %q", want)
+			}
+			_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, data, err := ws.ReadMessage()
+			if err != nil {
+				continue
+			}
+			var p map[string]any
+			_ = json.Unmarshal(data, &p)
+			if p["t"] != "PRESENCE_UPDATE" {
+				continue
+			}
+			d, _ := p["d"].(map[string]any)
+			if d == nil || d["status"] != want {
+				continue
+			}
+			if u, _ := d["user"].(map[string]any); u == nil || u["id"] != user.ID {
+				continue
+			}
+			return
+		}
+	}
+	waitPresence("dnd")
+
+	// And back: online's 305 pushes PRESENCE_UPDATE online.
+	obody, _ := json.Marshal(map[string]string{"status": "online"})
+	oreq, _ := http.NewRequest("PATCH", srv.URL+"/api/v9/users/@me/settings", bytes.NewReader(obody))
+	oreq.Header.Set("Authorization", "Bearer "+token)
+	oreq.Header.Set("Content-Type", "application/json")
+	oresp, err := http.DefaultClient.Do(oreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, oresp.Body)
+	_ = oresp.Body.Close()
+	waitPresence("online")
 }
 
 func TestScrollBackfillIntoNetworkHistory(t *testing.T) {

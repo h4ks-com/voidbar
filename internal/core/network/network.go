@@ -941,6 +941,22 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// "Delete server" owner flow stays hidden, "Leave server" shows).
 	members = append(members, model.ClydeMember(net.CreatedAt.Format(time.RFC3339)))
 
+	// Bouncer members get real presences: the client's bottom panel and
+	// settings sheet render the OWN user from presences/PRESENCE_UPDATE,
+	// not from the member list - skipping member rows here left the panel
+	// stuck on the boot default. Members without a live connection carry
+	// no presence (renders offline).
+	if s.manager != nil {
+		for _, mem := range all {
+			if st, ok := s.manager.SelfPresence(mem.UserID, net.ID); ok {
+				presences = append(presences, map[string]any{
+					"user":   map[string]any{"id": mem.UserID},
+					"status": st,
+				})
+			}
+		}
+	}
+
 	for _, cm := range occupants {
 		// Occupants that ARE a member's live nick were emitted above.
 		if memberNicks[strings.ToLower(cm.Nick)] {
