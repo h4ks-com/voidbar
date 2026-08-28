@@ -60,7 +60,10 @@ Covered:
   ways: client edits relay as `TOPIC`, and every network broadcast
   (join's RPL_TOPIC, peers, our echo) persists and dispatches
   `CHANNEL_UPDATE`; a rejection upstream (+t, not op) never corrupts the
-  stored truth.
+  stored truth. Renames relay as `draft/channel-rename RENAME`; the
+  broadcast rewrites the registry under the same snowflake id and every
+  membership's auto-join, and a rejected rename (not op, name taken)
+  leaves the old truth standing.
 - **Discord → IRC**: typing in the client reaches the IRC channel (own nick,
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
@@ -242,9 +245,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Message features**: attachments/file uploads, embeds, mentions,
   search. Pins serve an empty stub (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
-- **Channel management UI**: rename, channel
+- **Channel management UI**: channel
   categories, keyed channels (+k) — auto-join channels from the connection
-  string and runtime create/delete are covered
+  string and runtime create/delete/rename/topic are covered
   (re-pasting a string for the same network merges new channels in).
 - **Identity**: no nick change from the client (`/nick`), no SASL
 - **Settings**: legacy client settings are persisted per user
