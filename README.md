@@ -219,6 +219,11 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   fallback for servers without the cap).
 - **Upstream auto-reconnect** with backoff; nick collisions survive
   (the live wire nick is what the client shows).
+- **Presence**: the status picker maps onto IRC AWAY on every network of
+  the user — online returns, idle/dnd go away (dnd says so), invisible is
+  a no-op (IRC can't hide a connected client). The persisted status
+  re-asserts on every reconnect (IRC forgets AWAY across connections);
+  others' away renders as "idle" (see member sidebar).
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
@@ -241,12 +246,7 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete are covered
   (re-pasting a string for the same network merges new channels in).
-- **Identity**: no nick change from the client (`/nick`), no away toggle
-  from the client (upstream away of others renders as "idle"), no SASL
-  (only server password via `pass@` in the connection string). Live
-  relays stamp receive time; network-fetched history (chathistory
-  prefill/backfill) carries server time, so ids and timestamps stay
-  chronological across both paths.
+- **Identity**: no nick change from the client (`/nick`), no SASL
 - **Settings**: legacy client settings are persisted per user
   (`PATCH /users/@me/settings`); the Android client's appearance settings
   are not synced and reset on reload.
