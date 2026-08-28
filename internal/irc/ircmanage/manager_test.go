@@ -273,7 +273,7 @@ func TestStatusAway(t *testing.T) {
 			mu.Unlock()
 			switch {
 			case strings.HasPrefix(line, "CAP LS"):
-				w("CAP * LS :\r\n")
+				w("CAP * LS :away-notify\r\n")
 			case strings.HasPrefix(line, "CAP REQ"):
 				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 				w("CAP * ACK :" + req + "\r\n")
@@ -282,6 +282,10 @@ func TestStatusAway(t *testing.T) {
 				w(":fake 001 " + nick + " :Welcome\r\n")
 			case strings.HasPrefix(line, "PING"):
 				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "AWAY"):
+				// away-notify echo: the server broadcasts our own AWAY
+				// back to us - the path the sidebar presence must ride.
+				w(":" + nick + "!u@h " + line + "\r\n")
 			case strings.HasPrefix(line, "JOIN"):
 				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
 				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
@@ -372,14 +376,30 @@ func TestStatusAway(t *testing.T) {
 
 	manager.EnsureConn("u1", "net1")
 	waitForLine("AWAY :do not disturb")
+	waitAway := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if manager.awayOf("u1", "net1", "histguy") == want {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("own away state stuck at %v, want %v (away-notify echo dropped?)", !want, want)
+	}
+	// The away-notify echo of our own AWAY must flip the tracked state -
+	// that is what the member sidebar renders from.
+	waitAway(true)
 
 	// Exact match: a bare "AWAY" (return), not the earlier away-with-
 	// reason forms.
 	manager.SetStatus("u1", "online")
 	waitForExact("AWAY")
+	waitAway(false)
 
 	manager.SetStatus("u1", "idle")
 	waitForLine("AWAY away")
+	waitAway(true)
 
 	// Invisible: no AWAY of any form may reach the wire (keepalive
 	// traffic is fine, so match on command, not on silence).

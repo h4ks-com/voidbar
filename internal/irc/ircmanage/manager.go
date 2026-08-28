@@ -598,6 +598,18 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.applyTopic(c, e.Params[0], e.Last())
 			return
 		}
+		if e.Command == "AWAY" && e.Source != nil {
+			// away-notify for our OWN away/return arrives as an echo (the
+			// server broadcasts our AWAY back to us) and the dedicated
+			// handler never sees it - so the member sidebar would keep
+			// showing our old presence. Handle every AWAY here first; for
+			// other users the dedicated handler then sees an unchanged
+			// state and stays quiet.
+			if c.setAway(e.Source.Name, e.Last() != "") {
+				m.notifyOccupancy(c, "")
+			}
+			return
+		}
 		if e.Command == girc.RPL_TOPIC && len(e.Params) >= 2 {
 			// 332 after JOIN: seed the topic before the client ever opens
 			// the channel (guild assembly then serves it from the store).
