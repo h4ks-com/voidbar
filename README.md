@@ -226,11 +226,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ## Not implemented yet
 
-- **History beyond the prefill**: `draft/chathistory` prefill covers the
-  first 50 messages after a join; scrolling further back stops at the
-  bouncer's own ring buffer (500 per channel) - asking the upstream for
-  progressively older pages ("infinite scroll" into network history) is
-  not bridged yet.
 - **Message features**: edits (upstream IRC has no edit to bridge to —
   wait for the IRCv3 draft), attachments/file uploads, embeds, mentions,
   pins (empty stub), search. Deletes work on msgid-capable upstreams:
