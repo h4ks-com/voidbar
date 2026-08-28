@@ -65,14 +65,18 @@ Covered:
   (Badger) and served over `GET /channels/:id/messages` with Discord
   pagination (`limit`/`before`/`after`); own sends are buffered too, and
   history survives server restarts
-- **Chathistory prefill**: on upstreams that offer `draft/chathistory`
-  (eris, ergo, soju), joining a channel asks the network for its most
-  recent 50 messages and merges them into the replay buffer - server-time
-  timestamps, time-anchored snowflakes (id order stays chronological),
-  msgid-anchored so prefilled messages are reactable/deletable, deduped
-  against everything the bouncer ever buffered, and one-shot per channel
-  (a persisted watermark keeps reconnects from re-asking). Networks
-  without the cap keep bouncer-only history.
+- **Chathistory prefill and backfill**: on upstreams that offer
+  `draft/chathistory` (eris, ergo, soju), joining a channel asks the
+  network for its most recent 50 messages and merges them into the replay
+  buffer - server-time timestamps, time-anchored snowflakes (id order
+  stays chronological), msgid-anchored so prefilled messages are
+  reactable/deletable, deduped against everything the bouncer ever
+  buffered, and one-shot per channel (a persisted watermark keeps
+  reconnects from re-asking). Scrolling past the buffer floor keeps
+  going: a short `?before=` page transparently asks the network for
+  older history (msgid-anchored `BEFORE`, inserted silently - no gateway
+  dispatch) and re-reads, until the network's own history runs dry.
+  Networks without the cap keep bouncer-only history.
 
 ## Android client
 
