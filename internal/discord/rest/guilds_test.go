@@ -1084,6 +1084,29 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	var wireMu sync.Mutex
+	var wire []string
+	recordLine := func(l string) { wireMu.Lock(); wire = append(wire, l); wireMu.Unlock() }
+	waitWire := func(substr string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			wireMu.Lock()
+			found := false
+			for _, l := range wire {
+				if strings.Contains(l, substr) {
+					found = true
+					break
+				}
+			}
+			wireMu.Unlock()
+			if found {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for wire line %q", substr)
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -1101,6 +1124,7 @@ func TestChannelTopicUpdate(t *testing.T) {
 						return
 					}
 					line = strings.TrimRight(line, "\r\n")
+					recordLine(line)
 					switch {
 					case strings.HasPrefix(line, "CAP LS"):
 						w("CAP * LS :\r\n")
@@ -1243,6 +1267,23 @@ func TestChannelTopicUpdate(t *testing.T) {
 		}
 		break
 	}
+
+	// Presence picker: PATCH settings with a status relays AWAY upstream
+	// (dnd carries the reason).
+	sbody, _ := json.Marshal(map[string]string{"status": "dnd"})
+	sreq, _ := http.NewRequest("PATCH", srv.URL+"/api/v9/users/@me/settings", bytes.NewReader(sbody))
+	sreq.Header.Set("Authorization", "Bearer "+token)
+	sreq.Header.Set("Content-Type", "application/json")
+	sresp, err := http.DefaultClient.Do(sreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sresp.Body.Close()
+	_, _ = io.Copy(io.Discard, sresp.Body)
+	if sresp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PATCH settings: %d", sresp.StatusCode)
+	}
+	waitWire("AWAY :do not disturb")
 }
 
 func TestScrollBackfillIntoNetworkHistory(t *testing.T) {

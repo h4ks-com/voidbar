@@ -241,6 +241,166 @@ func TestTopicFlow(t *testing.T) {
 	}
 }
 
+// TestStatusAway verifies the Discord -> IRC presence mapping: settings
+// persisted before connecting re-assert AWAY on CONNECTED (IRC forgets
+// away state across reconnects), and runtime switches fan out - online
+// returns, idle/dnd go away, invisible is a no-op.
+func TestStatusAway(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var sent []string
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			mu.Lock()
+			sent = append(sent, line)
+			mu.Unlock()
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + "\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "histguy", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Persisted intent: dnd must re-assert on connect without any client
+	// round-trip.
+	if err := store.MergeUserSettings("u1", map[string]any{"status": "dnd"}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	waitForLine := func(substr string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			found := false
+			for _, l := range sent {
+				if strings.Contains(l, substr) {
+					found = true
+					break
+				}
+			}
+			mu.Unlock()
+			if found {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("timed out waiting for wire line %q; sent:\n%s", substr, strings.Join(sent, "\n"))
+	}
+	waitForExact := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			found := false
+			for _, l := range sent {
+				if l == want {
+					found = true
+					break
+				}
+			}
+			mu.Unlock()
+			if found {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("timed out waiting for exact line %q; sent:\n%s", want, strings.Join(sent, "\n"))
+	}
+
+	manager.EnsureConn("u1", "net1")
+	waitForLine("AWAY :do not disturb")
+
+	// Exact match: a bare "AWAY" (return), not the earlier away-with-
+	// reason forms.
+	manager.SetStatus("u1", "online")
+	waitForExact("AWAY")
+
+	manager.SetStatus("u1", "idle")
+	waitForLine("AWAY away")
+
+	// Invisible: no AWAY of any form may reach the wire (keepalive
+	// traffic is fine, so match on command, not on silence).
+	mu.Lock()
+	before := len(sent)
+	mu.Unlock()
+	manager.SetStatus("u1", "invisible")
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		recent := append([]string(nil), sent[before:]...)
+		mu.Unlock()
+		for _, l := range recent {
+			if strings.HasPrefix(l, "AWAY") {
+				t.Fatalf("invisible produced AWAY traffic:\n%s", strings.Join(recent, "\n"))
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestNickCollisionDoesNotEatForeignMessages reproduces the reported bug:
 // the member's configured nick (doesnm) collides and the server renames the
 // bouncer to doesnm_. PRIVMSG from the OTHER user holding the original

@@ -184,6 +184,12 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, u *
 			s.log.Warn("settings persist failed", "err", err, "user", u.ID)
 		}
 	}
+	// Presence picker: the status lands here among the settings keys.
+	// Relay to every IRC connection (online/idle/dnd map onto AWAY;
+	// invisible is silently dropped upstream - see Manager.applyStatus).
+	if status, ok := patch["status"].(string); ok && s.irc != nil {
+		s.irc.SetStatus(u.ID, status)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

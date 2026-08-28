@@ -663,6 +663,13 @@ func (m *Manager) registerHandlers(c *conn) {
 			client.Send(&girc.Event{Command: "WHO", Params: []string{ch}})
 		}
 		}
+		// IRC forgets AWAY across reconnects; the persisted Discord
+		// status is the intent, so re-assert it every (re)connect.
+		if settings := m.store.UserSettings(c.userID); settings != nil {
+			if status, _ := settings["status"].(string); status != "" {
+				m.applyStatus(c, status)
+			}
+		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
 	})
 
@@ -1407,6 +1414,45 @@ func (m *Manager) SetTopic(userID, networkID, ircChannel, topic string) error {
 	}
 	client.Send(&girc.Event{Command: "TOPIC", Params: []string{ircChannel, topic}})
 	return nil
+}
+
+// SetStatus maps a Discord presence choice onto IRC AWAY across every
+// network the user is on: the status is account-wide, IRC away is
+// per-connection - the bouncer fans it out.
+func (m *Manager) SetStatus(userID, status string) {
+	m.mu.Lock()
+	var conns []*conn
+	for k, c := range m.conns {
+		if strings.HasPrefix(k, userID+"\x00") {
+			conns = append(conns, c)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range conns {
+		m.applyStatus(c, status)
+	}
+}
+
+// applyStatus is the Discord -> IRC presence mapping. online returns from
+// away, idle goes away silently, dnd goes away saying so; invisible is a
+// no-op - IRC has no way to hide a connected client, and silently keeping
+// the current state is the closest honest behavior.
+func (m *Manager) applyStatus(c *conn, status string) {
+	m.mu.Lock()
+	client := c.client
+	m.mu.Unlock()
+	if client == nil {
+		return
+	}
+	switch status {
+	case "online":
+		client.Send(&girc.Event{Command: "AWAY"})
+	case "idle":
+		client.Send(&girc.Event{Command: "AWAY", Params: []string{"away"}})
+	case "dnd":
+		client.Send(&girc.Event{Command: "AWAY", Params: []string{"do not disturb"}})
+	}
+	m.log.Debug("status applied", "user", c.userID, "network", c.networkID, "status", status)
 }
 
 // registerMsgid records the msgid <-> Discord identity mapping.
