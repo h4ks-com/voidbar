@@ -249,10 +249,17 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   (IRC convention — no `@`), incoming bare nicks (`doesnm: look`,
   `@doesnm` too) become `<@id>` pills with a real `mentions` array, and
   `#channel` references markerize both ways (`<#id>` <-> `#name`).
-  Candidates are the channel's live roster plus every bouncer member of
-  the network; unknown ids/nicks pass through verbatim. Renamed
-  channels keep their roster via a rename alias (girc predates
-  `draft/channel-rename`).
+  Own sends carry the mentions arrays too, so pills highlight. Peers are
+  upserted into the clients' user stores via `GUILD_MEMBER_UPDATE` on
+  foreign JOIN, on roster sweeps after every upstream (re)connect, and
+  ahead of incoming mention messages — without that the pills render
+  `@invalid-user` (clients ingest users from neither the mentions array
+  nor the member-list rows). Candidate nicks are the channel's live
+  roster plus every bouncer member of the network; unknown ids/nicks
+  pass through verbatim. Renamed channels keep their roster via a
+  rename alias (girc predates `draft/channel-rename`), and member lists
+  carry bouncer members under their real user ids — one row per person
+  everywhere (autocomplete included).
 
 ## Not implemented yet
 
