@@ -931,28 +931,38 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			req.Content = r.FormValue("content")
 			req.Nonce = r.FormValue("nonce")
 		}
-		// Legacy inline upload: files[] parts are stored directly.
-		if r.MultipartForm != nil {
-			files := r.MultipartForm.File["files"]
-			for i, fh := range files {
-				f, err := fh.Open()
-				if err != nil {
-					jsonError(w, http.StatusBadRequest, "unreadable file")
-					return
+		// Legacy inline upload: file parts ride with the send itself.
+		// Discord's field naming is files[0], files[1], ... - collect
+		// every file-ish part and keep the index order stable.
+		if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
+			keys := make([]string, 0, len(r.MultipartForm.File))
+			for k := range r.MultipartForm.File {
+				if k == "files" || strings.HasPrefix(k, "files[") || strings.HasPrefix(k, "file") {
+					keys = append(keys, k)
 				}
-				data, err := io.ReadAll(io.LimitReader(f, maxUploadBytes+1))
-				_ = f.Close()
-				if err != nil || int64(len(data)) > maxUploadBytes {
-					jsonError(w, http.StatusBadRequest, "unreadable file")
-					return
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				for _, fh := range r.MultipartForm.File[k] {
+					f, err := fh.Open()
+					if err != nil {
+						jsonError(w, http.StatusBadRequest, "unreadable file")
+						return
+					}
+					data, err := io.ReadAll(io.LimitReader(f, maxUploadBytes+1))
+					_ = f.Close()
+					if err != nil || int64(len(data)) > maxUploadBytes {
+						jsonError(w, http.StatusBadRequest, "unreadable file")
+						return
+					}
+					att := s.newStoredAttachment(fh.Filename, data)
+					rowID := strconv.Itoa(len(attachRows))
+					if len(req.Attachments) > len(attachRows) && req.Attachments[len(attachRows)].ID != "" {
+						rowID = req.Attachments[len(attachRows)].ID
+					}
+					attachRows = append(attachRows, s.attachmentPayload(rowID, att))
+					attachURLs = append(attachURLs, s.attachmentURL(att.ID, att.Filename))
 				}
-				att := s.newStoredAttachment(fh.Filename, data)
-				rowID := strconv.Itoa(i)
-				if len(req.Attachments) > i && req.Attachments[i].ID != "" {
-					rowID = req.Attachments[i].ID
-				}
-				attachRows = append(attachRows, s.attachmentPayload(rowID, att))
-				attachURLs = append(attachURLs, s.attachmentURL(att.ID, att.Filename))
 			}
 		}
 	} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

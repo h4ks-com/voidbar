@@ -61,6 +61,8 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/{id}/profile", s.requireAuth(s.handleUserProfile))
 	mux.HandleFunc("GET /api/v9/users/@me/survey", s.requireAuth(s.handleNull))
 	mux.HandleFunc("POST /api/v9/users/@me/devices", s.requireAuth(s.handleNoContentAuthed))
+	// The sticker picker probes this on open; 404 read as a network error.
+	mux.HandleFunc("GET /api/v9/sticker-packs", s.requireAuth(s.handleEmptyMap))
 }
 
 // handleAuthFingerprint answers the Android client's pre-login fingerprint

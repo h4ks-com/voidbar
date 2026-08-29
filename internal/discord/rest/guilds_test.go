@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2086,6 +2087,36 @@ func TestAttachmentUploadFlow(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no PRIVMSG on the wire")
+	}
+	// 7) Legacy inline upload: multipart send with files[0] (Discord's
+	// field naming) must store the file and relay the URL.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("payload_json", `{"content":"inline","attachments":[{"id":"0","filename":"dot.png"}]}`)
+	fw, _ := mw.CreateFormFile("files[0]", "dot.png")
+	_, _ = fw.Write(png)
+	_ = mw.Close()
+	req, _ = http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages", &buf)
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg2 map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&msg2)
+	resp.Body.Close()
+	atts2, _ := msg2["attachments"].([]any)
+	if len(atts2) != 1 || atts2[0].(map[string]any)["filename"] != "dot.png" {
+		t.Fatalf("inline upload attachments: %+v", msg2)
+	}
+	select {
+	case line := <-wire:
+		if !strings.Contains(line, "/attachments/") {
+			t.Fatalf("inline wire PRIVMSG missing url: %s", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no PRIVMSG for inline upload")
 	}
 	// 6) History renders the attachment after a reconnect.
 	if resp, err := httpGet(srv.URL+"/api/v9/channels/"+channelID+"/messages?limit=10", token); err == nil {
