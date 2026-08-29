@@ -260,11 +260,18 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   rename alias (girc predates `draft/channel-rename`), and member lists
   carry bouncer members under their real user ids — one row per person
   everywhere (autocomplete included).
+- **Search** (`GET /channels/:id/messages/search`): answered from the
+  channel's replay buffer — IRC has no server-side search, so results
+  cover everything the bouncer has seen (live traffic plus chathistory
+  pulled during scrolls). Discord response shape (per-hit context
+  groups, newest first, 25/page via `?offset=`, `total_results` across
+  pages); terms are ANDed case-insensitively over content and author
+  names. `author_id`-style filter syntax is not interpreted yet.
 
 ## Not implemented yet
 
-- **Message features**: attachments/file uploads, embeds,
-  search. Mentions are covered (see above). Pins serve an empty stub
+- **Message features**: attachments/file uploads, embeds.
+  Search and mentions are covered (see above). Pins serve an empty stub
   (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
 - **Channel management UI**: channel
