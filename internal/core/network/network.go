@@ -764,6 +764,51 @@ func (s *Service) RefreshOccupancy(userID, guildID, ircChannel string) {
 	}
 }
 
+// RefreshMember is the ircmanage member callback: a bouncer member's own
+// nick changed upstream (client relay, ghost reclaim, collision rename).
+// GUILD_MEMBER_UPDATE carries the new nick - the client's member rows and
+// the nickname dialog then match IRC reality. Roles ride along so a
+// prefixed member keeps its sidebar section and name color.
+func (s *Service) RefreshMember(userID, guildID, nick string) {
+	if s.gw == nil {
+		return
+	}
+	payload := s.MemberPayload(userID, guildID, nick)
+	if payload == nil {
+		return
+	}
+	s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
+}
+
+// MemberPayload builds one bouncer member's guild-member object under the
+// new nick, with the roles their highest channel mode grants. nil when the
+// user isn't a member of that network.
+func (s *Service) MemberPayload(userID, guildID, nick string) map[string]any {
+	mem, err := s.store.GetMembership(guildID, userID)
+	if err != nil {
+		return nil
+	}
+	mode := ""
+	for _, cm := range s.ircOccupants(userID, guildID, mem.AutoJoin) {
+		if strings.EqualFold(cm.Nick, nick) {
+			mode = cm.Mode
+			break
+		}
+	}
+	return map[string]any{
+		"guild_id": guildID,
+		"user": map[string]any{
+			"id":            mem.UserID,
+			"username":      nick,
+			"discriminator": "0",
+			"bot":           false,
+		},
+		"nick":      nick,
+		"roles":     ircRoleIDsFor(mode),
+		"joined_at": mem.JoinedAt.Format(time.RFC3339),
+	}
+}
+
 // StartTyping relays a client typing indicator (POST /channels/{id}/typing)
 // upstream as a draft/typing TAGMSG, for both guild channels and DMs.
 func (s *Service) StartTyping(userID, channelID string) error {
@@ -933,6 +978,10 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"discriminator": "0",
 				"bot":           false,
 			},
+			// The IRC nick rides as the guild nickname too: the client's
+			// Change-Nickname dialog prefills from member.nick, and it is
+			// exactly what the field means here - the name on this guild.
+			"nick":      nick,
 			"roles":     ircRoleIDsFor(modeByLower[strings.ToLower(nick)]),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})

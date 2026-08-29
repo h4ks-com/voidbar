@@ -249,7 +249,12 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete/rename/topic are covered
   (re-pasting a string for the same network merges new channels in).
-- **Identity**: no nick change from the client (`/nick`), no SASL
+- **Identity**: nick change IS the client's Change-Nickname flow —
+  `PATCH /guilds/:id/members/@me` relays IRC `NICK`, and the server's
+  own-nick echo (which also catches ghost reclaims and collision
+  renames) persists the membership and pushes `GUILD_MEMBER_UPDATE`; a
+  rejected change (nick in use) leaves the stored nick standing. No
+  SASL.
 - **Settings**: legacy client settings are persisted per user
   (`PATCH /users/@me/settings`); the Android client's appearance settings
   are not synced and reset on reload.

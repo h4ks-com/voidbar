@@ -539,6 +539,108 @@ func TestChannelRename(t *testing.T) {
 	}
 }
 
+// TestSetNick: the client nickname relay is just a wire command - the
+// server's NICK echo is what persists the membership and fires the
+// member notifier (GUILD_MEMBER_UPDATE on the Discord side).
+func TestSetNick(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "NICK"):
+				// Registered client changing nick: broadcast to the
+				// renamer themselves.
+				newNick := strings.TrimPrefix(line, "NICK ")
+				w(":" + nick + "!u@h NICK " + newNick + "\r\n")
+				nick = newNick
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + "\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "oldnick", Username: "h", Realname: "h",
+		AutoJoin: []string{}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	var memberNick atomic.Value
+	manager.SetMemberNotifier(func(userID, networkID, nick string) {
+		memberNick.Store(nick)
+	})
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+	if err := manager.SetNick("u1", "net1", "shiny"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, sink, "irc nick synced")
+	mem, err := store.GetMembership("net1", "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Nick != "shiny" {
+		t.Fatalf("membership nick after echo: %q", mem.Nick)
+	}
+	if got, _ := memberNick.Load().(string); got != "shiny" {
+		t.Fatalf("member notifier: %v", got)
+	}
+}
+
 // TestNickCollisionDoesNotEatForeignMessages reproduces the reported bug:
 // the member's configured nick (doesnm) collides and the server renames the
 // bouncer to doesnm_. PRIVMSG from the OTHER user holding the original

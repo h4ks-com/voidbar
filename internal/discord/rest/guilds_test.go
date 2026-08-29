@@ -1131,15 +1131,21 @@ func TestChannelTopicUpdate(t *testing.T) {
 					case strings.HasPrefix(line, "CAP REQ"):
 						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 						w("CAP * ACK :" + req + "\r\n")
-					case strings.HasPrefix(line, "NICK") && nick == "":
-						nick = strings.TrimPrefix(line, "NICK ")
-						w(":fake 001 " + nick + " :Welcome\r\n")
-					case strings.HasPrefix(line, "PING"):
-						w("PONG" + line[4:] + "\r\n")
-					case strings.HasPrefix(line, "JOIN"):
-						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
-						w(":" + nick + "!u@h JOIN " + ch + "\r\n")
-						w(":fake 332 " + nick + " " + ch + " :join topic\r\n")
+				case strings.HasPrefix(line, "NICK") && nick == "":
+					nick = strings.TrimPrefix(line, "NICK ")
+					w(":fake 001 " + nick + " :Welcome\r\n")
+				case strings.HasPrefix(line, "NICK"):
+					// Post-registration NICK = nickname change; the server
+					// broadcasts it, the renamer included.
+					newNick := strings.TrimPrefix(line, "NICK ")
+					w(":" + nick + "!u@h NICK " + newNick + "\r\n")
+					nick = newNick
+				case strings.HasPrefix(line, "PING"):
+					w("PONG" + line[4:] + "\r\n")
+				case strings.HasPrefix(line, "JOIN"):
+					ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+					w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+					w(":fake 332 " + nick + " " + ch + " :join topic\r\n")
 						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
 						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
 					case strings.HasPrefix(line, "WHO "):
@@ -1182,6 +1188,7 @@ func TestChannelTopicUpdate(t *testing.T) {
 	gw := gateway.New(svc, cfg, logger, nil, nil)
 	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
 	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	manager.SetMemberNotifier(netSvc.RefreshMember)
 	h := New(svc, cfg, logger, gw, netSvc, manager)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -1230,6 +1237,47 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Single reader into a channel: gorilla treats ANY read error (a
+	// missed 2s deadline under parallel-suite load included) as sticky
+	// and panics on the next read, so per-section read loops are fragile.
+	events := make(chan map[string]any, 64)
+	go func() {
+		_ = ws.SetReadDeadline(time.Time{})
+		for {
+			_, data, err := ws.ReadMessage()
+			if err != nil {
+				close(events)
+				return
+			}
+			var p map[string]any
+			_ = json.Unmarshal(data, &p)
+			select {
+			case events <- p:
+			default:
+			}
+		}
+	}()
+	waitEvent := func(ty string, match func(d map[string]any) bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case p, ok := <-events:
+				if !ok {
+					t.Fatalf("gateway ws closed while waiting for %s", ty)
+				}
+				if p["t"] != ty {
+					continue
+				}
+				if d, _ := p["d"].(map[string]any); d != nil && match(d) {
+					return
+				}
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		t.Fatalf("no %s in time", ty)
+	}
+
 	// PATCH the topic: the response echoes the request (Discord-style);
 	// the fake echoes the TOPIC back, and that broadcast - not the PATCH -
 	// is what must update the wire.
@@ -1252,32 +1300,10 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatalf("PATCH response topic: %v", patched["topic"])
 	}
 
-	// Gateway: skip session noise until the CHANNEL_UPDATE carrying the
-	// broadcast topic.
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("no CHANNEL_UPDATE for the topic broadcast")
-		}
-		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, data, err := ws.ReadMessage()
-		if err != nil {
-			continue
-		}
-		var p map[string]any
-		_ = json.Unmarshal(data, &p)
-		if p["t"] != "CHANNEL_UPDATE" {
-			continue
-		}
-		d, _ := p["d"].(map[string]any)
-		if d == nil || d["id"] != channelID {
-			continue
-		}
-		if d["topic"] != "edited topic" {
-			t.Fatalf("CHANNEL_UPDATE topic: %v", d["topic"])
-		}
-		break
-	}
+	// Gateway: the CHANNEL_UPDATE carrying the broadcast topic.
+	waitEvent("CHANNEL_UPDATE", func(d map[string]any) bool {
+		return d["id"] == channelID && d["topic"] == "edited topic"
+	})
 
 	// Presence picker: PATCH settings with a status relays AWAY upstream
 	// (dnd carries the reason).
@@ -1301,30 +1327,13 @@ func TestChannelTopicUpdate(t *testing.T) {
 	// picked status, not just the away bit.
 	waitPresence := func(want string) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if time.Now().After(deadline) {
-				t.Fatalf("no PRESENCE_UPDATE with status %q", want)
+		waitEvent("PRESENCE_UPDATE", func(d map[string]any) bool {
+			if d["status"] != want {
+				return false
 			}
-			_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-			_, data, err := ws.ReadMessage()
-			if err != nil {
-				continue
-			}
-			var p map[string]any
-			_ = json.Unmarshal(data, &p)
-			if p["t"] != "PRESENCE_UPDATE" {
-				continue
-			}
-			d, _ := p["d"].(map[string]any)
-			if d == nil || d["status"] != want {
-				continue
-			}
-			if u, _ := d["user"].(map[string]any); u == nil || u["id"] != user.ID {
-				continue
-			}
-			return
-		}
+			u, _ := d["user"].(map[string]any)
+			return u != nil && u["id"] == user.ID
+		})
 	}
 	waitPresence("dnd")
 
@@ -1363,29 +1372,12 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatalf("PATCH name response: %v", patchedName["name"])
 	}
 	waitWire("RENAME #test #renamed")
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("no CHANNEL_UPDATE for the rename broadcast")
-		}
-		_ = ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, data, err := ws.ReadMessage()
-		if err != nil {
-			continue
-		}
-		var p map[string]any
-		_ = json.Unmarshal(data, &p)
-		if p["t"] != "CHANNEL_UPDATE" {
-			continue
-		}
-		d, _ := p["d"].(map[string]any)
-		if d == nil || d["id"] != channelID || d["name"] != "renamed" {
-			continue
-		}
-		break
-	}
+	waitEvent("CHANNEL_UPDATE", func(d map[string]any) bool {
+		return d["id"] == channelID && d["name"] == "renamed"
+	})
 	// Guild detail serves the new name afterwards.
 	deadline = time.Now().Add(5 * time.Second)
+detail:
 	for {
 		if time.Now().After(deadline) {
 			t.Fatal("guild detail never carried the renamed channel")
@@ -1396,13 +1388,48 @@ func TestChannelTopicUpdate(t *testing.T) {
 			if chans, ok := detail["channels"].([]any); ok {
 				for _, c := range chans {
 					if cm := c.(map[string]any); cm["id"] == channelID && cm["name"] == "renamed" {
-						return
+						break detail
 					}
 				}
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+
+	// Nickname: the client's Change-Nickname dialog PATCHes members/@me;
+	// that relays NICK upstream, and the broadcast echo persists + pushes
+	// GUILD_MEMBER_UPDATE (same authoritative-broadcast pattern).
+	kbody, _ := json.Marshal(map[string]string{"nick": "newnick"})
+	kreq, _ := http.NewRequest("PATCH", srv.URL+"/api/v9/guilds/"+net.ID+"/members/@me", bytes.NewReader(kbody))
+	kreq.Header.Set("Authorization", "Bearer "+token)
+	kreq.Header.Set("Content-Type", "application/json")
+	kresp, err := http.DefaultClient.Do(kreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kraw, _ := io.ReadAll(kresp.Body)
+	_ = kresp.Body.Close()
+	var kpatched map[string]any
+	_ = json.Unmarshal(kraw, &kpatched)
+	if kresp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH nick: %d %s", kresp.StatusCode, kraw)
+	}
+	if kpatched["nick"] != "newnick" {
+		t.Fatalf("PATCH nick response: %v", kpatched["nick"])
+	}
+	waitWire("NICK newnick")
+	waitEvent("GUILD_MEMBER_UPDATE", func(d map[string]any) bool {
+		return d["guild_id"] == net.ID && d["nick"] == "newnick"
+	})
+	// The echo - not the PATCH - is what persists.
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if mem, err := store.GetMembership(net.ID, user.ID); err == nil && mem.Nick == "newnick" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("membership nick never synced from the broadcast")
 }
 
 func TestScrollBackfillIntoNetworkHistory(t *testing.T) {

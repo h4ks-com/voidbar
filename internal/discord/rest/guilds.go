@@ -303,6 +303,62 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 	})
 }
 
+// handleUpdateMemberMe relays the client's Change-Nickname flow
+// (PATCH /guilds/:id/members/@me) to IRC NICK. Nothing persists here: the
+// server's own-nick echo is the writer (see the NICK handler), so a
+// rejected change (433 nick in use) leaves the stored nick standing and
+// the follow-up GUILD_MEMBER_UPDATE never lies.
+func (s *Server) handleUpdateMemberMe(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	mem, err := s.net.MembershipFor(u.ID, r.PathValue("guild"))
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "Unknown Guild")
+		return
+	}
+	var req struct {
+		Nick *string `json:"nick"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	live := mem.Nick
+	if s.irc != nil {
+		if ln := s.irc.LiveNick(u.ID, mem.NetworkID); ln != "" {
+			live = ln
+		}
+	}
+	nick := live
+	if req.Nick != nil && strings.TrimSpace(*req.Nick) != "" {
+		cand := strings.TrimSpace(*req.Nick)
+		// IRC nick limits: no spaces/commas/colons (mask syntax), no #
+		// prefix (channel), no control chars, within NICKLEN.
+		if len(cand) > 30 || strings.ContainsAny(cand, " ,:#") || strings.ContainsFunc(cand, func(r rune) bool {
+			return r < 0x20 || r == 0x7f
+		}) {
+			jsonError(w, http.StatusBadRequest, "invalid nickname")
+			return
+		}
+		if !strings.EqualFold(cand, live) {
+			if s.irc == nil {
+				jsonError(w, http.StatusServiceUnavailable, "upstream unavailable")
+				return
+			}
+			if err := s.irc.SetNick(u.ID, mem.NetworkID, cand); err != nil {
+				jsonError(w, http.StatusServiceUnavailable, "upstream unavailable")
+				return
+			}
+		}
+		nick = cand
+	}
+	// A null nick ("Reset Nickname") has no IRC counterpart: answer with
+	// the current member instead of erroring - an idempotent no-op.
+	writeJSON(w, http.StatusOK, s.net.MemberPayload(u.ID, mem.NetworkID, nick))
+}
+
 type sendMessageRequest struct {
 	Content string `json:"content"`
 	Nonce   any    `json:"nonce"`

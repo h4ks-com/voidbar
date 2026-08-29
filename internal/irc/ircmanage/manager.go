@@ -40,6 +40,11 @@ type Manager struct {
 	// transitions so the Discord side can mark guilds (un)available.
 	linkChange func(userID, networkID string, up bool)
 
+	// memberChange (optional) is notified when a bouncer member's own
+	// nick changes upstream, so the Discord side can push
+	// GUILD_MEMBER_UPDATE (the nickname UI then reflects IRC reality).
+	memberChange func(userID, networkID, nick string)
+
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
 
@@ -536,6 +541,13 @@ func (m *Manager) SetLinkNotifier(fn func(userID, networkID string, up bool)) {
 	m.linkChange = fn
 }
 
+// SetMemberNotifier installs the callback fired when a bouncer member's
+// own nick changes upstream (client relay, ghost reclaim, collision
+// rename). The Discord side maps it to GUILD_MEMBER_UPDATE.
+func (m *Manager) SetMemberNotifier(fn func(userID, networkID, nick string)) {
+	m.memberChange = fn
+}
+
 // fireLinkChange notifies the network service of a link state transition.
 func (m *Manager) fireLinkChange(c *conn, up bool) {
 	if m.linkChange == nil {
@@ -638,6 +650,20 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.applyRename(c, e.Params[0], e.Params[1])
 			return
 		}
+		if e.Command == girc.NICK && e.Source != nil && len(e.Params) > 0 {
+			// Our own NICK echo (client relay, ghost reclaim): girc flags
+			// it Echo, so the command handler never sees it - yet the
+			// membership must follow the live nick. Compare against both
+			// spellings: girc may have tracked the new nick already
+			// (source = old) or not yet (params[0] = new). Foreign renames
+			// match neither and stay with the command handler.
+			old, new := e.Source.Name, e.Params[0]
+			if strings.EqualFold(old, client.GetNick()) || strings.EqualFold(new, client.GetNick()) {
+				c.renameAway(old, new)
+				m.applyOwnNick(c, new)
+			}
+			return
+		}
 		if e.Command == "PRIVMSG" || e.Command == "NOTICE" {
 			if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.chatBatchActive(ref) {
 				m.chatBatchFrame(c, e, ref)
@@ -709,6 +735,8 @@ func (m *Manager) registerHandlers(c *conn) {
 
 	// Later renames (ghost reclaim, manual /nick): keep the membership nick
 	// in sync so the Discord display name always matches the IRC nick.
+	// Self-echoes never reach this handler (girc flags them Echo) - the
+	// ALL_EVENTS branch owns those via applyOwnNick.
 	c.client.Handlers.Add(girc.NICK, func(client *girc.Client, e girc.Event) {
 		if e.Source == nil || len(e.Params) == 0 {
 			return
@@ -721,14 +749,7 @@ func (m *Manager) registerHandlers(c *conn) {
 		if !strings.EqualFold(e.Params[0], client.GetNick()) {
 			return
 		}
-		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil && mem.Nick != e.Params[0] {
-			mem.Nick = e.Params[0]
-			if err := m.store.UpsertMembership(mem); err != nil {
-				m.log.Warn("irc nick sync failed", "user", c.userID, "nick", e.Params[0], "err", err)
-			} else {
-				m.log.Info("irc nick synced", "user", c.userID, "nick", e.Params[0])
-			}
-		}
+		m.applyOwnNick(c, e.Params[0])
 	})
 
 	c.client.Handlers.Add(girc.JOIN, func(client *girc.Client, e girc.Event) {
@@ -1453,6 +1474,50 @@ func (m *Manager) SetTopic(userID, networkID, ircChannel, topic string) error {
 		return fmt.Errorf("connection to %s is down, retry", networkID)
 	}
 	client.Send(&girc.Event{Command: "TOPIC", Params: []string{ircChannel, topic}})
+	return nil
+}
+
+// applyOwnNick persists a confirmed own-nick rename and notifies the
+// Discord side (GUILD_MEMBER_UPDATE). Idempotent: re-observing the live
+// nick (reconnect, both-branch dispatch) is a quiet no-op.
+func (m *Manager) applyOwnNick(c *conn, nick string) {
+	mem, err := m.store.GetMembership(c.networkID, c.userID)
+	if err != nil {
+		return
+	}
+	if mem.Nick == nick {
+		return
+	}
+	mem.Nick = nick
+	if err := m.store.UpsertMembership(mem); err != nil {
+		m.log.Warn("irc nick sync failed", "user", c.userID, "nick", nick, "err", err)
+		return
+	}
+	m.log.Info("irc nick synced", "user", c.userID, "nick", nick)
+	if m.memberChange != nil {
+		m.memberChange(c.userID, c.networkID, nick)
+	}
+}
+
+// SetNick relays a client nickname change upstream. Nothing persists
+// here: the server's own-nick NICK echo (the NICK handler) is the only
+// writer, so a rejected change (433 nick in use) leaves the stored nick
+// standing - same authoritative-broadcast pattern as topics and renames.
+func (m *Manager) SetNick(userID, networkID, nick string) error {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	var client *girc.Client
+	if ok {
+		client = c.client
+	}
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("not connected to %s", networkID)
+	}
+	if client == nil {
+		return fmt.Errorf("connection to %s is down, retry", networkID)
+	}
+	client.Send(&girc.Event{Command: "NICK", Params: []string{nick}})
 	return nil
 }
 
