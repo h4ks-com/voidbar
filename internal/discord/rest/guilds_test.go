@@ -1882,5 +1882,9 @@ func TestMessageSearch(t *testing.T) {
 	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?text=nothingmatches"); total != 0 || len(hits) != 0 {
 		t.Fatalf("guild search miss: total=%d hits=%v", total, hits)
 	}
+	// The official client sends the term as ?content=.
+	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?content=coffee&include_nsfw=false"); total != 1 || hits[0] != "fresh coffee" {
+		t.Fatalf("guild search content param: total=%d hits=%v", total, hits)
+	}
 }
 

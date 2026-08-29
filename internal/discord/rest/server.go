@@ -115,7 +115,7 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		s.log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rw.status, "dur", time.Since(start).String())
+		s.log.Info("http", "method", r.Method, "path", r.URL.Path, "query", r.URL.RawQuery, "status", rw.status, "dur", time.Since(start).String())
 	})
 }
 

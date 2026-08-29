@@ -548,14 +548,18 @@ func (s *Server) searchChannel(channelID string, terms []string) []map[string]an
 }
 
 // searchTerms extracts the free-text terms the clients actually send:
-// the official client uses ?text=, Spacebar-style ones ?query=.
+// the official client uses ?content=, other builds ?text= or ?query=.
 func searchTerms(r *http.Request) []string {
-	raw := r.URL.Query().Get("text")
+	q := r.URL.Query()
+	raw := q.Get("content")
 	if raw == "" {
-		raw = r.URL.Query().Get("query")
+		raw = q.Get("text")
 	}
 	if raw == "" {
-		raw = r.URL.Query().Get("q")
+		raw = q.Get("query")
+	}
+	if raw == "" {
+		raw = q.Get("q")
 	}
 	return strings.Fields(strings.ToLower(raw))
 }
