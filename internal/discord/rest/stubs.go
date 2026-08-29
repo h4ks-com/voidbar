@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -29,8 +30,8 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	// treats any non-2xx as a network failure ("unknown network error"),
 	// aborting the whole login flow. The value is opaque to us.
 	mux.HandleFunc("POST /api/v9/auth/fingerprint", s.handleAuthFingerprint)
-	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoPatch))
-	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/1", s.requireAuth(s.handleSettingsProtoGet))
+	mux.HandleFunc("PATCH /api/v9/users/@me/settings-proto/{type}", s.requireAuth(s.handleSettingsProtoPatch))
+	mux.HandleFunc("GET /api/v9/users/@me/settings-proto/{type}", s.requireAuth(s.handleSettingsProtoGet))
 	// The legacy (non-proto) settings store: the client PATCHes e.g. the
 	// last opened channel on navigation and dismissed promos. Persisted so
 	// onboarding popovers ("account switcher" promo, guide) stay dismissed
@@ -239,24 +240,70 @@ func (s *Server) handleStatuspageJSON(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSettingsProtoPatch acknowledges settings persistence. The client
-// reads body.out_of_date and body.settings from the response - a bare 204
-// made it parse null and crash.
-func (s *Server) handleSettingsProtoPatch(w http.ResponseWriter, r *http.Request, _ *storage.User) {
-	_, _ = io.Copy(io.Discard, r.Body)
+// handleSettingsProtoPatch persists settings protobufs. The PATCH carries
+// a partial serialized blob; per Discord's contract whole top-level fields
+// replace stored ones, which the wire-format splitter merges without a
+// schema. The response echoes the merged blob (the client reads
+// body.settings and body.out_of_date - a null settings crashed it before).
+func (s *Server) handleSettingsProtoPatch(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	kind := r.PathValue("type")
+	body := settingsProtoPatchBody{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		// Unparseable body: echo the stored state so the client store
+		// stays consistent instead of crashing on a null.
+		writeJSON(w, http.StatusOK, s.settingsProtoBody(u.ID, kind))
+		return
+	}
+	blob, err := decodeSettingsProto(body.Settings)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "400: Bad Request", "code": 0})
+		return
+	}
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, s.settingsProtoBody(u.ID, kind))
+		return
+	}
+	stored := s.net.UserSettingsProto(u.ID, kind)
+	if blob == nil {
+		// Empty settings: nothing to merge, the stored blob stands.
+		writeJSON(w, http.StatusOK, s.settingsProtoBody(u.ID, kind))
+		return
+	}
+	merged, err := mergeProtoFields(stored, blob)
+	if err != nil {
+		// Malformed wire input (or an unmergeable stored blob): store the
+		// patch whole - it is the client's latest full-field truth.
+		merged = blob
+	}
+	if err := s.net.SetUserSettingsProto(u.ID, kind, merged); err != nil {
+		s.log.Warn("settings proto persist failed", "err", err, "user", u.ID, "kind", kind)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":    "",
+		"settings":    base64.StdEncoding.EncodeToString(merged),
 		"out_of_date": false,
 	})
 }
 
-// handleSettingsProtoGet answers the client's loadIfNecessary probe with an
-// empty serialized PreloadedUserSettings (all defaults).
-func (s *Server) handleSettingsProtoGet(w http.ResponseWriter, r *http.Request, _ *storage.User) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":              "",
+// handleSettingsProtoGet serves the persisted serialized settings
+// protobuf (empty string = all defaults, which the client treats as
+// "never customized").
+func (s *Server) handleSettingsProtoGet(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	writeJSON(w, http.StatusOK, s.settingsProtoBody(u.ID, r.PathValue("type")))
+}
+
+// settingsProtoBody shapes the GET/echo response; an unset store yields
+// the documented empty-blob shape.
+func (s *Server) settingsProtoBody(userID, kind string) map[string]any {
+	blob := ""
+	if s.net != nil {
+		if stored := s.net.UserSettingsProto(userID, kind); stored != nil {
+			blob = base64.StdEncoding.EncodeToString(stored)
+		}
+	}
+	return map[string]any{
+		"settings":              blob,
 		"required_data_version": nil,
-	})
+	}
 }
 
 // handleGuildAffinities mirrors the user-affinities shape for guilds.

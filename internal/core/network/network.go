@@ -143,6 +143,24 @@ func (s *Service) MergeUserSettings(userID string, patch map[string]any) error {
 	return s.store.MergeUserSettings(userID, patch)
 }
 
+// UserSettingsProto returns the persisted serialized settings protobuf for
+// the kind (nil when never written).
+func (s *Service) UserSettingsProto(userID, kind string) []byte {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.UserSettingsProto(userID, kind)
+}
+
+// SetUserSettingsProto stores the merged serialized settings protobuf for
+// the kind.
+func (s *Service) SetUserSettingsProto(userID, kind string, blob []byte) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.SetUserSettingsProto(userID, kind, blob)
+}
+
 // mergeChannels merges new IRC channel names into the member's auto-join
 // list (case-insensitive dedup, original order kept).
 func mergeChannels(existing, add []string) ([]string, bool) {
