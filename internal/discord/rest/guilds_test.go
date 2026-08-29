@@ -1159,8 +1159,10 @@ func TestChannelTopicUpdate(t *testing.T) {
 					w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
 				case strings.Contains(line, "PRIVMSG #renamed :hi sleepy"):
 					// The IRCized relay (bare nick, no marker) reached the
-					// wire; sleepy answers with a bare-nick mention.
-					w(":sleepy!u@h PRIVMSG #renamed :" + nick + " wake up #renamed\r\n")
+					// wire; sleepy answers with bare-nick mentions of the
+					// bouncer member AND a fellow peer (the peer upsert
+					// path: the client never saw sleepy as a user).
+					w(":sleepy!u@h PRIVMSG #renamed :" + nick + " wake up, sleepy yourself #renamed\r\n")
 				case strings.HasPrefix(line, "AWAY"):
 						// eris shape: 305/306 numerics confirm the AWAY;
 						// they are what drives the self PRESENCE_UPDATE.
@@ -1269,7 +1271,10 @@ func TestChannelTopicUpdate(t *testing.T) {
 	}()
 	waitEvent := func(ty string, match func(d map[string]any) bool) {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
+		// 30s like waitWire: under the full-suite load the whole relay
+		// chain (REST -> girc -> fake -> push -> handlers) can blow well
+		// past 10s without anything being wrong.
+		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			select {
 			case p, ok := <-events:
@@ -1410,7 +1415,8 @@ detail:
 	// incoming bare nicks markerize with a real mentions array. The
 	// roster under the renamed channel comes from the rename alias
 	// (girc still tracks it under the old name).
-	mbody, _ := json.Marshal(map[string]string{"content": "hi <@" + model.IrcAuthorID("irc:sleepy") + ">"})
+	sleepy := model.IrcAuthorID("irc:sleepy")
+	mbody, _ := json.Marshal(map[string]string{"content": "hi <@" + sleepy + ">"})
 	mreq, _ := http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages", bytes.NewReader(mbody))
 	mreq.Header.Set("Authorization", "Bearer "+token)
 	mreq.Header.Set("Content-Type", "application/json")
@@ -1424,13 +1430,21 @@ detail:
 		t.Fatalf("POST mention message: %d %s", mresp.StatusCode, mraw)
 	}
 	waitWire("PRIVMSG #renamed :hi sleepy")
+	// The peer upsert lands before the mention message (same-session
+	// order is preserved), so the pill resolves instead of rendering
+	// @invalid-user.
+	waitEvent("GUILD_MEMBER_UPDATE", func(d map[string]any) bool {
+		u, _ := d["user"].(map[string]any)
+		return u != nil && u["id"] == sleepy
+	})
 	waitEvent("MESSAGE_CREATE", func(d map[string]any) bool {
-		if ms, _ := d["mentions"].([]any); len(ms) == 0 {
+		ms, _ := d["mentions"].([]any)
+		if len(ms) != 2 {
 			return false
 		}
 		want := "<@" + user.ID + ">"
 		c, _ := d["content"].(string)
-		return strings.Contains(c, want) && strings.Contains(c, "<#")
+		return strings.Contains(c, want) && strings.Contains(c, "<@"+sleepy+">") && strings.Contains(c, "<#")
 	})
 
 	// Nickname: the client's Change-Nickname dialog PATCHes members/@me;

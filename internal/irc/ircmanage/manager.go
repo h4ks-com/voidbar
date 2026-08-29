@@ -1006,13 +1006,24 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	msgID := m.sf.New()
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
-	content, mentions, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
+	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
 	payload := buildMessagePayload(msgID, channelID, author, content, ts)
-	if len(mentions) > 0 {
+	if len(mentioned) > 0 {
+		// Upserts first (same-session order is preserved): a pill for a
+		// peer the client never saw must not render @invalid-user.
+		m.upsertMentionedPeers(c, mentioned)
+		mentions := make([]any, 0, len(mentioned))
+		for _, u := range mentioned {
+			mentions = append(mentions, mentionUserPayload(u))
+		}
 		payload["mentions"] = mentions
 	}
 	if len(mentionChans) > 0 {
-		payload["mention_channels"] = mentionChans
+		chs := make([]any, 0, len(mentionChans))
+		for _, ch := range mentionChans {
+			chs = append(chs, mentionChannelPayload(ch, c.networkID))
+		}
+		payload["mention_channels"] = chs
 	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {

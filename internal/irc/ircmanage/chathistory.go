@@ -219,7 +219,23 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 		}
 		// History gets the same mention treatment as live traffic: bare
 		// nicks become markers so the backlog renders pills too.
-		f.content, f.mentions, f.mentionChans = m.Discordize(c.userID, c.networkID, f.target, f.content)
+		var mentionedUsers []mentionUser
+		var mentionedChans []mentionChannel
+		f.content, mentionedUsers, mentionedChans = m.Discordize(c.userID, c.networkID, f.target, f.content)
+		f.mentions = nil
+		f.mentionChans = nil
+		if len(mentionedUsers) > 0 {
+			f.mentions = make([]any, 0, len(mentionedUsers))
+			for _, u := range mentionedUsers {
+				f.mentions = append(f.mentions, mentionUserPayload(u))
+			}
+		}
+		if len(mentionedChans) > 0 {
+			f.mentionChans = make([]any, 0, len(mentionedChans))
+			for _, ch := range mentionedChans {
+				f.mentionChans = append(f.mentionChans, mentionChannelPayload(ch, c.networkID))
+			}
+		}
 		if err := m.store.AppendMessage(storage.BufferedMessage{
 			ID:         msgID,
 			ChannelID:  ch.ID,
@@ -240,6 +256,11 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			}
 		}
 		if live {
+			if len(mentionedUsers) > 0 {
+				// Upserts before the message (same-session order): pills
+				// for never-seen peers must resolve.
+				m.upsertMentionedPeers(c, mentionedUsers)
+			}
 			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano))
 			if len(f.mentions) > 0 {
 				payload["mentions"] = f.mentions

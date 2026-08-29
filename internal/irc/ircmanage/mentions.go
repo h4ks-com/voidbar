@@ -2,6 +2,7 @@ package ircmanage
 
 import (
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/h4ks-com/voidbar/internal/discord/model"
@@ -30,8 +31,10 @@ func ircNickRune(r rune) bool {
 
 // mentionUser is one mentionable person.
 type mentionUser struct {
-	nick string // live IRC nick
-	id   string // Discord user id
+	nick   string // live IRC nick
+	id     string // Discord user id
+	bounce bool   // bouncer member (client already knows their user)
+	mode   string // highest channel mode (for role colors), "" = plain
 }
 
 // mentionChannel is one mentionable channel.
@@ -55,6 +58,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 			byLower[strings.ToLower(cm.Nick)] = mentionUser{
 				nick: cm.Nick,
 				id:   model.IrcAuthorID("irc:" + cm.Nick),
+				mode: cm.Mode,
 			}
 		}
 	} else if ircTarget != "" {
@@ -73,7 +77,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 			if nick == "" {
 				continue
 			}
-			byLower[strings.ToLower(nick)] = mentionUser{nick: nick, id: mem.UserID}
+			byLower[strings.ToLower(nick)] = mentionUser{nick: nick, id: mem.UserID, bounce: true}
 		}
 	}
 	out := make([]mentionUser, 0, len(byLower))
@@ -212,17 +216,18 @@ func cutChannelMarker(s string) (string, int, bool) {
 
 // Discordize scans IRC text for bare nicks (an optional leading @ is
 // swallowed - some people write @nick) and #channel references, rewrites
-// them into Discord markers, and returns the mentions/mention_channels
-// payload arrays the clients use for highlighting.
-func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (string, []any, []any) {
+// them into Discord markers, and returns the mentioned users/channels so
+// callers can build the payload arrays and upsert unknown peers.
+func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (string, []mentionUser, []mentionChannel) {
 	users := m.mentionUsers(userID, networkID, ircTarget)
 	chans := m.mentionChannels(userID, networkID)
 	if len(users) == 0 && len(chans) == 0 {
-		return content, []any{}, []any{}
+		return content, nil, nil
 	}
 	runes := []rune(content)
 	var b strings.Builder
-	var mentions, mentionChans []any
+	var mentionedUsers []mentionUser
+	var mentionedChans []mentionChannel
 	seenUser := map[string]bool{}
 	seenChan := map[string]bool{}
 	for i := 0; i < len(runes); {
@@ -236,12 +241,7 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 			b.WriteString("<@" + u.id + ">")
 			if !seenUser[u.id] {
 				seenUser[u.id] = true
-				mentions = append(mentions, map[string]any{
-					"id":            u.id,
-					"username":      u.nick,
-					"discriminator": "0",
-					"bot":           false,
-				})
+				mentionedUsers = append(mentionedUsers, u)
 			}
 			i = at + width
 			continue
@@ -250,12 +250,7 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 			b.WriteString("<#" + c.id + ">")
 			if !seenChan[c.id] {
 				seenChan[c.id] = true
-				mentionChans = append(mentionChans, map[string]any{
-					"id":       c.id,
-					"guild_id": networkID,
-					"name":     c.name,
-					"type":     0,
-				})
+				mentionedChans = append(mentionedChans, c)
 			}
 			i += width
 			continue
@@ -263,7 +258,67 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 		b.WriteRune(runes[i])
 		i++
 	}
-	return b.String(), mentions, mentionChans
+	return b.String(), mentionedUsers, mentionedChans
+}
+
+// mentionUserPayload builds one mentions[] entry.
+func mentionUserPayload(u mentionUser) map[string]any {
+	return map[string]any{
+		"id":            u.id,
+		"username":      u.nick,
+		"discriminator": "0",
+		"bot":           false,
+	}
+}
+
+// mentionChannelPayload builds one mention_channels[] entry.
+func mentionChannelPayload(c mentionChannel, networkID string) map[string]any {
+	return map[string]any{
+		"id":       c.id,
+		"guild_id": networkID,
+		"name":     c.name,
+		"type":     0,
+	}
+}
+
+// upsertMentionedPeers pushes a GUILD_MEMBER_UPDATE for every mentioned
+// IRC peer. Clients do NOT ingest users from the mentions array, and a
+// peer that joined after GUILD_CREATE and never spoke is unknown to
+// them - the pill then renders "@invalid-user". The member update is
+// the standard event that upserts both the member row and the user
+// object, so the pill resolves. Bouncer members are skipped: they are
+// known from READY/GUILD_CREATE, and a roles-less update would strip
+// their sidebar color.
+func (m *Manager) upsertMentionedPeers(c *conn, users []mentionUser) {
+	if len(users) == 0 {
+		return
+	}
+	mem, err := m.store.GetMembership(c.networkID, c.userID)
+	if err != nil {
+		return
+	}
+	joinedAt := mem.JoinedAt.Format(time.RFC3339)
+	for _, u := range users {
+		if u.bounce {
+			continue
+		}
+		roles := []any{}
+		if u.mode != "" {
+			roles = []any{model.IrcRoleID(u.mode)}
+		}
+		m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
+			"guild_id": c.networkID,
+			"user": map[string]any{
+				"id":            u.id,
+				"username":      u.nick,
+				"discriminator": "0",
+				"bot":           false,
+			},
+			"nick":      nil,
+			"roles":     roles,
+			"joined_at": joinedAt,
+		})
+	}
 }
 
 // matchNickAt returns the candidate nick matching at position i (must
