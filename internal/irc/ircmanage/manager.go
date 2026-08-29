@@ -57,6 +57,10 @@ type Manager struct {
 	// channel per tick). Generous by design: away status is cosmetic, and
 	// the bouncer must stay polite to small servers.
 	awayPollInterval time.Duration
+
+	// publicURL is the bouncer's public origin; when armed (SetPublicURL),
+	// unfurled embed images are mirrored locally and served from it.
+	publicURL string
 }
 
 const (
@@ -286,7 +290,18 @@ func New(store *storage.Storage, gw *gateway.Server, log *slog.Logger, sf *util.
 		conns:            make(map[string]*conn),
 		reconnectBackoff: reconnectBackoffInitial,
 		awayPollInterval: defaultAwayPollInterval,
+		publicURL:        "",
 	}
+}
+
+// SetPublicURL arms the embed media proxy: when set, unfurled images are
+// mirrored into local storage and served from the bouncer's public
+// origin, so clients only ever need to reach the bouncer itself (real
+// Discord does the same via media.discordapp.net).
+func (m *Manager) SetPublicURL(u string) {
+	m.mu.Lock()
+	m.publicURL = strings.TrimSuffix(u, "/")
+	m.mu.Unlock()
 }
 
 func key(userID, networkID string) string { return userID + "\x00" + networkID }
@@ -1036,13 +1051,13 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		}
 		payload["mention_channels"] = chs
 	}
-	// Server-side link unfurling: direct image URLs become image embeds
-	// (Discord does this server-side too; the client renders embeds[]
-	// only).
-	var embeds []any
-	if e := imageEmbeds(content); len(e) > 0 {
-		embeds = e
-		payload["embeds"] = e
+	// Server-side link unfurling: direct image URLs are mirrored and
+	// attached as attachment rows (clients render those reliably on
+	// third-party instances; embed images do not).
+	var linkAtts []any
+	if a := m.imageAttachments(content); len(a) > 0 {
+		linkAtts = a
+		payload["attachments"] = a
 	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {
@@ -1053,15 +1068,15 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// survives client reconnects and server restarts). The live relay must
 	// not depend on storage health, so failures are logged, not fatal.
 	if err := m.store.AppendMessage(storage.BufferedMessage{
-		ID:         msgID,
-		ChannelID:  channelID,
-		AuthorID:   "irc:" + author,
-		AuthorName: author,
-		Content:    content,
-		Timestamp:  ts,
-		Type:       0,
-		MsgID:      msgid,
-		Embeds:     embeds,
+		ID:          msgID,
+		ChannelID:   channelID,
+		AuthorID:    "irc:" + author,
+		AuthorName:  author,
+		Content:     content,
+		Timestamp:   ts,
+		Type:        0,
+		MsgID:       msgid,
+		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
 	} else if msgid != "" {
@@ -1120,23 +1135,24 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
 	}
-	// See dispatchMessage: inbound image links unfurl into embeds.
-	var embeds []any
-	if e := imageEmbeds(content); len(e) > 0 {
-		embeds = e
-		payload["embeds"] = e
+	// See dispatchMessage: inbound image links unfurl into mirrored
+	// attachment rows.
+	var linkAtts []any
+	if a := m.imageAttachments(content); len(a) > 0 {
+		linkAtts = a
+		payload["attachments"] = a
 	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	if err := m.store.AppendMessage(storage.BufferedMessage{
-		ID:         msgID,
-		ChannelID:  dm.ID,
-		AuthorID:   "irc:" + author,
-		AuthorName: author,
-		Content:    content,
-		Timestamp:  ts,
-		Type:       0,
-		MsgID:      msgid,
-		Embeds:     embeds,
+		ID:          msgID,
+		ChannelID:   dm.ID,
+		AuthorID:    "irc:" + author,
+		AuthorName:  author,
+		Content:     content,
+		Timestamp:   ts,
+		Type:        0,
+		MsgID:       msgid,
+		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
 	} else if msgid != "" {

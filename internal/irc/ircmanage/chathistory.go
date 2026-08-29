@@ -236,18 +236,19 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 				f.mentionChans = append(f.mentionChans, mentionChannelPayload(ch, c.networkID))
 			}
 		}
-		// Image links in history unfurl too (same as live traffic).
-		embeds := imageEmbeds(f.content)
+		// Image links in history unfurl too (same as live traffic):
+		// mirrored into attachment rows.
+		linkAtts := m.imageAttachments(f.content)
 		if err := m.store.AppendMessage(storage.BufferedMessage{
-			ID:         msgID,
-			ChannelID:  ch.ID,
-			AuthorID:   "irc:" + f.author,
-			AuthorName: f.author,
-			Content:    f.content,
-			Timestamp:  ts.Format(time.RFC3339Nano),
-			Type:       0,
-			MsgID:      f.msgid,
-			Embeds:     embeds,
+			ID:          msgID,
+			ChannelID:   ch.ID,
+			AuthorID:    "irc:" + f.author,
+			AuthorName:  f.author,
+			Content:     f.content,
+			Timestamp:   ts.Format(time.RFC3339Nano),
+			Type:        0,
+			MsgID:       f.msgid,
+			Attachments: linkAtts,
 		}); err != nil {
 			m.log.Warn("buffer append failed", "err", err, "channel", ch.ID, "msg_id", msgID)
 			continue // no buffer row -> the msgid index below would dangle
@@ -271,8 +272,8 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			if len(f.mentionChans) > 0 {
 				payload["mention_channels"] = f.mentionChans
 			}
-			if len(embeds) > 0 {
-				payload["embeds"] = embeds
+			if len(linkAtts) > 0 {
+				payload["attachments"] = linkAtts
 			}
 			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 		}
