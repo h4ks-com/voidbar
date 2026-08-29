@@ -271,12 +271,31 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   shape: per-hit context groups with `hit: true`, newest first, 25/page
   via `?offset=`, `total_results` across pages. Filter syntax beyond
   free text (`author_id`, `has:`, `from:`...) is not interpreted yet.
+- **Attachments** both ways, on the bouncer's own storage:
+  - Sending: the documented cloud-upload flow (`POST
+    /channels/:id/attachments` mints TTLed slots, `PUT
+    /api/v9/uploads/<token>` takes the bytes — the token is the
+    credential, like the presigned GCS URL it replaces; image
+    dimensions are sniffed) plus the legacy multipart `files[0]`-style
+    inline uploads. The Discord copy carries full attachment rows
+    (persisted in the replay buffer, so history renders them); the IRC
+    wire copy appends the public `/attachments/:id/:filename` URLs —
+    IRC peers fetch them token-free, exactly like a pasted link.
+  - Receiving: direct image URLs in IRC messages are mirrored into
+    local storage and attached as attachment rows (live and in
+    chathistory backfill). Embed-image rendering is broken in the
+    official client on third-party instances (the same build shows a
+    blank box against Oldcord Staging), while attachments render fine —
+    so unfurls ride the upload pipeline. The fetcher tolerates hosts
+    that dribble the body (partial read after a 4s budget, headers live
+    up front). `/attachments/refresh-urls` echoes URLs back — ours
+    never expire.
 
 ## Not implemented yet
 
-- **Message features**: attachments/file uploads, embeds.
-  Search and mentions are covered (see above). Pins serve an empty stub
-  (`GET /channels/:id/pins`), which both
+- **Message features**: embeds as rich link previews.
+  Search, mentions and attachments are covered (see above). Pins serve
+  an empty stub (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
 - **Channel management UI**: channel
   categories, keyed channels (+k) — auto-join channels from the connection
