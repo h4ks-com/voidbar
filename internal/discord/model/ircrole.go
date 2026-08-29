@@ -85,9 +85,9 @@ func IrcRolePayloads() []any {
 // msgids (no MSGREFTYPES in ISUPPORT) reactions cannot bridge, so the
 // client's picker is hidden rather than offering taps that go nowhere.
 func EveryoneRolePayload(guildID string, reactCapable bool) map[string]any {
-	perms := "104324673412113" // exactly what the bridge honours; no ADD_REACTIONS
+	perms := "104324740520977" // exactly what the bridge honours; no ADD_REACTIONS
 	if reactCapable {
-		perms = "104324673412177" // + ADD_REACTIONS (picker UI)
+		perms = "104324740521041" // + ADD_REACTIONS (picker UI)
 	}
 	return map[string]any{
 		"id":            guildID,
@@ -97,7 +97,7 @@ func EveryoneRolePayload(guildID string, reactCapable bool) map[string]any {
 		"icon":          nil,
 		"unicode_emoji": nil,
 		"position":      0,
-		"permissions":   perms, // never MANAGE_MESSAGES (no IRC mapping), never USE_EXTERNAL_EMOJIS (no custom emojis exist)
+		"permissions":   perms, // CHANGE_NICKNAME is what un-disables the Edit Server Profile nickname field; never MANAGE_MESSAGES (no IRC mapping), never USE_EXTERNAL_EMOJIS (no custom emojis exist)
 		"managed":       false,
 		"mentionable":   false,
 		"flags":         0,
