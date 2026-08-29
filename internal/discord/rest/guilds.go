@@ -548,24 +548,38 @@ func (s *Server) searchChannel(channelID string, terms []string) []map[string]an
 }
 
 // searchTerms extracts the free-text terms the clients actually send:
-// the official client uses ?content=, other builds ?text= or ?query=.
+// the official client uses ?content= (tokenized multi-word as repeated
+// ?contents=slop|text values), other builds ?text= or ?query=.
 func searchTerms(r *http.Request) []string {
 	q := r.URL.Query()
-	raw := q.Get("content")
-	if raw == "" {
-		raw = q.Get("text")
+	var raws []string
+	raws = append(raws, q.Get("content"))
+	for _, tok := range q["contents"] {
+		// Tokenized form: "<slop>|<text>" - the slop (words allowed
+		// between tokens) is ignored, we substring-match instead.
+		if i := strings.Index(tok, "|"); i >= 0 {
+			tok = tok[i+1:]
+		}
+		raws = append(raws, tok)
 	}
-	if raw == "" {
-		raw = q.Get("query")
+	raws = append(raws, q.Get("text"), q.Get("query"), q.Get("q"))
+	var terms []string
+	seen := map[string]bool{}
+	for _, raw := range raws {
+		for _, t := range strings.Fields(strings.ToLower(raw)) {
+			if !seen[t] {
+				seen[t] = true
+				terms = append(terms, t)
+			}
+		}
 	}
-	if raw == "" {
-		raw = q.Get("q")
-	}
-	return strings.Fields(strings.ToLower(raw))
+	return terms
 }
 
 // writeSearchResults pages a newest-first hit list Discord-style: groups
-// of one, 25 per page via ?offset=, total_results across pages.
+// of one, 25 per page via ?offset=, total_results across pages. Search
+// hits carry "hit": true (and no reactions key), per the userdoccers
+// shape - the client keys its result list off the flag.
 func writeSearchResults(w http.ResponseWriter, hits []map[string]any, offset int) {
 	if offset < 0 {
 		offset = 0
@@ -579,12 +593,16 @@ func writeSearchResults(w http.ResponseWriter, hits []map[string]any, offset int
 	}
 	groups := make([]any, 0, len(page))
 	for _, h := range page {
+		h["hit"] = true
+		h["components"] = []any{}
+		delete(h, "reactions")
 		groups = append(groups, []any{h})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"analytics_id":  "voidbar",
-		"total_results": len(hits),
-		"messages":      groups,
+		"analytics_id":                "voidbar",
+		"doing_deep_historical_index": false,
+		"total_results":               len(hits),
+		"messages":                    groups,
 	})
 }
 
@@ -642,10 +660,16 @@ func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
-	only := r.URL.Query().Get("channel_id")
+	// Docs allow repeated ?channel_id= filters; empty means all channels.
+	only := map[string]bool{}
+	for _, id := range r.URL.Query()["channel_id"] {
+		if id != "" {
+			only[id] = true
+		}
+	}
 	var hits []map[string]any
 	for _, ch := range channels {
-		if only != "" && ch.ID != only {
+		if len(only) > 0 && !only[ch.ID] {
 			continue
 		}
 		hits = append(hits, s.searchChannel(ch.ID, terms)...)
