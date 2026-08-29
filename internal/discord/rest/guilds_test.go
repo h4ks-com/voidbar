@@ -1844,5 +1844,43 @@ func TestMessageSearch(t *testing.T) {
 	if total, hits := search("", 0); total != 0 || len(hits) != 0 {
 		t.Fatalf("empty query: total=%d hits=%v", total, hits)
 	}
+
+	// The official client's search bar hits the guild route with ?text=
+	// (scoped to the current channel via ?channel_id=).
+	guildSearch := func(path string) (int, []string) {
+		resp, err := httpGet(srv.URL+path, token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			TotalResults int `json:"total_results"`
+			Messages     [][]map[string]any
+		}
+		if err := json.Unmarshal(resp, &out); err != nil {
+			t.Fatalf("guild search decode: %v (%s)", err, resp)
+		}
+		contents := make([]string, 0, len(out.Messages))
+		for _, group := range out.Messages {
+			contents = append(contents, group[0]["content"].(string))
+		}
+		return out.TotalResults, contents
+	}
+	respG, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guilds := []map[string]any{}
+	_ = json.Unmarshal(respG, &guilds)
+	guildID := guilds[0]["id"].(string)
+	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?text=coffee"); total != 1 || len(hits) != 1 || hits[0] != "fresh coffee" {
+		t.Fatalf("guild search: total=%d hits=%v", total, hits)
+	}
+	// Scoped to the channel: same answer through the ?channel_id= path.
+	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?text=tea&channel_id=" + channelID); total != 1 || hits[0] != "oldmsg tea" {
+		t.Fatalf("guild search scoped: total=%d hits=%v", total, hits)
+	}
+	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?text=nothingmatches"); total != 0 || len(hits) != 0 {
+		t.Fatalf("guild search miss: total=%d hits=%v", total, hits)
+	}
 }
 

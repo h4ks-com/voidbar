@@ -523,39 +523,13 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleSearchMessages serves GET /channels/{c}/messages/search: the
-// client's search box, answered from the channel's replay buffer. IRC
-// has no server-side search, so results cover everything the bouncer
-// has seen (live traffic plus any chathistory pulled during scrolls).
-// Shape follows Discord: messages is a list of per-hit context groups
-// (one entry each here), newest first, 25 per page via ?offset=.
-func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
-	empty := map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}}
-	if s.net == nil {
-		writeJSON(w, http.StatusOK, empty)
-		return
-	}
-	raw := r.URL.Query().Get("query")
-	if raw == "" {
-		raw = r.URL.Query().Get("q")
-	}
-	offset := 0
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			offset = n
-		}
-	}
-	terms := strings.Fields(strings.ToLower(raw))
-	empty["messages"] = []any{}
-	if len(terms) == 0 {
-		writeJSON(w, http.StatusOK, empty)
-		return
-	}
+// searchChannel returns every replay-buffer hit for the terms (AND,
+// case-insensitive, over content and author names), newest first.
+func (s *Server) searchChannel(channelID string, terms []string) []map[string]any {
 	// The buffer returns newest-first with a hard ceiling; searching it
 	// whole is a key-prefix scan, cheap enough at replay-buffer sizes.
-	buffered := s.net.ChannelMessages(r.PathValue("channel"), "", "", 1<<20)
+	buffered := s.net.ChannelMessages(channelID, "", "", 1<<20)
 	var hits []map[string]any
-	total := 0
 	for _, m := range buffered {
 		haystack := strings.ToLower(m.Content + " " + m.AuthorName)
 		matched := true
@@ -568,20 +542,115 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request, u 
 		if !matched {
 			continue
 		}
-		total++
-		if len(hits) < 25 && offset < total {
-			hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
-		}
+		hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
 	}
-	groups := make([]any, 0, len(hits))
-	for _, h := range hits {
+	return hits
+}
+
+// searchTerms extracts the free-text terms the clients actually send:
+// the official client uses ?text=, Spacebar-style ones ?query=.
+func searchTerms(r *http.Request) []string {
+	raw := r.URL.Query().Get("text")
+	if raw == "" {
+		raw = r.URL.Query().Get("query")
+	}
+	if raw == "" {
+		raw = r.URL.Query().Get("q")
+	}
+	return strings.Fields(strings.ToLower(raw))
+}
+
+// writeSearchResults pages a newest-first hit list Discord-style: groups
+// of one, 25 per page via ?offset=, total_results across pages.
+func writeSearchResults(w http.ResponseWriter, hits []map[string]any, offset int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(hits) {
+		offset = len(hits)
+	}
+	page := hits[offset:]
+	if len(page) > 25 {
+		page = page[:25]
+	}
+	groups := make([]any, 0, len(page))
+	for _, h := range page {
 		groups = append(groups, []any{h})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"analytics_id":  "voidbar",
-		"total_results": total,
+		"total_results": len(hits),
 		"messages":      groups,
 	})
+}
+
+// handleSearchMessages serves GET /channels/{c}/messages/search: the
+// client's search box, answered from the channel's replay buffer. IRC
+// has no server-side search, so results cover everything the bouncer
+// has seen (live traffic plus any chathistory pulled during scrolls).
+func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}})
+		return
+	}
+	terms := searchTerms(r)
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	if len(terms) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}})
+		return
+	}
+	hits := s.searchChannel(r.PathValue("channel"), terms)
+	writeSearchResults(w, hits, offset)}
+
+// handleSearchGuildMessages serves GET /guilds/{g}/messages/search: the
+// official client's search bar searches the whole guild (scoped to the
+// current channel via ?channel_id=). Same replay-buffer backing as the
+// channel route, merged across channels, newest first.
+func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	empty := map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}}
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	mem, err := s.net.MembershipFor(u.ID, r.PathValue("guild"))
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "unknown guild")
+		return
+	}
+	terms := searchTerms(r)
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	if len(terms) == 0 {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	channels, err := s.net.ChannelsFor(mem.NetworkID, mem.AutoJoin)
+	if err != nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	only := r.URL.Query().Get("channel_id")
+	var hits []map[string]any
+	for _, ch := range channels {
+		if only != "" && ch.ID != only {
+			continue
+		}
+		hits = append(hits, s.searchChannel(ch.ID, terms)...)
+	}
+	// Snowflake ids order chronologically; the client shows newest first.
+	sort.Slice(hits, func(i, j int) bool {
+		return hits[i]["id"].(string) > hits[j]["id"].(string)
+	})
+	writeSearchResults(w, hits, offset)
 }
 
 // decodeEmoji unescapes the emoji path segment if it still carries
