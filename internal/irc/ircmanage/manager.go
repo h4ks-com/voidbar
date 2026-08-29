@@ -1079,12 +1079,16 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
-	} else if msgid != "" {
-		// The reverse index needs the buffer row in place first; before
-		// this, foreign relays never persisted their msgid anchor (Set
-		// ran before Append and failed with KeyNotFound, debug-logged).
-		if err := m.store.SetMessageMsgID(c.networkID, channelID, msgID, msgid); err != nil {
-			m.log.Debug("msgid persist failed", "err", err, "channel", channelID, "msg", msgID)
+	} else {
+		// Link previews ride behind the message: fetch + MESSAGE_UPDATE.
+		m.sendLinkPreview(c.userID, channelID, msgID, content)
+		if msgid != "" {
+			// The reverse index needs the buffer row in place first; before
+			// this, foreign relays never persisted their msgid anchor (Set
+			// ran before Append and failed with KeyNotFound, debug-logged).
+			if err := m.store.SetMessageMsgID(c.networkID, channelID, msgID, msgid); err != nil {
+				m.log.Debug("msgid persist failed", "err", err, "channel", channelID, "msg", msgID)
+			}
 		}
 	}
 }
@@ -1155,10 +1159,14 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
-	} else if msgid != "" {
-		// The reverse index needs the buffer row in place first.
-		if err := m.store.SetMessageMsgID(c.networkID, dm.ID, msgID, msgid); err != nil {
-			m.log.Debug("msgid persist failed", "err", err, "dm", dm.ID, "msg", msgID)
+	} else {
+		// Link previews ride behind the message here too.
+		m.sendLinkPreview(c.userID, dm.ID, msgID, content)
+		if msgid != "" {
+			// The reverse index needs the buffer row in place first.
+			if err := m.store.SetMessageMsgID(c.networkID, dm.ID, msgID, msgid); err != nil {
+				m.log.Debug("msgid persist failed", "err", err, "dm", dm.ID, "msg", msgID)
+			}
 		}
 	}
 	if err := m.store.TouchDMChannel(dm.ID); err != nil {

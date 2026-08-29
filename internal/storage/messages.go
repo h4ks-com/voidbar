@@ -116,6 +116,37 @@ func (s *Storage) SetMessageMsgID(networkID, channelID, id, msgid string) error 
 	})
 }
 
+// SetMessageEmbeds attaches link-preview embeds to a buffered message
+// and returns the updated row, so the caller can rebuild the full
+// MESSAGE_UPDATE payload (content/author/attachments included).
+func (s *Storage) SetMessageEmbeds(channelID, id string, embeds []any) (*BufferedMessage, error) {
+	var out *BufferedMessage
+	err := s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(msgKey(channelID, id))
+		if err != nil {
+			return err
+		}
+		m := &BufferedMessage{}
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, m) }); err != nil {
+			return err
+		}
+		m.Embeds = embeds
+		val, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		if err := txn.Set(msgKey(channelID, id), val); err != nil {
+			return err
+		}
+		out = m
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LookupMessageByMsgID resolves an IRC msgid to (channel, message id).
 func (s *Storage) LookupMessageByMsgID(networkID, msgid string) (channelID, messageID string, ok bool) {
 	_ = s.db.View(func(txn *badger.Txn) error {
