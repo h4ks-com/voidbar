@@ -260,13 +260,17 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   rename alias (girc predates `draft/channel-rename`), and member lists
   carry bouncer members under their real user ids — one row per person
   everywhere (autocomplete included).
-- **Search** (`GET /channels/:id/messages/search`): answered from the
-  channel's replay buffer — IRC has no server-side search, so results
-  cover everything the bouncer has seen (live traffic plus chathistory
-  pulled during scrolls). Discord response shape (per-hit context
-  groups, newest first, 25/page via `?offset=`, `total_results` across
-  pages); terms are ANDed case-insensitively over content and author
-  names. `author_id`-style filter syntax is not interpreted yet.
+- **Search**: the client search box works over the replay buffer — IRC
+  has no server-side search, so results cover everything the bouncer
+  has seen (live traffic plus chathistory pulled during scrolls). Both
+  routes live: `GET /channels/:id/messages/search` and the one the
+  official client calls, `GET /guilds/:id/messages/search` (scoped via
+  repeated `?channel_id=`). Terms arrive as `?content=` (tokenized
+  `?contents=slop|text` too), `?text=`, or `?query=`; ANDed
+  case-insensitively over content and author names. Documented response
+  shape: per-hit context groups with `hit: true`, newest first, 25/page
+  via `?offset=`, `total_results` across pages. Filter syntax beyond
+  free text (`author_id`, `has:`, `from:`...) is not interpreted yet.
 
 ## Not implemented yet
 
