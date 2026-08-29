@@ -74,6 +74,14 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("GET /api/v9/channels/{channel}/messages/search", s.requireAuth(s.handleSearchMessages))
 	mux.HandleFunc("GET /api/v9/guilds/{guild}/messages/search", s.requireAuth(s.handleSearchGuildMessages))
 	mux.HandleFunc("POST /api/v9/channels/{channel}/messages", s.requireAuth(s.handleSendMessage))
+	mux.HandleFunc("POST /api/v9/channels/{channel}/attachments", s.requireAuth(s.handleCreateAttachments))
+	mux.HandleFunc("PUT /api/v9/uploads/{token}", s.handleUpload)
+	mux.HandleFunc("DELETE /api/v9/attachments/{path}", s.requireAuth(s.handleNoContentAuthed))
+	mux.HandleFunc("POST /api/v9/attachments/refresh-urls", s.requireAuth(s.handleRefreshAttachmentURLs))
+	// The public CDN surface: unauthenticated by design, IRC peers
+	// receive these URLs on the wire and hold no token.
+	mux.HandleFunc("GET /attachments/{id}/{filename}", s.handleGetAttachment)
+	mux.HandleFunc("HEAD /attachments/{id}/{filename}", s.handleGetAttachment)
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}/messages/{message}", s.requireAuth(s.handleDeleteMessage))
 	mux.HandleFunc("PUT /api/v9/channels/{channel}/messages/{message}/reactions/{emoji}/@me", s.requireAuth(s.handleReactSelf))
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}/messages/{message}/reactions/{emoji}/@me", s.requireAuth(s.handleReactSelf))

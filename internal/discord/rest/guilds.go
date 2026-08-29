@@ -3,6 +3,7 @@ package rest
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -362,6 +363,16 @@ func (s *Server) handleUpdateMemberMe(w http.ResponseWriter, r *http.Request, u 
 type sendMessageRequest struct {
 	Content string `json:"content"`
 	Nonce   any    `json:"nonce"`
+	// Attachments reference uploaded files: either cloud uploads
+	// (uploaded_filename from POST /channels/:id/attachments) or - in
+	// the legacy multipart flow - files[] parts of this very request.
+	Attachments []sendAttachment `json:"attachments"`
+}
+
+type sendAttachment struct {
+	ID              string `json:"id"`
+	Filename        string `json:"filename"`
+	UploadedFilename string `json:"uploaded_filename"`
 }
 
 // flexID accepts a snowflake as string OR bare JSON number: the Android
@@ -517,6 +528,12 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 				list = append(list, rc)
 			}
 			payload["reactions"] = list
+		}
+		if len(m.Attachments) > 0 {
+			payload["attachments"] = m.Attachments
+		}
+		if len(m.Embeds) > 0 {
+			payload["embeds"] = m.Embeds
 		}
 		out = append(out, payload)
 	}
@@ -892,6 +909,10 @@ func (s *Server) handleLeaveGuild(w http.ResponseWriter, r *http.Request, u *sto
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	channelID := r.PathValue("channel")
 	var req sendMessageRequest
+	// Attachment rows for the payload plus the URLs the IRC wire copy
+	// must carry (IRC has no attachments - the link IS the transfer).
+	var attachRows []any
+	var attachURLs []string
 	// Web clients (Flicker) always send multipart/form-data - their send
 	// path doubles as the upload path, with the message object packed
 	// into a payload_json form field (Discord upload semantics) - while
@@ -899,10 +920,6 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			jsonError(w, http.StatusBadRequest, "invalid body")
-			return
-		}
-		if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
-			jsonError(w, http.StatusBadRequest, "attachments not supported yet")
 			return
 		}
 		if pj := r.FormValue("payload_json"); pj != "" {
@@ -914,11 +931,51 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			req.Content = r.FormValue("content")
 			req.Nonce = r.FormValue("nonce")
 		}
+		// Legacy inline upload: files[] parts are stored directly.
+		if r.MultipartForm != nil {
+			files := r.MultipartForm.File["files"]
+			for i, fh := range files {
+				f, err := fh.Open()
+				if err != nil {
+					jsonError(w, http.StatusBadRequest, "unreadable file")
+					return
+				}
+				data, err := io.ReadAll(io.LimitReader(f, maxUploadBytes+1))
+				_ = f.Close()
+				if err != nil || int64(len(data)) > maxUploadBytes {
+					jsonError(w, http.StatusBadRequest, "unreadable file")
+					return
+				}
+				att := s.newStoredAttachment(fh.Filename, data)
+				rowID := strconv.Itoa(i)
+				if len(req.Attachments) > i && req.Attachments[i].ID != "" {
+					rowID = req.Attachments[i].ID
+				}
+				attachRows = append(attachRows, s.attachmentPayload(rowID, att))
+				attachURLs = append(attachURLs, s.attachmentURL(att.ID, att.Filename))
+			}
+		}
 	} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if strings.TrimSpace(req.Content) == "" {
+	if s.net == nil || s.irc == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	// Cloud-upload flow: attachments[] rows with uploaded_filename.
+	if len(req.Attachments) > 0 {
+		rows, urls, err := s.resolveSendAttachments(req.Attachments)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "unknown uploaded attachment")
+			return
+		}
+		attachRows = append(attachRows, rows...)
+		attachURLs = append(attachURLs, urls...)
+	}
+	// Content may be empty when the message is a bare upload (Discord
+	// allows that; IRC gets the bare links).
+	if strings.TrimSpace(req.Content) == "" && len(attachRows) == 0 {
 		jsonError(w, http.StatusBadRequest, "empty message")
 		return
 	}
@@ -926,10 +983,6 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	// same artifact Spacebar renders as a gap under every mobile message);
 	// real Discord trims it server-side, so the bouncer does too.
 	req.Content = strings.TrimRight(req.Content, " \t\r\n")
-	if s.net == nil || s.irc == nil {
-		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
-		return
-	}
 	// DM thread: the snowflake resolves to a DMChannel and the relay
 	// targets the peer's nick instead of a #channel.
 	if dm, err := s.net.DMChannelByID(channelID); err == nil {
@@ -942,7 +995,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		msgID := s.net.NewMessageID()
 		// Discord-side content (with <@id> markers) is what the client
 		// sees and what gets buffered; the wire copy carries bare nicks.
-		wire := s.irc.IRCize(u.ID, dm.NetworkID, dm.Nick, req.Content)
+		// Attachments travel as plain URLs - IRC has nothing else.
+		wire := strings.TrimSpace(s.irc.IRCize(u.ID, dm.NetworkID, dm.Nick, req.Content) + " " + strings.Join(attachURLs, " "))
 		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, wire, msgID, channelID); err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
@@ -952,6 +1006,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			authorName = mem.Nick
 		}
 	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+		if len(attachRows) > 0 {
+			msg["attachments"] = attachRows
+		}
 		// Pills render from the user store, but highlighting reads the
 		// mentions array - own sends carry it like inbound relays do.
 		if mentioned, _ := s.irc.MentionPayloadsFromMarkers(u.ID, dm.NetworkID, dm.Nick, req.Content); len(mentioned) > 0 {
@@ -961,13 +1018,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
 		}
 		if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
-			ID:         msg["id"].(string),
-			ChannelID:  channelID,
-			AuthorID:   u.ID,
-			AuthorName: authorName,
-			Content:    req.Content,
-			Nonce:      req.Nonce,
-			Timestamp:  msg["timestamp"].(string),
+			ID:          msg["id"].(string),
+			ChannelID:   channelID,
+			AuthorID:    u.ID,
+			AuthorName:  authorName,
+			Content:     req.Content,
+			Nonce:       req.Nonce,
+			Timestamp:   msg["timestamp"].(string),
+			Attachments: attachRows,
 		}); err != nil {
 			s.log.Warn("buffer append failed", "err", err, "channel", channelID)
 		}
@@ -984,7 +1042,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	msgID := s.net.NewMessageID()
 	// The wire copy carries bare nicks instead of <@id> markers (IRC
 	// convention); the Discord-side copy keeps the markers for pills.
-	wire := s.irc.IRCize(u.ID, ch.NetworkID, ch.IRCName, req.Content)
+	// Attachments become plain URLs on the wire.
+	wire := strings.TrimSpace(s.irc.IRCize(u.ID, ch.NetworkID, ch.IRCName, req.Content) + " " + strings.Join(attachURLs, " "))
 	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, wire, msgID, channelID); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
@@ -1001,6 +1060,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		authorName = mem.Nick
 	}
 	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+	if len(attachRows) > 0 {
+		msg["attachments"] = attachRows
+	}
 	// Own sends carry the mentions arrays too: highlighting reads them,
 	// not the pills (same as inbound relays).
 	if mentioned, mentionChans := s.irc.MentionPayloadsFromMarkers(u.ID, ch.NetworkID, ch.IRCName, req.Content); len(mentioned) > 0 || len(mentionChans) > 0 {
@@ -1020,13 +1082,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	// And they enter the replay buffer like inbound relays, so history
 	// shows the whole conversation after a reconnect/restart.
 	if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
-		ID:         msg["id"].(string),
-		ChannelID:  channelID,
-		AuthorID:   u.ID,
-		AuthorName: authorName,
-		Content:    req.Content,
-		Nonce:      req.Nonce,
-		Timestamp:  msg["timestamp"].(string),
+		ID:          msg["id"].(string),
+		ChannelID:   channelID,
+		AuthorID:    u.ID,
+		AuthorName:  authorName,
+		Content:     req.Content,
+		Nonce:       req.Nonce,
+		Timestamp:   msg["timestamp"].(string),
+		Attachments: attachRows,
 	}); err != nil {
 		s.log.Warn("buffer append failed", "err", err, "channel", channelID)
 	}

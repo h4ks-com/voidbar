@@ -1036,6 +1036,14 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		}
 		payload["mention_channels"] = chs
 	}
+	// Server-side link unfurling: direct image URLs become image embeds
+	// (Discord does this server-side too; the client renders embeds[]
+	// only).
+	var embeds []any
+	if e := imageEmbeds(content); len(e) > 0 {
+		embeds = e
+		payload["embeds"] = e
+	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: c.networkID}, msgid)
@@ -1053,6 +1061,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		Timestamp:  ts,
 		Type:       0,
 		MsgID:      msgid,
+		Embeds:     embeds,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
 	} else if msgid != "" {
@@ -1111,6 +1120,12 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
 	}
+	// See dispatchMessage: inbound image links unfurl into embeds.
+	var embeds []any
+	if e := imageEmbeds(content); len(e) > 0 {
+		embeds = e
+		payload["embeds"] = e
+	}
 	m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 	if err := m.store.AppendMessage(storage.BufferedMessage{
 		ID:         msgID,
@@ -1121,6 +1136,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 		Timestamp:  ts,
 		Type:       0,
 		MsgID:      msgid,
+		Embeds:     embeds,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
 	} else if msgid != "" {

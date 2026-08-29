@@ -32,6 +32,11 @@ type BufferedMessage struct {
 	// Reactions is emoji -> reacting user ids, persisted on every change so
 	// pills survive bouncer restarts (the live-wire msgid registry cannot).
 	Reactions map[string][]string `json:"reactions,omitempty"`
+	// Attachments/Embeds are the ready-made Discord payload fragments
+	// (upload rows, synthesized image-link embeds) so history renders
+	// them identically to live dispatches.
+	Attachments []any `json:"attachments,omitempty"`
+	Embeds      []any `json:"embeds,omitempty"`
 }
 
 // padID renders a message id so that lexicographic order matches id order:

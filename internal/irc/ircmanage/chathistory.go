@@ -236,6 +236,8 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 				f.mentionChans = append(f.mentionChans, mentionChannelPayload(ch, c.networkID))
 			}
 		}
+		// Image links in history unfurl too (same as live traffic).
+		embeds := imageEmbeds(f.content)
 		if err := m.store.AppendMessage(storage.BufferedMessage{
 			ID:         msgID,
 			ChannelID:  ch.ID,
@@ -245,6 +247,7 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			Timestamp:  ts.Format(time.RFC3339Nano),
 			Type:       0,
 			MsgID:      f.msgid,
+			Embeds:     embeds,
 		}); err != nil {
 			m.log.Warn("buffer append failed", "err", err, "channel", ch.ID, "msg_id", msgID)
 			continue // no buffer row -> the msgid index below would dangle
@@ -267,6 +270,9 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			}
 			if len(f.mentionChans) > 0 {
 				payload["mention_channels"] = f.mentionChans
+			}
+			if len(embeds) > 0 {
+				payload["embeds"] = embeds
 			}
 			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 		}

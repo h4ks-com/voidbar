@@ -3,6 +3,7 @@ package rest
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1885,6 +1886,222 @@ func TestMessageSearch(t *testing.T) {
 	// The official client sends the term as ?content=.
 	if total, hits := guildSearch("/api/v9/guilds/" + guildID + "/messages/search?content=coffee&include_nsfw=false"); total != 1 || hits[0] != "fresh coffee" {
 		t.Fatalf("guild search content param: total=%d hits=%v", total, hits)
+	}
+}
+
+func TestAttachmentUploadFlow(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	wire := make(chan string, 8)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				w := func(s string) { _, _ = conn.Write([]byte(s)) }
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						w("CAP * LS :message-tags echo-message server-time batch draft/chathistory\r\n")
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						w("CAP * ACK :" + req + "\r\n")
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						w(":fake 001 " + nick + " :Welcome\r\n")
+					case strings.HasPrefix(line, "PING"):
+						w("PONG" + line[4:] + "\r\n")
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
+						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+					case strings.HasPrefix(line, "WHO "):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+					case strings.HasPrefix(line, "PRIVMSG"):
+						select {
+						case wire <- line:
+						default:
+						}
+					case strings.HasPrefix(line, "CHATHISTORY LATEST"):
+						w(":fake BATCH +bL draft/chathistory #test\r\n")
+						w(":fake BATCH -bL\r\n")
+					}
+				}
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	cfg.Server.PublicURL = "http://127.0.0.1:0"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	cfg.Server.PublicURL = srv.URL
+
+	netw, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, netw.ID) })
+
+	// Resolve the channel id once the guild materializes.
+	deadline := time.Now().Add(5 * time.Second)
+	var channelID string
+	for channelID == "" && time.Now().Before(deadline) {
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			guilds := []map[string]any{}
+			_ = json.Unmarshal(resp, &guilds)
+			if len(guilds) > 0 {
+				if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+guilds[0]["id"].(string), token); err == nil {
+					var detail map[string]any
+					_ = json.Unmarshal(resp, &detail)
+					if chans, ok := detail["channels"].([]any); ok {
+						for _, c := range chans {
+							if cm := c.(map[string]any); cm["name"] == "test" {
+								channelID, _ = cm["id"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("channel id never resolved")
+	}
+
+	// 1x1 PNG (base64: a real header closes the IHDR chunk properly,
+	// which image.DecodeConfig requires).
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1) Create the upload slot.
+	body, _ := json.Marshal(map[string]any{"files": []map[string]any{{
+		"id": "0", "filename": "dot.png", "file_size": len(png),
+	}}})
+	req, _ := http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/attachments", bytes.NewReader(body))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slots struct {
+		Attachments []struct {
+			ID             string `json:"id"`
+			UploadURL      string `json:"upload_url"`
+			UploadFilename string `json:"upload_filename"`
+		} `json:"attachments"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&slots)
+	resp.Body.Close()
+	if len(slots.Attachments) != 1 {
+		t.Fatalf("upload slots: %+v", slots)
+	}
+	slot := slots.Attachments[0]
+	// 2) PUT the bytes (no auth - the token is the credential).
+	req, _ = http.NewRequest("PUT", slot.UploadURL, bytes.NewReader(png))
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("upload PUT status %d", resp.StatusCode)
+	}
+	// 3) Send the message referencing the upload.
+	sendBody, _ := json.Marshal(map[string]any{
+		"content": "look",
+		"attachments": []map[string]any{{
+			"id": slot.ID, "filename": "dot.png", "uploaded_filename": slot.UploadFilename,
+		}},
+	})
+	req, _ = http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages", bytes.NewReader(sendBody))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&msg)
+	resp.Body.Close()
+	atts, _ := msg["attachments"].([]any)
+	if len(atts) != 1 {
+		t.Fatalf("message attachments: %+v", msg)
+	}
+	att := atts[0].(map[string]any)
+	if att["filename"] != "dot.png" || att["content_type"] != "image/png" {
+		t.Fatalf("attachment row: %+v", att)
+	}
+	if att["width"].(float64) != 1 || att["height"].(float64) != 1 {
+		t.Fatalf("image dims not sniffed: %+v", att)
+	}
+	// 4) The public CDN URL serves the exact bytes.
+	fileURL, _ := att["url"].(string)
+	served, err := httpGet(fileURL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(served, png) {
+		t.Fatalf("served bytes differ: %d vs %d", len(served), len(png))
+	}
+	// 5) The wire copy carried the URL for IRC peers.
+	select {
+	case line := <-wire:
+		if !strings.Contains(line, "/attachments/") || !strings.Contains(line, "dot.png") {
+			t.Fatalf("wire PRIVMSG missing attachment url: %s", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no PRIVMSG on the wire")
+	}
+	// 6) History renders the attachment after a reconnect.
+	if resp, err := httpGet(srv.URL+"/api/v9/channels/"+channelID+"/messages?limit=10", token); err == nil {
+		page := []map[string]any{}
+		_ = json.Unmarshal(resp, &page)
+		found := false
+		for _, m := range page {
+			if m["id"] == msg["id"] {
+				if a, ok := m["attachments"].([]any); ok && len(a) == 1 {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatal("history lost the attachment")
+		}
 	}
 }
 

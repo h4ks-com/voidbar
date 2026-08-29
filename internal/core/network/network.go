@@ -61,6 +61,70 @@ func (s *Service) ChannelMessages(channelID, before, after string, limit int) []
 	return s.store.ChannelMessages(channelID, before, after, limit)
 }
 
+// CreateUpload records a pending attachment upload slot.
+func (s *Service) CreateUpload(up *storage.PendingUpload) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.CreateUpload(up)
+}
+
+// GetUpload fetches a pending attachment upload slot.
+func (s *Service) GetUpload(token string) (*storage.PendingUpload, error) {
+	if s.store == nil {
+		return nil, storage.ErrAttachmentNotFound
+	}
+	return s.store.GetUpload(token)
+}
+
+// BindAttachment stores uploaded bytes and binds them to their id.
+func (s *Service) BindAttachment(upload *storage.PendingUpload, att *storage.Attachment, data []byte) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.BindAttachment(upload, att, data)
+}
+
+// PutAttachment stores attachment metadata and bytes (multipart flow).
+func (s *Service) PutAttachment(att *storage.Attachment, data []byte) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.PutAttachment(att, data)
+}
+
+// BindUpload ties an upload_filename to a stored attachment id.
+func (s *Service) BindUpload(uploadFilename, attachmentID string) error {
+	if s.store == nil {
+		return nil
+	}
+	return s.store.BindUpload(uploadFilename, attachmentID)
+}
+
+// ResolveUpload maps an upload_filename to the stored attachment.
+func (s *Service) ResolveUpload(uploadFilename string) (*storage.Attachment, error) {
+	if s.store == nil {
+		return nil, storage.ErrAttachmentNotFound
+	}
+	return s.store.ResolveUpload(uploadFilename)
+}
+
+// GetAttachment returns attachment metadata by id.
+func (s *Service) GetAttachment(id string) (*storage.Attachment, error) {
+	if s.store == nil {
+		return nil, storage.ErrAttachmentNotFound
+	}
+	return s.store.GetAttachment(id)
+}
+
+// GetAttachmentData returns attachment bytes by id.
+func (s *Service) GetAttachmentData(id string) ([]byte, error) {
+	if s.store == nil {
+		return nil, storage.ErrAttachmentNotFound
+	}
+	return s.store.GetAttachmentData(id)
+}
+
 // UserSettings returns the persisted legacy client settings for a user,
 // merged over the defaults so clients validating the full shape (web
 // clients with zod schemas) always see a complete object.
