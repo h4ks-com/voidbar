@@ -302,23 +302,40 @@ func (m *Manager) upsertMentionedPeers(c *conn, users []mentionUser) {
 		if u.bounce {
 			continue
 		}
-		roles := []any{}
-		if u.mode != "" {
-			roles = []any{model.IrcRoleID(u.mode)}
-		}
-		m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
-			"guild_id": c.networkID,
-			"user": map[string]any{
-				"id":            u.id,
-				"username":      u.nick,
-				"discriminator": "0",
-				"bot":           false,
-			},
-			"nick":      nil,
-			"roles":     roles,
-			"joined_at": joinedAt,
-		})
+		m.dispatchPeerMember(c, u.nick, u.mode, joinedAt)
 	}
+}
+
+func (m *Manager) upsertPeerMember(c *conn, nick, mode, joinedAt string) {
+	if joinedAt == "" {
+		mem, err := m.store.GetMembership(c.networkID, c.userID)
+		if err != nil {
+			return
+		}
+		joinedAt = mem.JoinedAt.Format(time.RFC3339)
+	}
+	m.dispatchPeerMember(c, nick, mode, joinedAt)
+}
+
+// dispatchPeerMember emits the GUILD_MEMBER_UPDATE carrying the peer's
+// user object (roles from their channel mode; "" keeps the row plain).
+func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
+	roles := []any{}
+	if mode != "" {
+		roles = []any{model.IrcRoleID(mode)}
+	}
+	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
+		"guild_id": c.networkID,
+		"user": map[string]any{
+			"id":            model.IrcAuthorID("irc:" + nick),
+			"username":      nick,
+			"discriminator": "0",
+			"bot":           false,
+		},
+		"nick":      nil,
+		"roles":     roles,
+		"joined_at": joinedAt,
+	})
 }
 
 // matchNickAt returns the candidate nick matching at position i (must

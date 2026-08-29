@@ -583,54 +583,74 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		// Guild-wide list: union across the member's channels.
 		list = s.ircOccupants(userID, guildID, mem.AutoJoin)
 	}
-	// The bouncer user is always a member of their own guild. With the
-	// upstream link down or mid-reconnect, NAMES is empty and the member
-	// panel would go completely blank; seed ourselves so the list stays
-	// honest (matches Discord, where you never leave your own guild's
-	// member list).
-	if mem.Nick != "" {
-		selfPresent := false
-		for _, cm := range list {
-			if strings.EqualFold(cm.Nick, mem.Nick) {
-				selfPresent = true
-				break
-			}
-		}
-		if !selfPresent {
-			list = append(list, ircmanage.ChannelMember{Nick: mem.Nick})
-		}
+	// Bouncer members ride under their REAL user ids (the GUILD_CREATE
+	// member rows use them too - a hash id here would render the same
+	// person twice in the client's mention autocomplete); their roster
+	// occupancy rows are skipped to match. This also keeps the list
+	// honest with the link down: members stay even when NAMES is empty.
+	bouncers := s.bouncerMembers(guildID)
+	modeByLower := make(map[string]string, len(list))
+	for _, cm := range list {
+		modeByLower[strings.ToLower(cm.Nick)] = cm.Mode
 	}
-	if len(list) > 99 {
-		list = list[:99]
+	awayByLower := make(map[string]bool, len(list))
+	for _, cm := range list {
+		awayByLower[strings.ToLower(cm.Nick)] = cm.Away
+	}
+	rows := make([]ircmanage.ChannelMember, 0, len(list)+len(bouncers))
+	ids := make([]string, 0, cap(rows))
+	for _, bm := range bouncers {
+		lower := strings.ToLower(bm.nick)
+		rows = append(rows, ircmanage.ChannelMember{
+			Nick: bm.nick,
+			Mode: modeByLower[lower],
+			Away: awayByLower[lower],
+		})
+		ids = append(ids, bm.userID)
+	}
+	for _, cm := range list {
+		if _, dup := bouncers[strings.ToLower(cm.Nick)]; dup {
+			continue
+		}
+		rows = append(rows, cm)
+		ids = append(ids, "")
+	}
+	if len(rows) > 99 {
+		rows = rows[:99]
+		ids = ids[:99]
 	}
 
 	joinedAt := mem.JoinedAt.Format(time.RFC3339)
-	byMode := make(map[string][]ircmanage.ChannelMember, len(list))
-	for _, cm := range list {
-		byMode[cm.Mode] = append(byMode[cm.Mode], cm)
+	byMode := make(map[string]int, len(rows))
+	for _, cm := range rows {
+		byMode[cm.Mode]++
 	}
 	groups := make([]any, 0, len(model.IrcRoleModes())+1)
-	items := make([]any, 0, len(list)+1)
+	items := make([]any, 0, len(rows)+1)
 	for _, mode := range model.IrcRoleModes() {
-		cms := byMode[mode]
-		if len(cms) == 0 {
+		if byMode[mode] == 0 {
 			continue
 		}
 		roleID := model.IrcRoleID(mode)
-		groups = append(groups, map[string]any{"id": roleID, "count": len(cms)})
-		items = append(items, map[string]any{"group": map[string]any{"id": roleID, "count": len(cms)}})
-		for _, cm := range cms {
-			items = append(items, memberListItem(cm, joinedAt, mode))
+		groups = append(groups, map[string]any{"id": roleID, "count": byMode[mode]})
+		items = append(items, map[string]any{"group": map[string]any{"id": roleID, "count": byMode[mode]}})
+		for i, cm := range rows {
+			if cm.Mode != mode {
+				continue
+			}
+			items = append(items, memberListItem(cm, ids[i], joinedAt, mode))
 		}
 	}
-	plain := byMode[""]
-	if len(plain) > 0 {
+	if byMode[""] > 0 {
 		// Empty sections must not be sent at all: the client renders
 		// whatever groups we emit, including "Online - 0" headers.
-		groups = append(groups, map[string]any{"id": "online", "count": len(plain)})
-		items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": len(plain)}})
-		for _, cm := range plain {
-			items = append(items, memberListItem(cm, joinedAt, ""))
+		groups = append(groups, map[string]any{"id": "online", "count": byMode[""]})
+		items = append(items, map[string]any{"group": map[string]any{"id": "online", "count": byMode[""]}})
+		for i, cm := range rows {
+			if cm.Mode != "" {
+				continue
+			}
+			items = append(items, memberListItem(cm, ids[i], joinedAt, ""))
 		}
 	}
 	return map[string]any{
@@ -640,8 +660,8 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 		// Discord always sends member_count; online_count is the
 		// Spacebar extra web clients use for partial-sync heuristics.
 		// On IRC everyone listed is connected by definition.
-		"member_count": len(list),
-		"online_count": len(list),
+		"member_count": len(rows),
+		"online_count": len(rows),
 		"ops": []any{
 			map[string]any{
 				"op":    "SYNC",
@@ -652,13 +672,47 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	}
 }
 
-// memberListItem builds one GUILD_MEMBER_LIST_UPDATE member row. COMPAT:
-// presence lives INSIDE the member object here (the item parser only
-// knows the "group"/"member" keys, and GuildMember itself carries a
-// presence field the client reads via StoreStream.handleItem). IRC away
-// maps to Discord "idle".
-func memberListItem(cm ircmanage.ChannelMember, joinedAt, mode string) map[string]any {
-	uid := model.IrcAuthorID("irc:" + cm.Nick)
+// bouncerMember is one bouncer member of a network under their live
+// nick, with their real user id.
+type bouncerMember struct {
+	nick   string
+	userID string
+}
+
+// bouncerMembers lists the network's bouncer members under their live
+// nicks, keyed by lowercased nick.
+func (s *Service) bouncerMembers(networkID string) map[string]bouncerMember {
+	all, err := s.store.ListMemberships(networkID)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bouncerMember, len(all))
+	for _, mem := range all {
+		nick := mem.Nick
+		if s.manager != nil {
+			if live := s.manager.LiveNick(mem.UserID, networkID); live != "" {
+				nick = live
+			}
+		}
+		if nick == "" {
+			continue
+		}
+		out[strings.ToLower(nick)] = bouncerMember{nick: nick, userID: mem.UserID}
+	}
+	return out
+}
+
+// memberListItem builds one GUILD_MEMBER_LIST_UPDATE member row. uid is
+// the Discord user id for the row: a bouncer member's real id, or the
+// hashed snowflake for a plain IRC peer. COMPAT: presence lives INSIDE
+// the member object here (the item parser only knows the "group"/
+// "member" keys, and GuildMember itself carries a presence field the
+// client reads via StoreStream.handleItem). IRC away maps to Discord
+// "idle".
+func memberListItem(cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[string]any {
+	if uid == "" {
+		uid = model.IrcAuthorID("irc:" + cm.Nick)
+	}
 	status := presenceStatus(cm.Away)
 	return map[string]any{
 		"member": map[string]any{
@@ -841,26 +895,58 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 	for _, id := range userIDs {
 		want[id] = true
 	}
+	// Same id discipline as the op 14 lists: bouncer members under their
+	// real ids (the own id resolves here too - with a hash it never
+	// matched and the client kept re-asking), peers under their hashes.
+	bouncers := s.bouncerMembers(guildID)
 	list := s.ircOccupants(userID, guildID, mem.AutoJoin)
-	members := make([]any, 0, len(list))
-	presences := make([]any, 0, len(list))
+	modeByLower := make(map[string]string, len(list))
+	awayByLower := make(map[string]bool, len(list))
 	for _, cm := range list {
-		uid := model.IrcAuthorID("irc:" + cm.Nick)
+		modeByLower[strings.ToLower(cm.Nick)] = cm.Mode
+		awayByLower[strings.ToLower(cm.Nick)] = cm.Away
+	}
+	type row struct {
+		cm  ircmanage.ChannelMember
+		uid string
+	}
+	rows := make([]row, 0, len(list)+len(bouncers))
+	for _, bm := range bouncers {
+		lower := strings.ToLower(bm.nick)
+		rows = append(rows, row{ircmanage.ChannelMember{
+			Nick: bm.nick,
+			Mode: modeByLower[lower],
+			Away: awayByLower[lower],
+		}, bm.userID})
+	}
+	for _, cm := range list {
+		if _, dup := bouncers[strings.ToLower(cm.Nick)]; dup {
+			continue
+		}
+		rows = append(rows, row{cm, ""})
+	}
+	members := make([]any, 0, len(rows))
+	presences := make([]any, 0, len(rows))
+	for _, r := range rows {
+		uid := r.uid
+		if uid == "" {
+			uid = model.IrcAuthorID("irc:" + r.cm.Nick)
+		}
 		if len(want) > 0 && !want[uid] {
 			continue
 		}
 		user := map[string]any{
 			"id":            uid,
-			"username":      cm.Nick,
+			"username":      r.cm.Nick,
 			"discriminator": "0",
 			"bot":           false,
 		}
 		members = append(members, map[string]any{
 			"user":      user,
-			"roles":     ircRoleIDsFor(cm.Mode),
+			"roles":     ircRoleIDsFor(r.cm.Mode),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
-		status := presenceStatus(cm.Away)
+		status := presenceStatus(r.cm.Away)
 		presences = append(presences, map[string]any{
 			"user":       map[string]any{"id": uid},
 			"status":     status,

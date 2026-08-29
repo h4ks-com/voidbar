@@ -767,6 +767,12 @@ func (m *Manager) registerHandlers(c *conn) {
 			c.clearPending(e.Params[0])
 			// Freshly joined: ask the upstream for recent history once.
 			m.maybeChatPrefill(c, e.Params[0])
+		} else if e.Source != nil {
+			// A foreign peer joined: their member rows are pickable in
+			// the client's mention autocomplete, but the pill renders
+			// only if the user store knows them - upsert before they
+			// ever get mentioned.
+			m.upsertPeerMember(c, e.Source.Name, "", "")
 		}
 		if len(e.Params) > 0 {
 			m.notifyOccupancy(c, e.Params[0])
