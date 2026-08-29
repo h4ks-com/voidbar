@@ -123,6 +123,14 @@ type conn struct {
 	pendSendMu  sync.Mutex
 	pendingSend map[string][]msgRef
 
+	// renames remembers channel renames this connection has seen
+	// (new name, lowercased -> the old name girc still tracks the roster
+	// under). girc predates draft/channel-rename: it never moves channel
+	// state, so until a reconnect rebuilds it via JOIN, the roster is
+	// read through the old name.
+	renamesMu sync.RWMutex
+	renames   map[string]string
+
 	// reactions tracks emoji -> reacting user ids per Discord message id
 	// (count/me rendering for message fetches; live updates go out as
 	// MESSAGE_REACTION_ADD/REMOVE).
@@ -356,6 +364,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		snowToMsgid:  make(map[string]string),
 		msgidToRef:   make(map[string]msgRef),
 		pendingSend:  make(map[string][]msgRef),
+		renames:      make(map[string]string),
 		reactions:    make(map[string]map[string]map[string]bool),
 		chatBatches:  make(map[string]*chatBatch),
 	}
@@ -995,7 +1004,16 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// Snowflake message id is mandatory: the client's message store drops
 	// MESSAGE_CREATE payloads without one.
 	msgID := m.sf.New()
+	// Bare IRC nicks become Discord markers (pills + mentions) so
+	// highlighting works; the buffered copy keeps the markers.
+	content, mentions, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
 	payload := buildMessagePayload(msgID, channelID, author, content, ts)
+	if len(mentions) > 0 {
+		payload["mentions"] = mentions
+	}
+	if len(mentionChans) > 0 {
+		payload["mention_channels"] = mentionChans
+	}
 	m.log.Info("irc message relayed", "user", c.userID, "network", c.networkID, "from", author, "target", target, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: c.networkID}, msgid)
@@ -1145,6 +1163,19 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 		return nil
 	}
 	ch := client.LookupChannel(ircName)
+	if ch == nil || len(ch.Users(client)) == 0 {
+		// A renamed channel: girc never moved the roster off the old
+		// name (see applyRename). Once anyone joins the new name the
+		// fresh state takes over; until then serve the old roster.
+		c.renamesMu.RLock()
+		old, renamed := c.renames[strings.ToLower(ircName)]
+		c.renamesMu.RUnlock()
+		if renamed {
+			if legacy := client.LookupChannel(old); legacy != nil {
+				ch = legacy
+			}
+		}
+	}
 	if ch == nil {
 		return nil
 	}
@@ -1652,6 +1683,13 @@ func (m *Manager) applyRename(c *conn, oldIRC, newIRC string) {
 		m.gw.Dispatch(c.userID, "CHANNEL_UPDATE", m.channelUpdatePayload(c, ch))
 		m.log.Info("channel renamed", "user", c.userID, "network", c.networkID, "from", stored, "to", newIRC)
 	}
+	// girc predates draft/channel-rename: its channel state still lives
+	// under the old name. Remember the mapping so roster reads (member
+	// lists, mention candidates) fall back to the old name until a
+	// reconnect rebuilds the state under the new one via JOIN.
+	c.renamesMu.Lock()
+	c.renames[strings.ToLower(newIRC)] = stored
+	c.renamesMu.Unlock()
 	m.notifyOccupancy(c, newIRC)
 }
 

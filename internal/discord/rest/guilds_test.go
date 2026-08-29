@@ -1103,10 +1103,16 @@ func TestChannelTopicUpdate(t *testing.T) {
 			if found {
 				return
 			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for wire line %q", substr)
+		time.Sleep(50 * time.Millisecond)
 	}
+	wireMu.Lock()
+	tail := wire
+	if len(tail) > 12 {
+		tail = tail[len(tail)-12:]
+	}
+	wireMu.Unlock()
+	t.Fatalf("timed out waiting for wire line %q; last lines: %q", substr, tail)
+}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -1148,10 +1154,14 @@ func TestChannelTopicUpdate(t *testing.T) {
 					w(":fake 332 " + nick + " " + ch + " :join topic\r\n")
 						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
 						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
-					case strings.HasPrefix(line, "WHO "):
-						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
-						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
-					case strings.HasPrefix(line, "AWAY"):
+				case strings.HasPrefix(line, "WHO "):
+					ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+					w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+				case strings.Contains(line, "PRIVMSG #renamed :hi sleepy"):
+					// The IRCized relay (bare nick, no marker) reached the
+					// wire; sleepy answers with a bare-nick mention.
+					w(":sleepy!u@h PRIVMSG #renamed :" + nick + " wake up #renamed\r\n")
+				case strings.HasPrefix(line, "AWAY"):
 						// eris shape: 305/306 numerics confirm the AWAY;
 						// they are what drives the self PRESENCE_UPDATE.
 						if line == "AWAY" {
@@ -1395,6 +1405,33 @@ detail:
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+
+	// Mentions: outgoing markers relay as bare nicks (IRC convention);
+	// incoming bare nicks markerize with a real mentions array. The
+	// roster under the renamed channel comes from the rename alias
+	// (girc still tracks it under the old name).
+	mbody, _ := json.Marshal(map[string]string{"content": "hi <@" + model.IrcAuthorID("irc:sleepy") + ">"})
+	mreq, _ := http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages", bytes.NewReader(mbody))
+	mreq.Header.Set("Authorization", "Bearer "+token)
+	mreq.Header.Set("Content-Type", "application/json")
+	mresp, err := http.DefaultClient.Do(mreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mraw, _ := io.ReadAll(mresp.Body)
+	_ = mresp.Body.Close()
+	if mresp.StatusCode != http.StatusOK {
+		t.Fatalf("POST mention message: %d %s", mresp.StatusCode, mraw)
+	}
+	waitWire("PRIVMSG #renamed :hi sleepy")
+	waitEvent("MESSAGE_CREATE", func(d map[string]any) bool {
+		if ms, _ := d["mentions"].([]any); len(ms) == 0 {
+			return false
+		}
+		want := "<@" + user.ID + ">"
+		c, _ := d["content"].(string)
+		return strings.Contains(c, want) && strings.Contains(c, "<#")
+	})
 
 	// Nickname: the client's Change-Nickname dialog PATCHes members/@me;
 	// that relays NICK upstream, and the broadcast echo persists + pushes

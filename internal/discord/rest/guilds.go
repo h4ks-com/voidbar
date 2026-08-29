@@ -780,7 +780,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		// Snowflake minted before the send: the manager queues it so the
 		// echo-message echo can bind the upstream msgid to it (reactions).
 		msgID := s.net.NewMessageID()
-		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, req.Content, msgID, channelID); err != nil {
+		// Discord-side content (with <@id> markers) is what the client
+		// sees and what gets buffered; the wire copy carries bare nicks.
+		wire := s.irc.IRCize(u.ID, dm.NetworkID, dm.Nick, req.Content)
+		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, wire, msgID, channelID); err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -814,7 +817,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	}
 	// See the DM path: snowflake before the send, for msgid correlation.
 	msgID := s.net.NewMessageID()
-	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, req.Content, msgID, channelID); err != nil {
+	// The wire copy carries bare nicks instead of <@id> markers (IRC
+	// convention); the Discord-side copy keeps the markers for pills.
+	wire := s.irc.IRCize(u.ID, ch.NetworkID, ch.IRCName, req.Content)
+	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, wire, msgID, channelID); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}

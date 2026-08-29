@@ -21,11 +21,13 @@ const chatTimeSelectorLayout = "2006-01-02T15:04:05.000Z"
 
 // chatFrame is one message accumulated from a chathistory batch.
 type chatFrame struct {
-	target  string
-	author  string
-	content string
-	at      time.Time
-	msgid   string
+	target        string
+	author        string
+	content       string
+	at            time.Time
+	msgid         string
+	mentions      []any // filled at flush time (Discordize)
+	mentionChans  []any
 }
 
 // chatBatch accumulates the frames of one in-flight draft/chathistory batch.
@@ -215,6 +217,9 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 		} else {
 			msgID = m.sf.NewBelow(ts, ceiling)
 		}
+		// History gets the same mention treatment as live traffic: bare
+		// nicks become markers so the backlog renders pills too.
+		f.content, f.mentions, f.mentionChans = m.Discordize(c.userID, c.networkID, f.target, f.content)
 		if err := m.store.AppendMessage(storage.BufferedMessage{
 			ID:         msgID,
 			ChannelID:  ch.ID,
@@ -235,7 +240,14 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			}
 		}
 		if live {
-			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano)))
+			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano))
+			if len(f.mentions) > 0 {
+				payload["mentions"] = f.mentions
+			}
+			if len(f.mentionChans) > 0 {
+				payload["mention_channels"] = f.mentionChans
+			}
+			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 		}
 		inserted++
 	}

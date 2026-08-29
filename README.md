@@ -245,11 +245,20 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   renames — persists the membership and pushes `GUILD_MEMBER_UPDATE`,
   so the display name follows the live wire nick. A rejected change
   (nick in use) leaves the stored nick standing.
+- **Mentions** both ways: outgoing Discord markers relay as bare nicks
+  (IRC convention — no `@`), incoming bare nicks (`doesnm: look`,
+  `@doesnm` too) become `<@id>` pills with a real `mentions` array, and
+  `#channel` references markerize both ways (`<#id>` <-> `#name`).
+  Candidates are the channel's live roster plus every bouncer member of
+  the network; unknown ids/nicks pass through verbatim. Renamed
+  channels keep their roster via a rename alias (girc predates
+  `draft/channel-rename`).
 
 ## Not implemented yet
 
-- **Message features**: attachments/file uploads, embeds, mentions,
-  search. Pins serve an empty stub (`GET /channels/:id/pins`), which both
+- **Message features**: attachments/file uploads, embeds,
+  search. Mentions are covered (see above). Pins serve an empty stub
+  (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
 - **Channel management UI**: channel
   categories, keyed channels (+k) — auto-join channels from the connection

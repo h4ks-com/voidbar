@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
 )
@@ -537,6 +538,113 @@ func TestChannelRename(t *testing.T) {
 	if len(mem.AutoJoin) != 1 || mem.AutoJoin[0] != "#renamed" {
 		t.Fatalf("auto-join after rename: %v", mem.AutoJoin)
 	}
+}
+
+// TestMentions: outgoing Discord markers become bare nicks on the wire,
+// and incoming bare nicks (IRC convention) become markers in the buffer.
+func TestMentions(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	pushed := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+				// One-shot push: sleepy mentions the member by bare nick
+				// (IRC convention) and references the channel.
+				select {
+				case pushed <- struct{}{}:
+					w(":sleepy!u@h PRIVMSG " + ch + " :" + nick + " wake up " + ch + "\r\n")
+				default:
+				}
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "doesnm", Username: "h", Realname: "h",
+		AutoJoin: []string{"#test"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &logSink{}
+	logger := slog.New(sink)
+	gw := gateway.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	manager.EnsureConn("u1", "net1")
+	waitFor(t, sink, "irc connected")
+
+	// Outgoing: markers -> bare nicks (IRC users are referenced without @).
+	sleepy := model.IrcAuthorID("irc:sleepy")
+	got := manager.IRCize("u1", "net1", "#test", "hi <@"+sleepy+"> ping <@!"+sleepy+">")
+	if got != "hi sleepy ping sleepy" {
+		t.Fatalf("IRCize: %q", got)
+	}
+
+	// Incoming: the WHO-triggered push lands in the buffer markerized.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ch, err := store.GetChannelByIRC("net1", "#test"); err == nil {
+			if msgs := store.ChannelMessages(ch.ID, "", "", 50); len(msgs) > 0 {
+				c := msgs[0].Content
+				if !strings.Contains(c, "<@u1>") || !strings.Contains(c, "<#") {
+					t.Fatalf("buffered mention content: %q", c)
+				}
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("mentionized relay never landed in the buffer")
 }
 
 // TestSetNick: the client nickname relay is just a wire command - the
