@@ -239,6 +239,12 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   networks without msgids (`MSGREFTYPES`-gated). Verified live against
   a locally built eris fork (fastidious/eris) with Halloy as the IRC
   peer.
+- **Nick change** from the client: Edit Server Profile -> Nickname
+  (`PATCH /guilds/:id/members/@me`) relays IRC `NICK`; the server's
+  own-nick echo — which also catches ghost reclaims and collision
+  renames — persists the membership and pushes `GUILD_MEMBER_UPDATE`,
+  so the display name follows the live wire nick. A rejected change
+  (nick in use) leaves the stored nick standing.
 
 ## Not implemented yet
 
@@ -249,12 +255,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   categories, keyed channels (+k) — auto-join channels from the connection
   string and runtime create/delete/rename/topic are covered
   (re-pasting a string for the same network merges new channels in).
-- **Identity**: nick change IS the client's Change-Nickname flow —
-  `PATCH /guilds/:id/members/@me` relays IRC `NICK`, and the server's
-  own-nick echo (which also catches ghost reclaims and collision
-  renames) persists the membership and pushes `GUILD_MEMBER_UPDATE`; a
-  rejected change (nick in use) leaves the stored nick standing. No
-  SASL.
+- **Identity**: no SASL
+  (only server password via `pass@` in the connection string); nick
+  change is covered (see above).
 - **Settings**: legacy client settings are persisted per user
   (`PATCH /users/@me/settings`); the Android client's appearance settings
   are not synced and reset on reload.
