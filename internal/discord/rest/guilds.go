@@ -523,7 +523,70 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleSearchMessages serves GET /channels/{c}/messages/search: the
+// client's search box, answered from the channel's replay buffer. IRC
+// has no server-side search, so results cover everything the bouncer
+// has seen (live traffic plus any chathistory pulled during scrolls).
+// Shape follows Discord: messages is a list of per-hit context groups
+// (one entry each here), newest first, 25 per page via ?offset=.
+func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	empty := map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}}
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	raw := r.URL.Query().Get("query")
+	if raw == "" {
+		raw = r.URL.Query().Get("q")
+	}
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	terms := strings.Fields(strings.ToLower(raw))
+	empty["messages"] = []any{}
+	if len(terms) == 0 {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	// The buffer returns newest-first with a hard ceiling; searching it
+	// whole is a key-prefix scan, cheap enough at replay-buffer sizes.
+	buffered := s.net.ChannelMessages(r.PathValue("channel"), "", "", 1<<20)
+	var hits []map[string]any
+	total := 0
+	for _, m := range buffered {
+		haystack := strings.ToLower(m.Content + " " + m.AuthorName)
+		matched := true
+		for _, t := range terms {
+			if !strings.Contains(haystack, t) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		total++
+		if len(hits) < 25 && offset < total {
+			hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
+		}
+	}
+	groups := make([]any, 0, len(hits))
+	for _, h := range hits {
+		groups = append(groups, []any{h})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"analytics_id":  "voidbar",
+		"total_results": total,
+		"messages":      groups,
+	})
+}
+
 // decodeEmoji unescapes the emoji path segment if it still carries
+// percent-encoding (ServeMux wildcards match escaped paths; non-ASCII
+// emoji arrive encoded) and reduces a custom emoji "name:id" to its name.
 // percent-encoding (ServeMux wildcards match escaped paths; non-ASCII
 // emoji arrive encoded) and reduces a custom emoji "name:id" to its name.
 func decodeEmoji(raw string) string {

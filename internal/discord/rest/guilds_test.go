@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1683,6 +1684,165 @@ func TestScrollBackfillIntoNetworkHistory(t *testing.T) {
 				t.Fatalf("backfill dispatched live: %v", d)
 			}
 		}
+	}
+}
+
+func TestMessageSearch(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				w := func(s string) { _, _ = conn.Write([]byte(s)) }
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						w("CAP * LS :message-tags echo-message server-time batch draft/chathistory\r\n")
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						w("CAP * ACK :" + req + "\r\n")
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						w(":fake 001 " + nick + " :Welcome\r\n")
+					case strings.HasPrefix(line, "PING"):
+						w("PONG" + line[4:] + "\r\n")
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+						w(":fake 353 " + nick + " = " + ch + " :" + nick + " sleepy\r\n")
+						w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+					case strings.HasPrefix(line, "WHO "):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+						w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+					case strings.HasPrefix(line, "CHATHISTORY LATEST"):
+						w(":fake BATCH +bL draft/chathistory #test\r\n")
+						w("@time=2026-01-01T10:00:05.000Z;msgid=L1;batch=bL :bob!b@h PRIVMSG #test :fresh coffee\r\n")
+						w("@time=2026-01-01T10:00:00.000Z;msgid=L2;batch=bL :alice!a@h PRIVMSG #test :oldmsg tea\r\n")
+						w(":fake BATCH -bL\r\n")
+					}
+				}
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	// Wait for the join prefill, then resolve the channel id.
+	deadline := time.Now().Add(5 * time.Second)
+	var channelID string
+	for channelID == "" && time.Now().Before(deadline) {
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			guilds := []map[string]any{}
+			_ = json.Unmarshal(resp, &guilds)
+			if len(guilds) > 0 {
+				if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+guilds[0]["id"].(string), token); err == nil {
+					var detail map[string]any
+					_ = json.Unmarshal(resp, &detail)
+					if chans, ok := detail["channels"].([]any); ok {
+						for _, c := range chans {
+							if cm := c.(map[string]any); cm["name"] == "test" {
+								channelID, _ = cm["id"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("channel id never resolved")
+	}
+
+	search := func(query string, offset int) (int, []string) {
+		u := srv.URL + "/api/v9/channels/" + channelID + "/messages/search?query=" + url.QueryEscape(query)
+		if offset > 0 {
+			u += "&offset=" + strconv.Itoa(offset)
+		}
+		resp, err := httpGet(u, token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			TotalResults int `json:"total_results"`
+			Messages     [][]map[string]any
+		}
+		if err := json.Unmarshal(resp, &out); err != nil {
+			t.Fatalf("search decode: %v (%s)", err, resp)
+		}
+		contents := make([]string, 0, len(out.Messages))
+		for _, group := range out.Messages {
+			contents = append(contents, group[0]["content"].(string))
+		}
+		return out.TotalResults, contents
+	}
+
+	// Case-insensitive term over content, AND across terms, author names
+	// searchable too (alice authored the tea message). The prefill lands
+	// via a batch flush, so poll until the buffer is warm.
+	var total int
+	var hits []string
+	for time.Now().Before(deadline) {
+		total, hits = search("COFFEE", 0)
+		if total == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if total != 1 || len(hits) != 1 || hits[0] != "fresh coffee" {
+		t.Fatalf("search coffee: total=%d hits=%v", total, hits)
+	}
+	if total, hits := search("alice tea", 0); total != 1 || hits[0] != "oldmsg tea" {
+		t.Fatalf("search author+term: total=%d hits=%v", total, hits)
+	}
+	if total, _ := search("alice fresh", 0); total != 0 {
+		t.Fatalf("AND semantics broken: total=%d", total)
+	}
+	// offset pages past the hit: total stays, page is empty.
+	if total, hits := search("tea", 1); total != 1 || len(hits) != 0 {
+		t.Fatalf("offset paging: total=%d hits=%v", total, hits)
+	}
+	if total, hits := search("", 0); total != 0 || len(hits) != 0 {
+		t.Fatalf("empty query: total=%d hits=%v", total, hits)
 	}
 }
 
