@@ -293,9 +293,10 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ## Not implemented yet
 
-- **Message features**: embeds as rich link previews.
-  Search, mentions and attachments are covered (see above). Pins serve
-  an empty stub (`GET /channels/:id/pins`), which both
+- **Message features**: search, mentions and attachments are covered
+  (see above), plus server-side link previews (og:title/description as
+  a `link` embed via `MESSAGE_UPDATE`, og:image mirrored locally).
+  Pins serve an empty stub (`GET /channels/:id/pins`), which both
   clients render as zero pinned messages.
 - **Channel management UI**: channel
   categories, keyed channels (+k) — auto-join channels from the connection
