@@ -704,6 +704,7 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.fireLinkChange(c, true)
 		}
 		channels := ""
+		sweep := []string(nil)
 		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil {
 			// The server may have renamed us during registration (nick
 			// collision: doesnm -> doesnm_); 001 carries the actual nick
@@ -731,6 +732,7 @@ func (m *Manager) registerHandlers(c *conn) {
 		for _, ch := range mem.AutoJoin {
 			client.Send(&girc.Event{Command: "WHO", Params: []string{ch}})
 		}
+		sweep = mem.AutoJoin
 		}
 		// IRC forgets AWAY across reconnects; the persisted Discord
 		// status is the intent, so re-assert it every (re)connect.
@@ -740,6 +742,9 @@ func (m *Manager) registerHandlers(c *conn) {
 			}
 		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
+		// Peers already sitting in our channels produce no JOIN events;
+		// announce them once the roster settles (see sweepPeerMembers).
+		m.sweepPeerMembers(c, sweep)
 	})
 
 	// Later renames (ghost reclaim, manual /nick): keep the membership nick

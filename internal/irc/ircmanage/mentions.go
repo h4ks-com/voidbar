@@ -306,6 +306,86 @@ func (m *Manager) upsertMentionedPeers(c *conn, users []mentionUser) {
 	}
 }
 
+// MentionPayloadsFromMarkers builds the mentions/mention_channels
+// arrays for content that already carries Discord markers (the client's
+// own sends). Pills render from the user store, but HIGHLIGHTING needs
+// the mentions array - and the REST echo / MESSAGE_CREATE fanout of own
+// sends must carry it just like inbound relays do.
+func (m *Manager) MentionPayloadsFromMarkers(userID, networkID, ircTarget, content string) ([]any, []any) {
+	users := m.mentionUsers(userID, networkID, ircTarget)
+	chans := m.mentionChannels(userID, networkID)
+	var mentioned []any
+	var mentionChans []any
+	seen := map[string]bool{}
+	for i := 0; i < len(content); {
+		if content[i] != '<' {
+			i++
+			continue
+		}
+		if id, width, ok := cutUserMarker(content[i:]); ok {
+			i += width
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if u, found := resolveMentionUser(users, id); found {
+				mentioned = append(mentioned, mentionUserPayload(u))
+			}
+			continue
+		}
+		if id, width, ok := cutChannelMarker(content[i:]); ok {
+			i += width
+			if seen["#"+id] {
+				continue
+			}
+			seen["#"+id] = true
+			for _, ch := range chans {
+				if ch.id == id {
+					mentionChans = append(mentionChans, mentionChannelPayload(ch, networkID))
+				}
+			}
+		}
+	}
+	return mentioned, mentionChans
+}
+
+// sweepPeerMembers announces every foreign occupant of the member's
+// channels after an upstream (re)connect. Peers that were already in
+// the channels produce no JOIN events for us - without the sweep, a
+// client that has been running since before the peer arrived (or across
+// a bouncer restart) never learns their user object, and mention pills
+// render @invalid-user until the peer rejoins.
+func (m *Manager) sweepPeerMembers(c *conn, autoJoin []string) {
+	go func() {
+		// NAMES state settles asynchronously after our JOINs; the sweep
+		// is advisory, so a fixed grace beat is enough. Late arrivals are
+		// covered by the JOIN upserts anyway.
+		time.Sleep(3 * time.Second)
+		bouncers := map[string]bool{}
+		if members, err := m.store.ListMemberships(c.networkID); err == nil {
+			for _, mem := range members {
+				nick := mem.Nick
+				if live := m.LiveNick(mem.UserID, c.networkID); live != "" {
+					nick = live
+				}
+				if nick != "" {
+					bouncers[strings.ToLower(nick)] = true
+				}
+			}
+		}
+		seen := map[string]bool{}
+		for _, chName := range autoJoin {
+			for _, cm := range m.ChannelMembersDetailed(c.userID, c.networkID, chName) {
+				if cm.Nick == "" || bouncers[strings.ToLower(cm.Nick)] || seen[cm.Nick] {
+					continue
+				}
+				seen[cm.Nick] = true
+				m.upsertPeerMember(c, cm.Nick, cm.Mode, "")
+			}
+		}
+	}()
+}
+
 func (m *Manager) upsertPeerMember(c *conn, nick, mode, joinedAt string) {
 	if joinedAt == "" {
 		mem, err := m.store.GetMembership(c.networkID, c.userID)

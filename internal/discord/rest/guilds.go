@@ -791,7 +791,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-		msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+		// Pills render from the user store, but highlighting reads the
+		// mentions array - own sends carry it like inbound relays do.
+		if mentioned, _ := s.irc.MentionPayloadsFromMarkers(u.ID, dm.NetworkID, dm.Nick, req.Content); len(mentioned) > 0 {
+			msg["mentions"] = mentioned
+		}
 		if s.gw != nil {
 			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
 		}
@@ -836,6 +841,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		authorName = mem.Nick
 	}
 	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+	// Own sends carry the mentions arrays too: highlighting reads them,
+	// not the pills (same as inbound relays).
+	if mentioned, mentionChans := s.irc.MentionPayloadsFromMarkers(u.ID, ch.NetworkID, ch.IRCName, req.Content); len(mentioned) > 0 || len(mentionChans) > 0 {
+		if len(mentioned) > 0 {
+			msg["mentions"] = mentioned
+		}
+		if len(mentionChans) > 0 {
+			msg["mention_channels"] = mentionChans
+		}
+	}
 	// Own messages also arrive via the gateway on real Discord (keeping the
 	// user's other sessions in sync); the client dedupes by id and the
 	// nonce match clears the pending state.
