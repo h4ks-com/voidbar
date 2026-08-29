@@ -61,8 +61,11 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/{id}/profile", s.requireAuth(s.handleUserProfile))
 	mux.HandleFunc("GET /api/v9/users/@me/survey", s.requireAuth(s.handleNull))
 	mux.HandleFunc("POST /api/v9/users/@me/devices", s.requireAuth(s.handleNoContentAuthed))
-	// The sticker picker probes this on open; 404 read as a network error.
-	mux.HandleFunc("GET /api/v9/sticker-packs", s.requireAuth(s.handleEmptyMap))
+	// The sticker picker probes this on open; 404 read as a network
+	// error. The documented shape is an object with a sticker_packs
+	// array - an empty object nulls the client's non-null list and
+	// crashes the app on cold start.
+	mux.HandleFunc("GET /api/v9/sticker-packs", s.requireAuth(s.handleStickerPacks))
 }
 
 // handleAuthFingerprint answers the Android client's pre-login fingerprint
@@ -289,6 +292,11 @@ func (s *Server) handleEmptyArray(w http.ResponseWriter, r *http.Request, _ *sto
 
 func (s *Server) handleEmptyMap(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// handleStickerPacks answers the documented Get Sticker Packs shape.
+func (s *Server) handleStickerPacks(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{"sticker_packs": []any{}})
 }
 
 func (s *Server) handleAffinities(w http.ResponseWriter, r *http.Request, _ *storage.User) {
