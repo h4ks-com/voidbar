@@ -1038,6 +1038,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			Attachments: attachRows,
 		}); err != nil {
 			s.log.Warn("buffer append failed", "err", err, "channel", channelID)
+		} else {
+			// Own pasted links unfurl too (Discord embeds them equally).
+			s.irc.SendLinkPreview(u.ID, channelID, msg["id"].(string), req.Content)
 		}
 		s.net.TouchDMChannel(channelID)
 		writeJSON(w, http.StatusOK, msg)
@@ -1102,6 +1105,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		Attachments: attachRows,
 	}); err != nil {
 		s.log.Warn("buffer append failed", "err", err, "channel", channelID)
+	} else {
+		// Own pasted links unfurl too.
+		s.irc.SendLinkPreview(u.ID, channelID, msg["id"].(string), req.Content)
 	}
 	writeJSON(w, http.StatusOK, msg)
 }

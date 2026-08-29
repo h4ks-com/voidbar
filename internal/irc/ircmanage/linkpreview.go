@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
 )
 
@@ -248,6 +249,50 @@ func hostOf(u string) string {
 	return ""
 }
 
+// SendLinkPreview is the REST-side entry: own sends unfurl too (Discord
+// embeds your own pasted links the same way).
+func (m *Manager) SendLinkPreview(userID, channelID, msgID, content string) {
+	m.sendLinkPreview(userID, channelID, msgID, content)
+}
+
+// buildMessagePayloadFromRow renders the MESSAGE_UPDATE body for either
+// author kind: peers hash their "irc:<nick>" id, own sends carry the
+// real user id and keep their nonce.
+func buildMessagePayloadFromRow(row *storage.BufferedMessage) map[string]any {
+	authorID := row.AuthorID
+	authorName := row.AuthorName
+	if strings.HasPrefix(authorID, "irc:") {
+		authorName = strings.TrimPrefix(authorID, "irc:")
+		authorID = model.IrcAuthorID(row.AuthorID)
+	}
+	payload := map[string]any{
+		"id":               row.ID,
+		"channel_id":       row.ChannelID,
+		"content":          row.Content,
+		"timestamp":        row.Timestamp,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            row.Nonce,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
+		"author": map[string]any{
+			"id":            authorID,
+			"username":      authorName,
+			"discriminator": "0",
+			"bot":           false,
+		},
+	}
+	return payload
+}
+
 // sendLinkPreview unfurls the first previewable link of a freshly
 // relayed message and delivers it as a Discord-side edit: the message
 // itself is already on its way (obbies architecture - preview follows
@@ -269,7 +314,7 @@ func (m *Manager) sendLinkPreview(userID, channelID, msgID, content string) {
 			m.log.Warn("preview persist failed", "err", err, "channel", channelID, "msg", msgID)
 			return
 		}
-		payload := buildMessagePayload(row.ID, row.ChannelID, strings.TrimPrefix(row.AuthorID, "irc:"), row.Content, row.Timestamp)
+		payload := buildMessagePayloadFromRow(row)
 		payload["embeds"] = embeds
 		if len(row.Attachments) > 0 {
 			payload["attachments"] = row.Attachments
