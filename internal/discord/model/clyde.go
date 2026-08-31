@@ -8,6 +8,10 @@ package model
 // list itself isn't rendered until presence ships).
 const ClydeID = "901392366394585088"
 
+// ClydeNetID is the global pseudo-network Clyde DM threads live on: one
+// peer across every network (and network recreations).
+const ClydeNetID = "clyde"
+
 // DMPeer renders the wire user for a DM channel peer given the IRC nick.
 // The service nick "Clyde" is special-cased to the real Clyde identity so
 // system notices render as the bot himself.

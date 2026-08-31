@@ -420,6 +420,11 @@ var ErrUnknownRecipient = errors.New("unknown recipient")
 // fellow bouncer member's user id - so the reverse mapping only needs the
 // live NAMES state plus the network's membership list.
 func (s *Service) CreateDMChannel(userID, recipientID string) (map[string]any, error) {
+	// Clyde is one global peer: the sidebar owner entry and every
+	// clydeSay notice share a single thread on the pseudo-network.
+	if recipientID == model.ClydeID {
+		return s.dmPayloadFor(userID, model.ClydeNetID, "Clyde")
+	}
 	memberships, err := s.store.ListMembershipsForUser(userID)
 	if err != nil {
 		return nil, err

@@ -972,12 +972,71 @@ func (m *Manager) rollbackJoin(c *conn, ircName, reason string) {
 	m.clydeSay(c.userID, c.networkID, "Could not join **"+ircName+"**: "+reason+".")
 }
 
+// model.ClydeNetID is the global pseudo-network Clyde threads live on: Clyde is
+// one peer across every network (and across network recreations - a
+// leave/rejoin mints a fresh network id, which used to fork the thread).
+
+
+// clydeDM resolves the user's single Clyde thread, migrating and dropping
+// any per-network forks left over from earlier sessions.
+func (m *Manager) clydeDM(userID string) *storage.DMChannel {
+	dms, err := m.store.ListDMChannels(userID)
+	if err != nil {
+		return nil
+	}
+	var canonical *storage.DMChannel
+	var forks []*storage.DMChannel
+	for _, dm := range dms {
+		if dm.Nick != "Clyde" {
+			continue
+		}
+		switch {
+		case dm.NetworkID == model.ClydeNetID:
+			canonical = dm
+		default:
+			forks = append(forks, dm)
+		}
+	}
+	// Keep the most active fork as the canonical thread so history
+	// survives the migration; the rest are stale system notices.
+	if canonical == nil {
+		for _, f := range forks {
+			if canonical == nil || f.LastMsgAt.After(canonical.LastMsgAt) {
+				canonical = f
+			}
+		}
+		if canonical != nil {
+			if err := m.store.SetDMNetwork(canonical.ID, model.ClydeNetID); err != nil {
+				m.log.Warn("clyde dm migrate failed", "err", err, "user", userID)
+				return canonical
+			}
+			canonical.NetworkID = model.ClydeNetID
+		}
+	}
+	for _, f := range forks {
+		if f.ID == canonical.ID {
+			continue
+		}
+		if err := m.store.DeleteDMChannel(f.ID); err != nil {
+			m.log.Warn("clyde dm fork drop failed", "err", err, "user", userID)
+		}
+	}
+	if canonical != nil {
+		return canonical
+	}
+	dm, err := m.store.EnsureDMChannel(userID, model.ClydeNetID, "Clyde", m.sf.New)
+	if err != nil {
+		m.log.Warn("clyde dm ensure failed", "err", err, "user", userID)
+		return nil
+	}
+	return dm
+}
+
 // clydeSay delivers a system notice as a DM from Clyde (bot), creating the
 // thread on first contact like a real query would.
 func (m *Manager) clydeSay(userID, networkID, text string) {
-	dm, err := m.store.EnsureDMChannel(userID, networkID, "Clyde", m.sf.New)
-	if err != nil {
-		m.log.Warn("clyde dm ensure failed", "err", err, "user", userID)
+	dm := m.clydeDM(userID)
+	if dm == nil {
 		return
 	}
 	if time.Since(dm.CreatedAt) < 3*time.Second {

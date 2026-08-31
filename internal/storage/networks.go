@@ -272,6 +272,37 @@ func (s *Storage) DeleteDMChannel(id string) error {
 	})
 }
 
+// SetDMNetwork re-points a DM thread at another network: the (owner,
+// network, nick) index entry moves with it. Used to migrate Clyde threads
+// onto the global pseudo-network.
+func (s *Storage) SetDMNetwork(id, netID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(dmKey(id))
+		if err != nil {
+			return err
+		}
+		var dm DMChannel
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &dm) }); err != nil {
+			return err
+		}
+		if dm.NetworkID == netID {
+			return nil
+		}
+		if err := txn.Delete(dmOwnerKey(dm.OwnerID, dm.NetworkID, dm.Nick)); err != nil {
+			return err
+		}
+		dm.NetworkID = netID
+		b, err := json.Marshal(dm)
+		if err != nil {
+			return err
+		}
+		if err := txn.Set(dmKey(id), b); err != nil {
+			return err
+		}
+		return txn.Set(dmOwnerKey(dm.OwnerID, dm.NetworkID, dm.Nick), []byte(id))
+	})
+}
+
 // Membership ties a user to a network with their per-connection identity.
 // Upstream connections live on (user, network): each member connects with
 // their own nick, never sharing a socket.
