@@ -332,18 +332,23 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ### IRCv3 extensions to adopt
 
-Cross-checked with the IRCv3 capability catalog and girc's support:
+Cross-checked against the IRCv3 catalog, girc's negotiated set, and
+what the works section above already covers (away-notify presence and
+echo-message msgid correlation are done):
 
-- **away-notify** — AWAY/unaway as member presence (idle dot).
-- **account-notify + extended-join** — services identification shows up
-  (NickServ logins, account changes at JOIN).
-- **chghost** — host/cloak changes visible in member details.
-- **monitor** — track nick online/offline for the member list.
-- **setname** — realname changes (girc parses; surface if the client has
-  a slot for it).
-- **standard-replies** — clean upstream errors instead of numeric soup.
-- **echo-message** — server-side echo instead of local optimistic sends
-  (optional; our local path already works).
+- **account-notify + extended-join** — the caps are already negotiated
+  (girc defaults); no handlers. Surface services identification in the
+  member card (NickServ login, account changes at JOIN).
+- **chghost** — cap negotiated, no handler; host/cloak changes should
+  refresh the member card.
+- **invite-notify** — cap negotiated, no handler; INVITE broadcasts as
+  a channel system message.
+- **monitor** — cap not requested; adopt for nick online/offline
+  tracking (member list beyond joined channels).
+- **setname** — cap not requested (not in girc's known set); adopt for
+  realname changes if the client has a slot.
+- **standard-replies** — cap not requested; FAIL/WARN/NOTE as clean
+  errors instead of numeric soup.
 
 ### Cleanup
 
