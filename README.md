@@ -311,10 +311,51 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   client, move channels in and out, sidebar groups by parent. Nothing
   upstream ever hears about them.
 
-## Not implemented yet
+## Roadmap
 
+### Client features (local, no IRC counterpart needed)
+
+- **Pins**: `PUT/DELETE /channels/:id/pins/:mid` — only the list is
+  served today; the client's pin button 404s.
+- **User notes**: `GET/PUT /users/@me/notes/:id` (the client probes the
+  per-id route on profile opens; only the bulk route exists).
+- **Network rename**: `PATCH /guilds/:id` — rename the network record
+  from the client's guild settings.
+- **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`
+  — who reacted (tap on a reaction); add/remove for self already work.
+- **Avatars**: user avatar upload through the existing attachment
+  pipeline, served in the READY/user payloads.
+- **Network icon**: guild icon upload → CDN, shown in the guild list.
+- **Multiline**: the composer's newlines split into multiple PRIVMSGs on
+  send; incoming `draft/multiline` batches (and chathistory equivalents)
+  join into one message.
+
+### IRCv3 extensions to adopt
+
+Cross-checked with the IRCv3 capability catalog and girc's support:
+
+- **away-notify** — AWAY/unaway as member presence (idle dot).
+- **account-notify + extended-join** — services identification shows up
+  (NickServ logins, account changes at JOIN).
+- **chghost** — host/cloak changes visible in member details.
+- **monitor** — track nick online/offline for the member list.
+- **setname** — realname changes (girc parses; surface if the client has
+  a slot for it).
+- **standard-replies** — clean upstream errors instead of numeric soup.
+- **echo-message** — server-side echo instead of local optimistic sends
+  (optional; our local path already works).
+
+### Cleanup
+
+- **Permission list prune**: drop permission bits the platform can't
+  honor (emoji/sticker management etc.) from the client's role editor —
+  the permission names live in the userdoccers permissions reference.
 - **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
   no admin UI, no per-user network management beyond the client.
+
+Out of scope: voice/video, threads/forums (local threads rejected —
+channels + categories cover us), custom emoji (nothing to sync them
+with), guild discovery.
 
 ## Known issues / troubleshooting
 
