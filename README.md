@@ -302,6 +302,10 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   blob per user and kind, merging by top-level field number straight
   from the protobuf wire format - no schema linked. Theme, locale and
   appearance settings stick across restarts.
+- **Identity**: server password (`user:pass@` in the connection string)
+  and SASL PLAIN (`?sasl=user:pass` — replaces the server password,
+  credentials are network-wide metadata, re-pasting rotates them);
+  nick change is covered (see above).
 
 ## Not implemented yet
 
@@ -310,9 +314,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   string (with inline +k keys) and runtime
   create/delete/rename/topic are covered
   (re-pasting a string for the same network merges new channels in).
-- **Identity**: no SASL
-  (only server password via `pass@` in the connection string); nick
-  change is covered (see above).
 - **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
   no admin UI, no per-user network management beyond the client.
 - Voice/video, threads, forums, stickers, guild discovery — out of scope
