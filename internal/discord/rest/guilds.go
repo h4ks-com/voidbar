@@ -199,22 +199,10 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusNotFound, "unknown guild")
 		return
 	}
-	chans, err := s.net.ChannelsFor(guildID, mem.AutoJoin)
+	channels, err := s.net.GuildChannelsPayload(guildID, mem.AutoJoin)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to list channels")
 		return
-	}
-	channels := make([]any, 0, len(chans))
-	for i, ch := range chans {
-		channels = append(channels, map[string]any{
-			"id":              ch.ID,
-			"guild_id":        guildID,
-			"name":            ch.Name,
-			"type":            0,
-			"position":        i,
-			"topic":           ircmanage.TopicValue(ch.Topic),
-			"member_list_id":  model.MemberListID(guildID, ch.ID),
-		})
 	}
 	// Keep the role set in sync with GUILD_CREATE: the member sidebar's
 	// role sections and name colors resolve through the guild's roles.
@@ -230,9 +218,30 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 	})
 }
 
+// optionalID is a snowflake-or-null request field: distinguishes
+// "parent_id": null (ungroup) from an absent field - plain pointers and
+// *json.RawMessage are nil-ed for null by encoding/json, erasing the
+// distinction.
+type optionalID struct {
+	set  bool
+	null bool
+	id   string
+}
+
+func (o *optionalID) UnmarshalJSON(b []byte) error {
+	o.set = true
+	if string(b) == "null" {
+		o.null = true
+		return nil
+	}
+	return json.Unmarshal(b, &o.id)
+}
+
 type updateChannelRequest struct {
-	Name  *string `json:"name"`
-	Topic *string `json:"topic"`
+	Name     *string     `json:"name"`
+	Topic    *string     `json:"topic"`
+	ParentID optionalID  `json:"parent_id"`
+	Position *int        `json:"position"`
 }
 
 // handleUpdateChannel answers PATCH /channels/:id - the channel settings
@@ -248,6 +257,22 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 	var req updateChannelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	// Categories have their own (rename-only) settings screen.
+	if _, cat, err := s.net.CategoryByID(u.ID, r.PathValue("channel")); err == nil {
+		if req.Name != nil {
+			if err := s.net.RenameCategory(u.ID, cat.ID, *req.Name); err != nil {
+				jsonError(w, http.StatusBadRequest, "invalid category name")
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":       cat.ID,
+			"name":     cat.Name,
+			"type":     4,
+			"position": cat.Position,
+		})
 		return
 	}
 	ch, err := s.net.ChannelByID(r.PathValue("channel"))
@@ -293,7 +318,32 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Local grouping: parent_id (null = ungroup) and position from the
+	// channel settings / sidebar drag.
+	parentID := ch.ParentID
+	if req.ParentID.set {
+		if req.ParentID.null {
+			parentID = ""
+		} else {
+			parentID = req.ParentID.id
+		}
+		pos := 0
+		setPos := false
+		if req.Position != nil {
+			pos, setPos = *req.Position, true
+		}
+		if err := s.net.MoveChannel(u.ID, ch.ID, parentID, pos, setPos); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid category move")
+			return
+		}
+	} else if req.Position != nil {
+		if err := s.net.MoveChannel(u.ID, ch.ID, ch.ParentID, *req.Position, true); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid move")
+			return
+		}
+		position = *req.Position
+	}
+	echo := map[string]any{
 		"id":             ch.ID,
 		"guild_id":       ch.NetworkID,
 		"name":           name,
@@ -301,7 +351,13 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 		"position":       position,
 		"topic":          ircmanage.TopicValue(topic),
 		"member_list_id": model.MemberListID(ch.NetworkID, ch.ID),
-	})
+	}
+	if parentID != "" {
+		echo["parent_id"] = parentID
+	} else {
+		echo["parent_id"] = nil
+	}
+	writeJSON(w, http.StatusOK, echo)
 }
 
 // handleUpdateMemberMe relays the client's Change-Nickname flow
@@ -790,6 +846,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, u *
 	guildID := r.PathValue("guild")
 	var req struct {
 		Name string `json:"name"`
+		Type int    `json:"type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
@@ -797,6 +854,25 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, u *
 	}
 	if s.net == nil {
 		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	// Categories (type 4) are local grouping: no upstream JOIN, they
+	// exist the moment they're recorded.
+	if req.Type == 4 {
+		payload, err := s.net.CreateCategory(u.ID, guildID, req.Name)
+		if err != nil {
+			if errors.Is(err, network.ErrBadChannelName) {
+				jsonError(w, http.StatusBadRequest, "Invalid category name")
+				return
+			}
+			if errors.Is(err, storage.ErrNotFound) {
+				jsonError(w, http.StatusNotFound, "Unknown Guild")
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, "create failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
 		return
 	}
 	payload, err := s.net.CreateChannel(u.ID, guildID, req.Name)
@@ -836,6 +912,12 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, u *
 		if s.gw != nil {
 			s.gw.Dispatch(u.ID, "CHANNEL_DELETE", map[string]any{"id": channelID, "type": 1})
 		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Local categories: delete unlinks children and vanishes (nothing
+	// upstream ever knew about it).
+	if err := s.net.RemoveCategory(u.ID, channelID); err == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

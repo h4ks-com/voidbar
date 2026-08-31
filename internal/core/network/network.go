@@ -655,6 +655,217 @@ func (s *Service) RemoveChannel(userID, channelID string) error {
 	return nil
 }
 
+// categoryPayload is the wire shape of a local grouping channel
+// (Discord type 4).
+func (s *Service) categoryPayload(guildID string, cat *storage.Category) map[string]any {
+	return map[string]any{
+		"id":                    cat.ID,
+		"guild_id":              guildID,
+		"name":                  cat.Name,
+		"type":                  4,
+		"position":              cat.Position,
+		"permission_overwrites": []any{},
+		"flags":                 0,
+	}
+}
+
+// CreateCategory is the client's "create category": purely local grouping
+// (IRC has no categories), so no upstream traffic - the category exists
+// the moment it is recorded on the network.
+func (s *Service) CreateCategory(userID, guildID, name string) (map[string]any, error) {
+	if _, err := s.store.GetMembership(guildID, userID); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 100 || strings.ContainsAny(name, "\r\n\x07") {
+		return nil, ErrBadChannelName
+	}
+	net, err := s.store.GetNetwork(guildID)
+	if err != nil {
+		return nil, err
+	}
+	cat := storage.Category{ID: s.sf.New(), Name: name, Position: len(net.Categories)}
+	net.Categories = append(net.Categories, cat)
+	if err := s.store.UpsertNetwork(net); err != nil {
+		return nil, err
+	}
+	payload := s.categoryPayload(guildID, &cat)
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_CREATE", payload)
+	}
+	return payload, nil
+}
+
+// CategoryByID resolves a category on one of the user's networks.
+func (s *Service) CategoryByID(userID, catID string) (*storage.Network, *storage.Category, error) {
+	mems, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, m := range mems {
+		net, err := s.store.GetNetwork(m.NetworkID)
+		if err != nil {
+			continue
+		}
+		for i := range net.Categories {
+			if net.Categories[i].ID == catID {
+				return net, &net.Categories[i], nil
+			}
+		}
+	}
+	return nil, nil, storage.ErrNotFound
+}
+
+// RenameCategory renames a local grouping category and dispatches the
+// CHANNEL_UPDATE.
+func (s *Service) RenameCategory(userID, catID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 100 || strings.ContainsAny(name, "\r\n\x07") {
+		return ErrBadChannelName
+	}
+	net, cat, err := s.CategoryByID(userID, catID)
+	if err != nil {
+		return err
+	}
+	cat.Name = name
+	if err := s.store.UpsertNetwork(net); err != nil {
+		return err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_UPDATE", s.categoryPayload(net.ID, cat))
+	}
+	return nil
+}
+
+// MoveChannel groups a text channel under a local category (parentID ""
+// ungroups; the empty case from a null JSON parent_id) and/or repositions
+// it. The authoritative CHANNEL_UPDATE follows the store write.
+func (s *Service) MoveChannel(userID, channelID, parentID string, position int, setPosition bool) error {
+	ch, err := s.store.GetChannel(channelID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.GetMembership(ch.NetworkID, userID); err != nil {
+		return err
+	}
+	if parentID != "" {
+		net, _, err := s.CategoryByID(userID, parentID)
+		if err != nil || net.ID != ch.NetworkID {
+			return ErrBadChannelName
+		}
+	}
+	if err := s.store.SetChannelGrouping(channelID, parentID, position, setPosition); err != nil {
+		return err
+	}
+	if s.gw != nil {
+		updated, err := s.store.GetChannel(channelID)
+		if err == nil {
+			pos := position
+			if !setPosition {
+				pos = 0
+				if mem, err := s.store.GetMembership(ch.NetworkID, userID); err == nil {
+					for i, name := range mem.AutoJoin {
+						if strings.EqualFold(name, ch.IRCName) {
+							pos = i
+							break
+						}
+					}
+				}
+			}
+			payload := s.channelPayload(ch.NetworkID, updated, pos)
+			if updated.ParentID != "" {
+				payload["parent_id"] = updated.ParentID
+			}
+			s.gw.Dispatch(userID, "CHANNEL_UPDATE", payload)
+		}
+	}
+	return nil
+}
+
+// RemoveCategory deletes a local grouping category; its children are
+// ungrouped first (each gets its CHANNEL_UPDATE, then the category's
+// CHANNEL_DELETE).
+func (s *Service) RemoveCategory(userID, catID string) error {
+	net, _, err := s.CategoryByID(userID, catID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.GetMembership(net.ID, userID); err != nil {
+		return err
+	}
+	children, err := s.store.ListChannelsByNetwork(net.ID)
+	if err != nil {
+		return err
+	}
+	for _, ch := range children {
+		if ch.ParentID != catID {
+			continue
+		}
+		if err := s.store.SetChannelGrouping(ch.ID, "", 0, false); err != nil {
+			return err
+		}
+		if s.gw != nil {
+			pos := 0
+			if mem, err := s.store.GetMembership(net.ID, userID); err == nil {
+				for i, name := range mem.AutoJoin {
+					if strings.EqualFold(name, ch.IRCName) {
+						pos = i
+						break
+					}
+				}
+			}
+			s.gw.Dispatch(userID, "CHANNEL_UPDATE", s.channelPayload(net.ID, ch, pos))
+		}
+	}
+	out := net.Categories[:0]
+	for _, c := range net.Categories {
+		if c.ID != catID {
+			out = append(out, c)
+		}
+	}
+	net.Categories = out
+	if err := s.store.UpsertNetwork(net); err != nil {
+		return err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_DELETE", map[string]any{
+			"id":       catID,
+			"guild_id": net.ID,
+			"type":     4,
+		})
+	}
+	return nil
+}
+
+// parentValue shapes a parent id for the wire: nil when ungrouped (the
+// client distinguishes null from "").
+func parentValue(parentID string) any {
+	if parentID == "" {
+		return nil
+	}
+	return parentID
+}
+
+// GuildChannelsPayload assembles the guild's channel list: text channels
+// (with local category parents) plus the category channels themselves.
+// Shared by guild detail and GUILD_CREATE assembly.
+func (s *Service) GuildChannelsPayload(guildID string, autoJoin []string) ([]any, error) {
+	chans, err := s.store.ChannelsByIRC(guildID, autoJoin, s.sf.New)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(chans))
+	for i, ch := range chans {
+		out = append(out, s.channelPayload(guildID, ch, i))
+	}
+	if net, err := s.store.GetNetwork(guildID); err == nil {
+		for i := range net.Categories {
+			out = append(out, s.categoryPayload(guildID, &net.Categories[i]))
+		}
+	}
+	return out, nil
+}
+
 // channelPayload is the wire shape shared by guild assembly and
 // CHANNEL_CREATE for an IRC-backed text channel.
 func (s *Service) channelPayload(guildID string, ch *storage.Channel, position int) map[string]any {
@@ -670,7 +881,8 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		"rate_limit_per_user":   0,
 		"nsfw":                  false,
 		"flags":                 0,
-		"parent_id":             nil,
+		// Local grouping (type 4 categories): nil when ungrouped.
+		"parent_id":             parentValue(ch.ParentID),
 		// COMPAT: the client resolves the member sidebar through the
 		// channel's own member_list_id (Channel.memberListId) — the lazy
 		// list map is keyed by exactly this string, and GUILD_MEMBER_LIST_
@@ -1153,9 +1365,15 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	if err != nil {
 		chans = nil
 	}
-	channels := make([]any, 0, len(chans))
+	channels := make([]any, 0, len(chans)+len(net.Categories))
 	for i, ch := range chans {
 		channels = append(channels, s.channelPayload(net.ID, ch, i))
+	}
+	_ = channels
+	// Local grouping categories ride along as type 4 channels; the client
+	// groups the sidebar by parent_id.
+	for i := range net.Categories {
+		channels = append(channels, s.categoryPayload(net.ID, &net.Categories[i]))
 	}
 
 	// IRC occupants ride along as guild members. The client only lazy-loads

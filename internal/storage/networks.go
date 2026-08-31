@@ -28,6 +28,8 @@ type Network struct {
 	// ChannelKeys holds per-channel +k keys (lowercased name -> key) from
 	// the inline "#chan:key" connection-string syntax.
 	ChannelKeys map[string]string `json:"channel_keys,omitempty"`
+	// Categories are local grouping channels (type 4); IRC has none.
+	Categories []Category        `json:"categories,omitempty"`
 	CreatedBy   string            `json:"created_by"`
 	CreatedAt   time.Time         `json:"created_at"`
 }
@@ -41,7 +43,19 @@ type Channel struct {
 	IRCName   string    `json:"irc_name"` // "#go" or a bare nick for DMs
 	Name      string    `json:"name"`     // "go" / the nick
 	Topic     string    `json:"topic,omitempty"`
+	// ParentID is the local grouping category (type 4 channel), if any.
+	ParentID  string    `json:"parent_id,omitempty"`
+	Position  int       `json:"position,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Category is a local grouping channel (Discord type 4). IRC has no
+// categories; these exist purely for sidebar organization and never
+// touch the upstream.
+type Category struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Position int    `json:"position"`
 }
 
 func chanKey(id string) []byte { return []byte("chan/" + id) }
@@ -305,6 +319,53 @@ func (s *Storage) SetDMNetwork(id, netID string) error {
 		}
 		return txn.Set(dmOwnerKey(dm.OwnerID, dm.NetworkID, dm.Nick), []byte(id))
 	})
+}
+
+// SetChannelGrouping moves a channel under a local category (parentID ""
+// ungroups) and optionally repositions it.
+func (s *Storage) SetChannelGrouping(id, parentID string, position int, setPosition bool) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(chanKey(id))
+		if err != nil {
+			return err
+		}
+		var ch Channel
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) }); err != nil {
+			return err
+		}
+		ch.ParentID = parentID
+		if setPosition {
+			ch.Position = position
+		}
+		b, err := json.Marshal(ch)
+		if err != nil {
+			return err
+		}
+		return txn.Set(chanKey(id), b)
+	})
+}
+
+// ListChannelsByNetwork returns every channel record of a network
+// (category parenting makes children resolvable without an index).
+func (s *Storage) ListChannelsByNetwork(netID string) ([]*Channel, error) {
+	var out []*Channel
+	err := s.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		prefix := []byte("chan/")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			var ch Channel
+			if err := it.Item().Value(func(val []byte) error { return json.Unmarshal(val, &ch) }); err != nil {
+				continue
+			}
+			if ch.NetworkID == netID {
+				c := ch
+				out = append(out, &c)
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // Membership ties a user to a network with their per-connection identity.
