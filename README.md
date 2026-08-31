@@ -306,18 +306,15 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   and SASL PLAIN (`?sasl=user:pass` — replaces the server password,
   credentials are network-wide metadata, re-pasting rotates them);
   nick change is covered (see above).
+- **Channel categories**: local grouping only (IRC has none) — type 4
+  channels recorded on the network; create/rename/delete from the
+  client, move channels in and out, sidebar groups by parent. Nothing
+  upstream ever hears about them.
 
 ## Not implemented yet
 
-- **Channel management UI**: channel
-  categories — auto-join channels from the connection
-  string (with inline +k keys) and runtime
-  create/delete/rename/topic are covered
-  (re-pasting a string for the same network merges new channels in).
 - **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
   no admin UI, no per-user network management beyond the client.
-- Voice/video, threads, forums, stickers, guild discovery — out of scope
-  for now (stubs return empty shapes).
 
 ## Known issues / troubleshooting
 
