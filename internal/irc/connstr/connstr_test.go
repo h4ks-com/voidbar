@@ -73,3 +73,22 @@ func TestIdentityIgnoresNameAndChannels(t *testing.T) {
 		t.Fatalf("same server should share identity: %q vs %q", a.ID(), b.ID())
 	}
 }
+
+func TestParseChannelKeys(t *testing.T) {
+	c, err := Parse("ircs://irc.libera.chat:6697/#open,#locked:hunter2,#odd:two:parts?name=L")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Channels) != 3 || c.Channels[0] != "#open" || c.Channels[1] != "#locked" || c.Channels[2] != "#odd" {
+		t.Fatalf("channels: %v", c.Channels)
+	}
+	if len(c.ChannelKeys) != 2 || c.ChannelKeys["#locked"] != "hunter2" || c.ChannelKeys["#odd"] != "two:parts" {
+		t.Fatalf("keys: %v", c.ChannelKeys)
+	}
+	// Keys are per-instance metadata, not identity: same conn id as the
+	// bare string.
+	bare, _ := Parse("ircs://irc.libera.chat:6697/#open")
+	if c.ID() != bare.ID() {
+		t.Fatalf("keyed id %q != bare %q", c.ID(), bare.ID())
+	}
+}

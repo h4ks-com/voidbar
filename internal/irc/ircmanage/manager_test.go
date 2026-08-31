@@ -1,4 +1,4 @@
-package ircmanage
+﻿package ircmanage
 
 import (
 	"bufio"
@@ -246,6 +246,115 @@ func TestTopicFlow(t *testing.T) {
 // persisted before connecting re-assert AWAY on CONNECTED (IRC forgets
 // away state across reconnects), and runtime switches fan out - online
 // returns, idle/dnd go away, invisible is a no-op.
+
+// TestKeyedChannelJoin verifies +k joins: channels with a key recorded on
+// the network (inline "#chan:key" connection-string syntax) must join with
+// the key on the wire, plain channels without.
+func TestKeyedChannelJoin(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var sent []string
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			mu.Lock()
+			sent = append(sent, line)
+			mu.Unlock()
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				parts := strings.SplitN(strings.TrimPrefix(line, "JOIN "), " ", 2)
+				ch := parts[0]
+				w(":" + nick + "!u@h JOIN " + ch + "\r\n")
+				w(":fake 353 " + nick + " = " + ch + " :" + nick + "\r\n")
+				w(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				ch := strings.TrimSpace(strings.TrimPrefix(line, "WHO "))
+				w(":fake 315 " + nick + " " + ch + " :End of WHO list\r\n")
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port,
+		ChannelKeys: map[string]string{"#locked": "s3cret"},
+		CreatedAt:   time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "keyguy", Username: "k", Realname: "k",
+		AutoJoin: []string{"#open", "#locked"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	waitExact := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			found := false
+			for _, l := range sent {
+				if l == want {
+					found = true
+					break
+				}
+			}
+			mu.Unlock()
+			if found {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("timed out waiting for exact wire line %q; sent:\n%s", want, strings.Join(sent, "\n"))
+	}
+
+	// The keyed channel joins with its key; the plain one stays bare.
+	manager.EnsureConn("u1", "net1")
+	waitExact("JOIN #open")
+	waitExact("JOIN #locked s3cret")
+}
 func TestStatusAway(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

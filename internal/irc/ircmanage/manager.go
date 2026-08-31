@@ -737,8 +737,13 @@ func (m *Manager) registerHandlers(c *conn) {
 		for _, ch := range mem.AutoJoin {
 			// Pending so a rejection on reconnect (channel went +i, we got
 			// banned...) also rolls the channel back instead of silently
-			// shadowing it from the client.
+			// shadowing it from the client. Keyed channels (+k, inline
+			// "#chan:key" in the connection string) join with their key.
 			c.markPending(ch)
+			if key := m.channelKey(c.networkID, ch); key != "" {
+				client.Cmd.JoinKey(ch, key)
+				continue
+			}
 			client.Cmd.Join(ch)
 		}
 		// Seed away state: away-notify only pushes changes, so the users
@@ -1434,9 +1439,24 @@ func (m *Manager) JoinChannel(userID, networkID, channel string) {
 		return
 	}
 	// Marked pending so an upstream refusal (numerics) can roll the
-	// optimistic create back.
+	// optimistic create back. A +k key recorded on the network (inline
+	// "#chan:key" connection-string syntax) rides the JOIN.
 	c.markPending(channel)
+	if key := m.channelKey(c.networkID, channel); key != "" {
+		client.Cmd.JoinKey(channel, key)
+		return
+	}
 	client.Cmd.Join(channel)
+}
+
+// channelKey resolves a channel's +k key from the network record, if any
+// (keys are stored lowercased).
+func (m *Manager) channelKey(networkID, channel string) string {
+	net, err := m.store.GetNetwork(networkID)
+	if err != nil {
+		return ""
+	}
+	return net.ChannelKeys[strings.ToLower(channel)]
 }
 
 // PartChannel leaves an IRC channel upstream (Discord channel delete).

@@ -30,6 +30,9 @@ type Conn struct {
 	Name     string // display name, optional
 	Password string // server password, optional
 	Channels []string
+	// ChannelKeys carries per-channel +k keys from the inline
+	// "#chan:key" token syntax, keyed by lowercased channel name.
+	ChannelKeys map[string]string
 }
 
 // Parse parses an IRC connection string.
@@ -101,10 +104,22 @@ func Parse(raw string) (*Conn, error) {
 		if ch == "" {
 			continue
 		}
+		// Inline +k key: "#chan:secret". The first colon splits - channel
+		// names never contain one, keys may.
+		key := ""
+		if i := strings.IndexByte(ch, ':'); i >= 0 {
+			ch, key = ch[:i], ch[i+1:]
+		}
 		if !strings.HasPrefix(ch, "#") && !strings.HasPrefix(ch, "&") {
 			return nil, fmt.Errorf("%w: %q", ErrBadChannel, ch)
 		}
 		c.Channels = append(c.Channels, ch)
+		if key != "" {
+			if c.ChannelKeys == nil {
+				c.ChannelKeys = map[string]string{}
+			}
+			c.ChannelKeys[strings.ToLower(ch)] = key
+		}
 	}
 
 	// Query params, plus those split from the fragment tail.

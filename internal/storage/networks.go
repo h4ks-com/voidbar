@@ -21,8 +21,11 @@ type Network struct {
 	Port      int       `json:"port"`
 	TLS       bool      `json:"tls"`
 	Password  string    `json:"password,omitempty"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
+	// ChannelKeys holds per-channel +k keys (lowercased name -> key) from
+	// the inline "#chan:key" connection-string syntax.
+	ChannelKeys map[string]string `json:"channel_keys,omitempty"`
+	CreatedBy   string            `json:"created_by"`
+	CreatedAt   time.Time         `json:"created_at"`
 }
 
 // Channel is a Discord-facing channel backed by an IRC channel or query.

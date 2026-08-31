@@ -199,21 +199,40 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 	net, err := s.store.NetworkByConnID(connID)
 	if errors.Is(err, storage.ErrNotFound) {
 		net = &storage.Network{
-			ID:        s.sf.New(),
-			ConnID:    connID,
-			Name:      conn.DisplayName(),
-			Host:      conn.Host,
-			Port:      conn.Port,
-			TLS:       conn.TLS,
-			Password:  conn.Password,
-			CreatedBy: userID,
-			CreatedAt: time.Now().UTC(),
+			ID:          s.sf.New(),
+			ConnID:      connID,
+			Name:        conn.DisplayName(),
+			Host:        conn.Host,
+			Port:        conn.Port,
+			TLS:         conn.TLS,
+			Password:    conn.Password,
+			ChannelKeys: conn.ChannelKeys,
+			CreatedBy:   userID,
+			CreatedAt:   time.Now().UTC(),
 		}
 		if err := s.store.UpsertNetwork(net); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
+	} else if len(conn.ChannelKeys) > 0 {
+		// Keyed re-join of a known network: keys are network-wide
+		// metadata, so a fresh string can add or rotate them.
+		if net.ChannelKeys == nil {
+			net.ChannelKeys = map[string]string{}
+		}
+		changed := false
+		for ch, key := range conn.ChannelKeys {
+			if net.ChannelKeys[ch] != key {
+				net.ChannelKeys[ch] = key
+				changed = true
+			}
+		}
+		if changed {
+			if err := s.store.UpsertNetwork(net); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Nickname is per-user; the connection string may not carry one, and even
