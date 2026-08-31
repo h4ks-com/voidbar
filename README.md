@@ -56,7 +56,10 @@ Covered:
   don't offer a create API; creates are optimistic JOINs - an upstream
   refusal: invite-only, banned, account-required, +k, full - rolls the
   channel back and Clyde DMs the reason) and delete them (PART; history
-  is kept, so re-adding the channel recovers it). Topics round-trip both
+  is kept, so re-adding the channel recovers it). Keyed (+k) channels
+  take their key inline in the connection string (`#chan:key`, keys are
+  network-wide metadata, re-pasting rotates them) and join with it.
+  Topics round-trip both
   ways: client edits relay as `TOPIC`, and every network broadcast
   (join's RPL_TOPIC, peers, our echo) persists and dispatches
   `CHANNEL_UPDATE`; a rejection upstream (+t, not op) never corrupts the
@@ -303,8 +306,9 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 ## Not implemented yet
 
 - **Channel management UI**: channel
-  categories, keyed channels (+k) — auto-join channels from the connection
-  string and runtime create/delete/rename/topic are covered
+  categories — auto-join channels from the connection
+  string (with inline +k keys) and runtime
+  create/delete/rename/topic are covered
   (re-pasting a string for the same network merges new channels in).
 - **Identity**: no SASL
   (only server password via `pass@` in the connection string); nick
