@@ -946,7 +946,7 @@ var joinErrorReasons = map[string]string{
 	"471": "the channel is full (+l)",
 	"473": "the channel is invite-only (+i)",
 	"474": "you are banned from that channel (+b)",
-	"475": "the channel requires a key (+k), which Voidbar does not support yet",
+	"475": "the channel requires a key (+k) - add it with the channel name as \"name:key\" (or inline in the connection string)",
 	"476": "that is not a valid channel name for this server",
 	"477": "the channel requires a registered account (+R)",
 }
