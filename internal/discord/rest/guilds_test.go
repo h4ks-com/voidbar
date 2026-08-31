@@ -1334,9 +1334,15 @@ func TestChannelTopicUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sresp.Body.Close()
-	_, _ = io.Copy(io.Discard, sresp.Body)
-	if sresp.StatusCode != http.StatusNoContent {
+	set := map[string]any{}
+	_ = json.NewDecoder(sresp.Body).Decode(&set)
+	if sresp.StatusCode != http.StatusOK {
 		t.Fatalf("PATCH settings: %d", sresp.StatusCode)
+	}
+	// The response is the full settings object (ModelUserSettings on the
+	// Android client; an empty 204 body crashed its deserializer).
+	if set["theme"] != "dark" {
+		t.Fatalf("PATCH settings response missing defaults: %v", set)
 	}
 	waitWire("AWAY :do not disturb")
 

@@ -197,10 +197,17 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request, u *
 		s.irc.SetStatus(u.ID, status)
 	}
 	// The write ack is the USER_SETTINGS_UPDATE gateway event carrying
-	// the modified fields; without it the client's optimistic update
-	// never confirms and surfaces an "unknown network error" toast.
+	// the modified fields (per docs and the client's IncomingParser).
 	if s.gw != nil {
 		s.gw.Dispatch(u.ID, "USER_SETTINGS_UPDATE", patch)
+	}
+	// The PATCH responds with the full settings object, not 204: the
+	// client deserializes it as ModelUserSettings (RestAPI.smali) and a
+	// null body made its deserializer throw - surfaced as an
+	// "unknown network error" toast on every theme change.
+	if s.net != nil {
+		writeJSON(w, http.StatusOK, s.net.UserSettings(u.ID))
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -284,14 +291,8 @@ func (s *Server) handleSettingsProtoPatch(w http.ResponseWriter, r *http.Request
 	if err := s.net.SetUserSettingsProto(u.ID, kind, merged); err != nil {
 		s.log.Warn("settings proto persist failed", "err", err, "user", u.ID, "kind", kind)
 	}
-	// Ack via the gateway like Discord does; the client merges the event
-	// into its proto store (partial=false: the blob is the full state).
-	if s.gw != nil {
-		s.gw.Dispatch(u.ID, "USER_SETTINGS_PROTO_UPDATE", map[string]any{
-			"settings": base64.StdEncoding.EncodeToString(merged),
-			"partial":  false,
-		})
-	}
+	// No gateway dispatch: the 126.21 IncomingParser has no
+	// USER_SETTINGS_PROTO_UPDATE case; the HTTP response is the ack.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":    base64.StdEncoding.EncodeToString(merged),
 		"out_of_date": false,
