@@ -291,6 +291,15 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
     up front). `/attachments/refresh-urls` echoes URLs back — ours
     never expire.
 
+- **Settings sync**: client settings survive reloads. The legacy store
+  (`PATCH /users/@me/settings`) merges PATCH bodies into persisted
+  settings and answers with the full object (the client deserializes
+  `ModelUserSettings`; a bare 204 crashed it). The proto store
+  (`PATCH /users/@me/settings-proto/{type}`) persists the serialized
+  blob per user and kind, merging by top-level field number straight
+  from the protobuf wire format - no schema linked. Theme, locale and
+  appearance settings stick across restarts.
+
 ## Not implemented yet
 
 - **Channel management UI**: channel
@@ -300,11 +309,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Identity**: no SASL
   (only server password via `pass@` in the connection string); nick
   change is covered (see above).
-- **Settings**: legacy client settings are persisted per user
-  (`PATCH /users/@me/settings`); proto settings (the Android client's
-  appearance store) are persisted too and merged by top-level field
-  (`PATCH /users/@me/settings-proto/{type}`), so appearance survives
-  reloads.
 - **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
   no admin UI, no per-user network management beyond the client.
 - Voice/video, threads, forums, stickers, guild discovery — out of scope
