@@ -33,6 +33,10 @@ type Conn struct {
 	// ChannelKeys carries per-channel +k keys from the inline
 	// "#chan:key" token syntax, keyed by lowercased channel name.
 	ChannelKeys map[string]string
+	// SASL credentials (?sasl=user:pass): SASL PLAIN account auth,
+	// used instead of the server password when present.
+	SASLUser string
+	SASLPass string
 }
 
 // Parse parses an IRC connection string.
@@ -145,6 +149,15 @@ func Parse(raw string) (*Conn, error) {
 			return nil, ErrBadPort
 		}
 		c.Port = port
+	}
+	if sasl := q.Get("sasl"); sasl != "" {
+		// SASL PLAIN credentials: "user:pass", first colon splits
+		// (passwords may contain colons, usernames may not).
+		if i := strings.IndexByte(sasl, ':'); i > 0 {
+			c.SASLUser, c.SASLPass = sasl[:i], sasl[i+1:]
+		} else {
+			return nil, fmt.Errorf("%w: sasl must be user:pass", ErrInvalid)
+		}
 	}
 	return c, nil
 }

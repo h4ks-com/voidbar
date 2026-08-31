@@ -206,6 +206,8 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 			Port:        conn.Port,
 			TLS:         conn.TLS,
 			Password:    conn.Password,
+			SASLUser:    conn.SASLUser,
+			SASLPass:    conn.SASLPass,
 			ChannelKeys: conn.ChannelKeys,
 			CreatedBy:   userID,
 			CreatedAt:   time.Now().UTC(),
@@ -215,18 +217,24 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 		}
 	} else if err != nil {
 		return nil, err
-	} else if len(conn.ChannelKeys) > 0 {
-		// Keyed re-join of a known network: keys are network-wide
-		// metadata, so a fresh string can add or rotate them.
-		if net.ChannelKeys == nil {
-			net.ChannelKeys = map[string]string{}
-		}
+	} else {
+		// Metadata re-join of a known network: keys and SASL credentials
+		// are network-wide, so a fresh string can add or rotate them.
 		changed := false
-		for ch, key := range conn.ChannelKeys {
-			if net.ChannelKeys[ch] != key {
-				net.ChannelKeys[ch] = key
-				changed = true
+		if len(conn.ChannelKeys) > 0 {
+			if net.ChannelKeys == nil {
+				net.ChannelKeys = map[string]string{}
 			}
+			for ch, key := range conn.ChannelKeys {
+				if net.ChannelKeys[ch] != key {
+					net.ChannelKeys[ch] = key
+					changed = true
+				}
+			}
+		}
+		if conn.SASLUser != "" && (conn.SASLUser != net.SASLUser || conn.SASLPass != net.SASLPass) {
+			net.SASLUser, net.SASLPass = conn.SASLUser, conn.SASLPass
+			changed = true
 		}
 		if changed {
 			if err := s.store.UpsertNetwork(net); err != nil {

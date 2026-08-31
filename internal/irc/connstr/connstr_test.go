@@ -92,3 +92,21 @@ func TestParseChannelKeys(t *testing.T) {
 		t.Fatalf("keyed id %q != bare %q", c.ID(), bare.ID())
 	}
 }
+
+func TestParseSASL(t *testing.T) {
+	c, err := Parse("ircs://irc.libera.chat:6697/#go?sasl=acct:p%40ss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SASLUser != "acct" || c.SASLPass != "p@ss" {
+		t.Fatalf("sasl = %q / %q", c.SASLUser, c.SASLPass)
+	}
+	// Credentials are metadata, not identity.
+	bare, _ := Parse("ircs://irc.libera.chat:6697/#go")
+	if c.ID() != bare.ID() {
+		t.Fatalf("sasl id %q != bare %q", c.ID(), bare.ID())
+	}
+	if _, err := Parse("ircs://h/#a?sasl=nocolon"); err == nil {
+		t.Fatal("sasl without colon accepted")
+	}
+}

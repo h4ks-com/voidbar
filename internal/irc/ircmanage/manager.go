@@ -368,6 +368,12 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
 	}
+	// SASL PLAIN (?sasl=user:pass): girc walks the whole AUTHENTICATE
+	// dance during CAP negotiation; when set it replaces the server
+	// password path above (both would be redundant upstream).
+	if net.SASLUser != "" {
+		cfg.SASL = &girc.SASLPlain{User: net.SASLUser, Pass: net.SASLPass}
+	}
 	c := &conn{
 		userID:       userID,
 		networkID:    networkID,

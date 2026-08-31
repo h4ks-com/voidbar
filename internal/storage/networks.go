@@ -21,6 +21,10 @@ type Network struct {
 	Port      int       `json:"port"`
 	TLS       bool      `json:"tls"`
 	Password  string    `json:"password,omitempty"`
+	// SASL PLAIN credentials (?sasl=user:pass in the connection string);
+	// used instead of the server password when set.
+	SASLUser   string            `json:"sasl_user,omitempty"`
+	SASLPass   string            `json:"sasl_pass,omitempty"`
 	// ChannelKeys holds per-channel +k keys (lowercased name -> key) from
 	// the inline "#chan:key" connection-string syntax.
 	ChannelKeys map[string]string `json:"channel_keys,omitempty"`
