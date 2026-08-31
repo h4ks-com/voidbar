@@ -574,9 +574,29 @@ func (s *Service) CreateChannel(userID, guildID, rawName string) (map[string]any
 	if _, err := s.store.GetMembership(guildID, userID); err != nil {
 		return nil, err
 	}
+	// Inline +k key: "name:key" (first colon splits - names never carry
+	// one, keys may). The key lands on the network record before the
+	// JOIN goes out, so the keyed join finds it.
+	key := ""
+	if i := strings.IndexByte(rawName, ':'); i >= 0 {
+		rawName, key = rawName[:i], rawName[i+1:]
+	}
 	ircName := ValidateChannelName(rawName)
 	if ircName == "" {
 		return nil, ErrBadChannelName
+	}
+	if key != "" {
+		net, err := s.store.GetNetwork(guildID)
+		if err != nil {
+			return nil, err
+		}
+		if net.ChannelKeys == nil {
+			net.ChannelKeys = map[string]string{}
+		}
+		net.ChannelKeys[strings.ToLower(ircName)] = key
+		if err := s.store.UpsertNetwork(net); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := s.store.MembershipAddChannel(guildID, userID, ircName); err != nil {
 		return nil, err
