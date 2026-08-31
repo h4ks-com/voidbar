@@ -218,30 +218,43 @@ func (s *Server) handleGuildDetail(w http.ResponseWriter, r *http.Request, u *st
 	})
 }
 
-// optionalID is a snowflake-or-null request field: distinguishes
-// "parent_id": null (ungroup) from an absent field - plain pointers and
-// *json.RawMessage are nil-ed for null by encoding/json, erasing the
-// distinction.
-type optionalID struct {
+// parentRef is a parent-id request field that accepts the id as a JSON
+// string or a number - the Android client serializes big ints as
+// numbers (same quirk as the guild_folders settings PATCH). It also
+// distinguishes null from an absent field, which plain pointers and
+// *json.RawMessage lose (encoding/json nil-es them).
+type parentRef struct {
 	set  bool
 	null bool
 	id   string
 }
 
-func (o *optionalID) UnmarshalJSON(b []byte) error {
-	o.set = true
+func (f *parentRef) UnmarshalJSON(b []byte) error {
+	f.set = true
 	if string(b) == "null" {
-		o.null = true
+		f.null = true
 		return nil
 	}
-	return json.Unmarshal(b, &o.id)
+	var str string
+	if err := json.Unmarshal(b, &str); err == nil {
+		f.id = str
+		return nil
+	}
+	var num json.Number
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.UseNumber()
+	if err := dec.Decode(&num); err == nil && num.String() != "" {
+		f.id = num.String()
+		return nil
+	}
+	return errors.New("not an id")
 }
 
 type updateChannelRequest struct {
-	Name     *string     `json:"name"`
-	Topic    *string     `json:"topic"`
-	ParentID optionalID  `json:"parent_id"`
-	Position *int        `json:"position"`
+	Name     *string   `json:"name"`
+	Topic    *string   `json:"topic"`
+	ParentID parentRef `json:"parent_id"`
+	Position *int      `json:"position"`
 }
 
 // handleUpdateChannel answers PATCH /channels/:id - the channel settings
@@ -947,13 +960,38 @@ func (s *Server) handleGuildChannelPositions(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var entries []struct {
-		ID       string     `json:"id"`
-		Position *int       `json:"position"`
-		ParentID optionalID `json:"parent_id"`
+		ID       string `json:"id"`
+		Position *int   `json:"position"`
+		ParentID parentRef `json:"parent_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil || len(entries) == 0 {
-		jsonError(w, http.StatusBadRequest, "invalid body")
-		return
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err := json.Unmarshal(body, &entries); err != nil || len(entries) == 0 {
+		// Snowflakes as JSON numbers (the client's big-int quirk) fail
+		// the string field: retry with the flexible id type.
+		var flex []struct {
+			ID       flexID    `json:"id"`
+			Position *int   `json:"position"`
+			ParentID parentRef `json:"parent_id"`
+		}
+		if err2 := json.Unmarshal(body, &flex); err2 != nil || len(flex) == 0 {
+			snippet := string(body)
+			if len(snippet) > 200 {
+				snippet = snippet[:200]
+			}
+			s.log.Warn("channel positions decode failed", "err", err, "body", snippet)
+			jsonError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		entries = make([]struct {
+			ID       string `json:"id"`
+			Position *int   `json:"position"`
+			ParentID parentRef `json:"parent_id"`
+		}, len(flex))
+		for i, e := range flex {
+			entries[i].ID = string(e.ID)
+			entries[i].Position = e.Position
+			entries[i].ParentID = e.ParentID
+		}
 	}
 	for _, e := range entries {
 		pos := 0
