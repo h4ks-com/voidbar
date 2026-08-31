@@ -103,3 +103,46 @@ func TestCategoryFlow(t *testing.T) {
 		t.Fatalf("child after category delete: %v", text)
 	}
 }
+
+// TestCategoryDragMove covers the sidebar drag route: the batch positions
+// PATCH (array of {id, parent_id, position}) groups the channel.
+func TestCategoryDragMove(t *testing.T) {
+	h := newServer(t, "open")
+	token := registerAndLogin(t, h)
+
+	rec, out := do(t, h, "POST", "/api/v9/guilds", token, map[string]any{
+		"name": "ircs://irc.libera.chat:6697/#go?name=Libera",
+	})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("join: %d %v", rec.Code, out)
+	}
+	guildID, _ := out["id"].(string)
+	rec, ch := do(t, h, "POST", "/api/v9/guilds/"+guildID+"/channels", token, map[string]any{"name": "general"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create channel: %d %v", rec.Code, ch)
+	}
+	chID, _ := ch["id"].(string)
+	rec, cat := do(t, h, "POST", "/api/v9/guilds/"+guildID+"/channels", token, map[string]any{"name": "Deep", "type": 4})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create category: %d %v", rec.Code, cat)
+	}
+	catID, _ := cat["id"].(string)
+
+	// The drag: batch array, 204 expected.
+	rec, _ = doAny(t, h, "PATCH", "/api/v9/guilds/"+guildID+"/channels", token, []any{
+		map[string]any{"id": chID, "parent_id": catID, "position": 0, "lock_permissions": false},
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("drag patch: %d", rec.Code)
+	}
+	rec, g := do(t, h, "GET", "/api/v9/guilds/"+guildID, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("guild detail: %d", rec.Code)
+	}
+	for _, c := range g["channels"].([]any) {
+		cm := c.(map[string]any)
+		if cm["id"] == chID && cm["parent_id"] != catID {
+			t.Fatalf("drag did not group: %v", cm)
+		}
+	}
+}

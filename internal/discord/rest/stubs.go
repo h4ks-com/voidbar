@@ -67,6 +67,9 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	// array - an empty object nulls the client's non-null list and
 	// crashes the app on cold start.
 	mux.HandleFunc("GET /api/v9/sticker-packs", s.requireAuth(s.handleStickerPacks))
+	// The client resolves the default pack by id (e.g. after the picker
+	// opens); a 404 made it retry-spam. An empty-but-valid pack calms it.
+	mux.HandleFunc("GET /api/v9/sticker-packs/{id}", s.requireAuth(s.handleStickerPack))
 }
 
 // handleAuthFingerprint answers the Android client's pre-login fingerprint
@@ -359,6 +362,20 @@ func (s *Server) handleEmptyMap(w http.ResponseWriter, r *http.Request, _ *stora
 // handleStickerPacks answers the documented Get Sticker Packs shape.
 func (s *Server) handleStickerPacks(w http.ResponseWriter, r *http.Request, _ *storage.User) {
 	writeJSON(w, http.StatusOK, map[string]any{"sticker_packs": []any{}})
+}
+
+// handleStickerPack answers the single-pack probe with an empty-but-valid
+// pack (arrays must not be null - the client's non-null lists crash).
+func (s *Server) handleStickerPack(w http.ResponseWriter, r *http.Request, _ *storage.User) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":               r.PathValue("id"),
+		"stickers":         []any{},
+		"name":             "",
+		"description":      "",
+		"sku_id":           nil,
+		"cover_sticker_id": nil,
+		"banner":           nil,
+	})
 }
 
 func (s *Server) handleAffinities(w http.ResponseWriter, r *http.Request, _ *storage.User) {

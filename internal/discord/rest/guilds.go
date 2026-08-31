@@ -932,6 +932,66 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, u *
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleGuildChannelPositions answers PATCH /guilds/:id/channels - the
+// sidebar drag: a JSON array of {id, position?, parent_id?} entries
+// (parent null = ungroup). Categories reposition here too. Discord
+// answers 204 and lets the CHANNEL_UPDATE events carry the new truth.
+func (s *Server) handleGuildChannelPositions(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	guildID := r.PathValue("guild")
+	if _, err := s.net.MembershipFor(u.ID, guildID); err != nil {
+		jsonError(w, http.StatusNotFound, "unknown guild")
+		return
+	}
+	var entries []struct {
+		ID       string     `json:"id"`
+		Position *int       `json:"position"`
+		ParentID optionalID `json:"parent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil || len(entries) == 0 {
+		jsonError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	for _, e := range entries {
+		pos := 0
+		if e.Position != nil {
+			pos = *e.Position
+		}
+		// Categories carry only positions here; text channels take the
+		// parent (null = ungroup) and position together. Entries without
+		// either field (e.g. lock_permissions only) touch nothing.
+		if _, _, err := s.net.CategoryByID(u.ID, e.ID); err == nil {
+			if e.Position != nil {
+				if err := s.net.SetCategoryPosition(u.ID, e.ID, pos); err != nil {
+					jsonError(w, http.StatusInternalServerError, "move failed")
+					return
+				}
+			}
+			continue
+		}
+		setParent := e.ParentID.set
+		if !setParent && e.Position == nil {
+			continue
+		}
+		parent := ""
+		if setParent && !e.ParentID.null {
+			parent = e.ParentID.id
+		}
+		if !setParent {
+			if ch, err := s.net.ChannelByID(e.ID); err == nil {
+				parent = ch.ParentID
+			}
+		}
+		// Unknown/stale entries are skipped: the client re-syncs from
+		// the follow-up events.
+		_ = s.net.MoveChannel(u.ID, e.ID, parent, pos, e.Position != nil)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleGuildPreview answers GET /guilds/:id/preview — the client fetches
 // this when opening guild screens (e.g. settings). Minimal GuildPreview.
 func (s *Server) handleGuildPreview(w http.ResponseWriter, r *http.Request, u *storage.User) {

@@ -782,6 +782,23 @@ func (s *Service) MoveChannel(userID, channelID, parentID string, position int, 
 	return nil
 }
 
+// SetCategoryPosition repositions a local grouping category and
+// dispatches the CHANNEL_UPDATE.
+func (s *Service) SetCategoryPosition(userID, catID string, position int) error {
+	net, cat, err := s.CategoryByID(userID, catID)
+	if err != nil {
+		return err
+	}
+	cat.Position = position
+	if err := s.store.UpsertNetwork(net); err != nil {
+		return err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "CHANNEL_UPDATE", s.categoryPayload(net.ID, cat))
+	}
+	return nil
+}
+
 // RemoveCategory deletes a local grouping category; its children are
 // ungrouped first (each gets its CHANNEL_UPDATE, then the category's
 // CHANNEL_DELETE).
