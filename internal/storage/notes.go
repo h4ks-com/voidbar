@@ -56,7 +56,7 @@ func (s *Storage) ListUserNotes(userID string) (map[string]string, error) {
 	err := s.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
-		for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
 			target := string(bytes.TrimPrefix(item.KeyCopy(nil), prefix))
 			var note string
