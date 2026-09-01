@@ -338,6 +338,23 @@ func TestChannelPins(t *testing.T) {
 		t.Fatalf("pin payload wrong: %v", first)
 	}
 
+	// The pin drops a type-6 system row into the channel history.
+	rec, histAny := doAny(t, h, "GET", "/api/v9/channels/"+channelID+"/messages?limit=50", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history: %d", rec.Code)
+	}
+	hist, _ := histAny.([]any)
+	sysRows := 0
+	for _, rowAny := range hist {
+		row, _ := rowAny.(map[string]any)
+		if row["type"] == float64(6) && row["content"] == "" {
+			sysRows++
+		}
+	}
+	if sysRows != 2 { // one per pinned message
+		t.Fatalf("expected 2 pin system rows, got %d in %v", sysRows, hist)
+	}
+
 	// Unpin one; the list shrinks.
 	rec, _ = do(t, h, "DELETE", "/api/v9/channels/"+channelID+"/pins/900000000000000000", token, nil)
 	if rec.Code != http.StatusNoContent {

@@ -217,6 +217,18 @@ func (s *Service) PinCount(channelID string) int {
 // a partial MESSAGE_UPDATE flipping the row's pinned flag, plus
 // CHANNEL_PINS_UPDATE so the channel header's pin badge refreshes.
 func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool) error {
+	// Pinning an already-pinned message is a no-op (no duplicate system
+	// row, no pin-time bump).
+	already := false
+	for _, p := range s.ChannelPins(channelID) {
+		if p.ID == messageID {
+			already = true
+			break
+		}
+	}
+	if pinned && already {
+		return nil
+	}
 	var err error
 	if pinned {
 		err = s.store.PutPin(channelID, messageID)
@@ -243,8 +255,61 @@ func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool
 			"guild_id":            s.ChannelNetworkID(channelID),
 			"last_pin_timestamp":  last,
 		})
+		if pinned {
+			s.dispatchPinSystemMessage(userID, channelID, messageID)
+		}
 	}
 	return nil
+}
+
+// dispatchPinSystemMessage drops the "{user} pinned a message to this
+// channel" system row (message type 6) into the channel: dispatched live
+// and appended to the replay buffer so history keeps it. message_reference
+// anchors the live row to the pinned message (previews on tap); history
+// replay renders the plain string.
+func (s *Service) dispatchPinSystemMessage(userID, channelID, messageID string) {
+	username := userID
+	if u, err := s.store.GetUserByID(userID); err == nil {
+		username = u.Username
+	}
+	now := time.Now().UTC()
+	rowID := s.sf.New()
+	if err := s.store.AppendMessage(storage.BufferedMessage{
+		ID:         rowID,
+		ChannelID:  channelID,
+		AuthorID:   userID,
+		AuthorName: username,
+		Content:    "",
+		Type:       model.MessageTypePinned,
+		Timestamp:  now.Format(time.RFC3339),
+	}); err != nil {
+		s.log.Error("persist pin system message", "err", err)
+	}
+	s.gw.Dispatch(userID, "MESSAGE_CREATE", map[string]any{
+		"id":               rowID,
+		"channel_id":       channelID,
+		"author":           map[string]any{"id": userID, "username": username, "discriminator": "0", "bot": false},
+		"content":          "",
+		"timestamp":        now.Format(time.RFC3339),
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nil,
+		"pinned":           false,
+		"type":             model.MessageTypePinned,
+		"flags":            0,
+		"message_reference": map[string]any{
+			"type":       0,
+			"message_id": messageID,
+			"channel_id": channelID,
+		},
+	})
 }
 
 // UserSettingsProto returns the persisted serialized settings protobuf for

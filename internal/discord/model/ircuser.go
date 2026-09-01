@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// MessageTypePinned is Discord's USER_PINNED_MESSAGE system row (message
+// type 6): the client renders "{username} pinned a message to this
+// channel. See all pinned messages." from it.
+const MessageTypePinned = 6
+
 // IrcAuthorID maps an IRC author id ("irc:<nick>", the storage/relay
 // convention) to a stable snowflake. The Android client parses message
 // author ids as 64-bit integers: a raw "irc:<nick>" string throws inside

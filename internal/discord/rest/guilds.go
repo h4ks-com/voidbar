@@ -606,6 +606,11 @@ func (s *Server) historyMessagePayload(u *storage.User, m storage.BufferedMessag
 		authorBio = bio
 	}
 	payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio)
+	// System rows (e.g. the pin notice) replay with their type so the
+	// client renders them as system messages, not empty user messages.
+	if m.Type != 0 {
+		payload["type"] = m.Type
+	}
 	// Mentioned peers ride along: the mentions array rebuilds from the
 	// stored refs (bouncer members keep their real ids), and the users
 	// get GUILD_MEMBER_UPDATE upserts so pills don't render
