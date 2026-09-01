@@ -1216,13 +1216,16 @@ func (s *Server) handleUpdateGuild(w http.ResponseWriter, r *http.Request, u *st
 		return
 	}
 	// The client rebuilds its guild settings screen from store state,
-	// not from this response - it races the GUILD_UPDATE dispatch against
-	// the response and takes whichever lands first. Push the event onto
-	// the socket before the response bytes leave so the store always
-	// wins.
+	// not from this response: its save chain takes the FIRST store
+	// emission and completes, so the GUILD_UPDATE has to be applied to
+	// the client's store before the response lands. Flush pushes the
+	// event onto the socket; the grace window covers the client's
+	// receive + parse + store apply (the slim event keeps that well
+	// under one frame).
 	if s.gw != nil {
 		s.gw.FlushUser(u.ID)
 	}
+	time.Sleep(200 * time.Millisecond)
 	s.handleGuildDetail(w, r, u)
 }
 

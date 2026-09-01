@@ -313,8 +313,7 @@ func (s *Service) dispatchPinSystemMessage(userID, channelID, messageID string) 
 }
 
 // RenameNetwork renames a network from the client's guild settings and
-// fans GUILD_UPDATE (the full guild payload, same shape as
-// GUILD_CREATE) so every session re-renders the rail.
+// fans GUILD_UPDATE so every session re-renders the rail.
 func (s *Service) RenameNetwork(userID, guildID, name string) (*storage.Network, error) {
 	m, err := s.store.GetMembership(guildID, userID)
 	if err != nil {
@@ -329,9 +328,51 @@ func (s *Service) RenameNetwork(userID, guildID, name string) (*storage.Network,
 		return nil, err
 	}
 	if s.gw != nil {
-		s.gw.Dispatch(userID, "GUILD_UPDATE", s.buildGuild(m, net))
+		s.gw.Dispatch(userID, "GUILD_UPDATE", s.guildUpdatePayload(m, net))
 	}
 	return net, nil
+}
+
+// guildUpdatePayload is the slim GUILD_UPDATE wire shape: scalar guild
+// fields and roles. Members/channels/presences ride GUILD_CREATE only -
+// the client re-hydrates updates from its guild cache - and the small
+// event also reaches its store faster than the PATCH response it races
+// (the settings screen re-renders from the store, never the response).
+func (s *Service) guildUpdatePayload(m *storage.Membership, net *storage.Network) map[string]any {
+	count := 1 // Clyde owns every network
+	if all, err := s.store.ListMemberships(net.ID); err == nil {
+		count += len(all)
+	}
+	roles := append([]any{model.EveryoneRolePayload(net.ID, s.manager != nil && s.manager.ReactionsSupported(m.UserID, net.ID))}, model.IrcRolePayloads()...)
+	return map[string]any{
+		"id":                            net.ID,
+		"name":                          net.Name,
+		"icon":                          nil,
+		"owner_id":                      model.ClydeID,
+		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
+		"member_count":                  count,
+		"large":                         false,
+		"roles":                         roles,
+		"features":                      []any{},
+		"premium_tier":                  0,
+		"nsfw":                          false,
+		"verification_level":            0,
+		"default_message_notifications": 0,
+		"explicit_content_filter":       0,
+		"mfa_level":                     0,
+		"system_channel_id":             nil,
+		"rules_channel_id":              nil,
+		"public_updates_channel_id":     nil,
+		"afk_channel_id":                nil,
+		"afk_timeout":                   300,
+		"preferred_locale":              "en-US",
+		"guild_hashes": map[string]any{
+			"version":  0,
+			"hashes":   map[string]any{},
+			"guild_id": net.ID,
+		},
+		"unavailable": !s.linkUp(m.UserID, net.ID),
+	}
 }
 
 // ReactorUserPayload shapes one reactors-list entry: a bouncer member's
