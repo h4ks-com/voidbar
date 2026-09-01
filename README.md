@@ -230,6 +230,19 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   a no-op (IRC can't hide a connected client). The persisted status
   re-asserts on every reconnect (IRC forgets AWAY across connections);
   others' away renders as "idle" (see member sidebar).
+- **Peer facts** (extended-join, account-notify, chghost, WHO 352):
+  per-nick services account and user@host, seeded at JOIN, updated by
+  ACCOUNT/CHGHOST broadcasts, surviving renames — the profile sheet
+  resolves the hashed author id back to them (nick as display name,
+  "NickServ: ..." and "Host: ..." lines in the bio).
+- **Invite relays** (invite-notify): INVITE broadcasts for channels we're
+  in land as channel messages from the inviter; a direct INVITE aimed at
+  us lands as a DM ("invited you to #chan") instead of vanishing. No
+  ghost channel rows for channels we're not in.
+- **Standard replies** (FAIL/WARN/NOTE, standard-replies cap): a reply
+  whose context names a joined channel surfaces there as a message from
+  the "server" pseudo-user; everything else (registration-time,
+  NickServ) is logged.
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
@@ -333,22 +346,13 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 ### IRCv3 extensions to adopt
 
 Cross-checked against the IRCv3 catalog, girc's negotiated set, and
-what the works section above already covers (away-notify presence and
-echo-message msgid correlation are done):
+what the works section above already covers (away-notify presence,
+echo-message, peer facts, invite relays, standard replies are done):
 
-- **account-notify + extended-join** — the caps are already negotiated
-  (girc defaults); no handlers. Surface services identification in the
-  member card (NickServ login, account changes at JOIN).
-- **chghost** — cap negotiated, no handler; host/cloak changes should
-  refresh the member card.
-- **invite-notify** — cap negotiated, no handler; INVITE broadcasts as
-  a channel system message.
 - **monitor** — cap not requested; adopt for nick online/offline
   tracking (member list beyond joined channels).
 - **setname** — cap not requested (not in girc's known set); adopt for
   realname changes if the client has a slot.
-- **standard-replies** — cap not requested; FAIL/WARN/NOTE as clean
-  errors instead of numeric soup.
 
 ### Cleanup
 
