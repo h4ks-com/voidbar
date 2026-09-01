@@ -338,10 +338,14 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")
 				return
 			}
-			// guild_id is numeric here too (see rawIDsToStrings).
+			// guild_id is numeric here too (see rawIDsToStrings). The
+			// client sends channel ids either way: `channels` (id ->
+			// typing ranges) or `members` (bare id list; ids arrive as
+			// JSON numbers, see OutgoingPayload$GuildSubscriptions).
 			var d struct {
 				GuildID  json.RawMessage        `json:"guild_id"`
 				Channels map[string][][]float64 `json:"channels"`
+				Members  []json.RawMessage      `json:"members"`
 			}
 			if err := json.Unmarshal(p.D, &d); err != nil || len(d.GuildID) == 0 {
 				s.log.Warn("op13/14 decode failed", "err", err, "raw", string(p.D))
@@ -352,13 +356,22 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				s.log.Warn("op13/14 decode failed: no guild id", "raw", string(p.D))
 				continue
 			}
-			s.log.Info("op14 request", "guild", gids[0], "channels", len(d.Channels))
+			channelIDs := make([]string, 0, len(d.Channels)+len(d.Members))
+			for id := range d.Channels {
+				channelIDs = append(channelIDs, id)
+			}
+			for _, m := range d.Members {
+				if ids := rawIDsToStrings(m); len(ids) > 0 {
+					channelIDs = append(channelIDs, ids[0])
+				}
+			}
+			s.log.Info("op14 request", "guild", gids[0], "channels", len(channelIDs))
 			guildID := gids[0]
 			if s.memberListForUser == nil {
 				continue
 			}
-			// Channels omitted (or empty) = the guild-wide "everyone" list.
-			if len(d.Channels) == 0 {
+			// No channel ids at all = the guild-wide "everyone" list.
+			if len(channelIDs) == 0 {
 				sess.watchMemberList(guildID, "")
 				if payload := s.memberListForUser(sess.UserID, guildID, ""); payload != nil {
 					if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
@@ -367,7 +380,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 				}
 				continue
 			}
-			for channelID := range d.Channels {
+			for _, channelID := range channelIDs {
 				sess.watchMemberList(guildID, channelID)
 				payload := s.memberListForUser(sess.UserID, guildID, channelID)
 				if payload == nil {

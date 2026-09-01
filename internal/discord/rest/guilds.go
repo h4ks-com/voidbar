@@ -517,7 +517,19 @@ func (s *Server) handleCreateDM(w http.ResponseWriter, r *http.Request, u *stora
 
 // messagePayload builds the full stock Discord message shape shared by the
 // send response, gateway MESSAGE_CREATE fanout and buffered history reads.
-func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any) map[string]any {
+// authorBio (nil for own sends / unknown peers) keeps the peer facts on
+// the author: every ingested user object replaces the client's store
+// user, and a bio-less author blanks the sheet's About-me.
+func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any, authorBio any) map[string]any {
+	author := map[string]any{
+		"id":            authorID,
+		"username":      authorName,
+		"discriminator": "0",
+		"bot":           false,
+	}
+	if authorBio != nil {
+		author["bio"] = authorBio
+	}
 	return map[string]any{
 		"id":               id,
 		"channel_id":       channelID,
@@ -536,12 +548,7 @@ func messagePayload(id, channelID, content, ts, authorID, authorName string, non
 		"pinned":           false,
 		"type":             0,
 		"flags":            0,
-		"author": map[string]any{
-			"id":            authorID,
-			"username":      authorName,
-			"discriminator": "0",
-			"bot":           false,
-		},
+		"author":           author,
 	}
 }
 
@@ -577,7 +584,11 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	out := make([]any, 0, len(buffered))
 	upsertNicks := map[string]bool{}
 	for _, m := range buffered {
-		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce)
+		var authorBio any
+		if bio := s.net.AuthorBio(u.ID, r.PathValue("channel"), m.AuthorID); bio != "" {
+			authorBio = bio
+		}
+		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio)
 		// Mentioned peers ride along: the mentions array rebuilds from the
 		// stored refs (bouncer members keep their real ids), and the users
 		// get GUILD_MEMBER_UPDATE upserts so pills don't render
@@ -636,7 +647,7 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 
 // searchChannel returns every replay-buffer hit for the terms (AND,
 // case-insensitive, over content and author names), newest first.
-func (s *Server) searchChannel(channelID string, terms []string) []map[string]any {
+func (s *Server) searchChannel(userID, channelID string, terms []string) []map[string]any {
 	// The buffer returns newest-first with a hard ceiling; searching it
 	// whole is a key-prefix scan, cheap enough at replay-buffer sizes.
 	buffered := s.net.ChannelMessages(channelID, "", "", 1<<20)
@@ -653,7 +664,11 @@ func (s *Server) searchChannel(channelID string, terms []string) []map[string]an
 		if !matched {
 			continue
 		}
-		hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce))
+		var authorBio any
+		if bio := s.net.AuthorBio(userID, channelID, m.AuthorID); bio != "" {
+			authorBio = bio
+		}
+		hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio))
 	}
 	return hits
 }
@@ -737,7 +752,7 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request, u 
 		writeJSON(w, http.StatusOK, map[string]any{"analytics_id": "voidbar", "total_results": 0, "messages": []any{}})
 		return
 	}
-	hits := s.searchChannel(r.PathValue("channel"), terms)
+	hits := s.searchChannel(u.ID, r.PathValue("channel"), terms)
 	writeSearchResults(w, hits, offset)}
 
 // handleSearchGuildMessages serves GET /guilds/{g}/messages/search: the
@@ -783,7 +798,7 @@ func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Reques
 		if len(only) > 0 && !only[ch.ID] {
 			continue
 		}
-		hits = append(hits, s.searchChannel(ch.ID, terms)...)
+		hits = append(hits, s.searchChannel(u.ID, ch.ID, terms)...)
 	}
 	// Snowflake ids order chronologically; the client shows newest first.
 	sort.Slice(hits, func(i, j int) bool {
@@ -1220,7 +1235,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil)
 		if len(attachRows) > 0 {
 			msg["attachments"] = attachRows
 		}
@@ -1277,7 +1292,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil)
 	if len(attachRows) > 0 {
 		msg["attachments"] = attachRows
 	}

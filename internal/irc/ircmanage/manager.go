@@ -1533,6 +1533,7 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 		if u == nil {
 			continue
 		}
+		f := c.peerFactFor(u.Nick)
 		mode := ""
 		if u.Perms != nil {
 			if perms, ok := u.Perms.Lookup(ch.Name); ok {
@@ -1550,7 +1551,6 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 				}
 			}
 		}
-		f := c.peerFactFor(u.Nick)
 		host := ""
 		if f.User != "" && f.Host != "" {
 			host = f.User + "@" + f.Host

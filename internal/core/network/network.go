@@ -1062,6 +1062,15 @@ func (s *Service) ChannelNetworkID(channelID string) string {
 	return ch.NetworkID
 }
 
+// AuthorBio resolves the facts bio for a buffered message author
+// ("" when the author is the user themselves or nothing is known).
+func (s *Service) AuthorBio(userID, channelID, rawAuthorID string) string {
+	if s.manager == nil || !strings.HasPrefix(rawAuthorID, "irc:") {
+		return ""
+	}
+	return s.manager.PeerBioText(userID, s.ChannelNetworkID(channelID), strings.TrimPrefix(rawAuthorID, "irc:"))
+}
+
 // PeerInfoByAuthor resolves a hashed IRC author id to live peer facts
 // (nick, services account, user@host); see the manager for semantics.
 func (s *Service) PeerInfoByAuthor(userID, authorID string) (string, string, string, bool) {
@@ -1182,6 +1191,7 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 	away := map[string]bool{}
 	seen := map[string]bool{}
 	var nicks []string
+	facts := map[string]ircmanage.ChannelMember{}
 	for _, chName := range ircNames {
 		for _, cm := range s.manager.ChannelMembersDetailed(userID, networkID, chName) {
 			if !seen[cm.Nick] {
@@ -1194,6 +1204,13 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 			if cm.Away {
 				away[cm.Nick] = true
 			}
+			// Peer facts (account/host) ride along: the union must not
+			// strip them, or every guild-wide member row loses its bio.
+			if f, ok := facts[cm.Nick]; !ok || (f.Account == "" && f.Host == "") {
+				if cm.Account != "" || cm.Host != "" {
+					facts[cm.Nick] = cm
+				}
+			}
 		}
 	}
 	sort.Slice(nicks, func(i, j int) bool {
@@ -1201,7 +1218,12 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 	})
 	out := make([]ircmanage.ChannelMember, 0, len(nicks))
 	for _, n := range nicks {
-		out = append(out, ircmanage.ChannelMember{Nick: n, Mode: best[n], Away: away[n]})
+		row := ircmanage.ChannelMember{Nick: n, Mode: best[n], Away: away[n]}
+		if f, ok := facts[n]; ok {
+			row.Account = f.Account
+			row.Host = f.Host
+		}
+		out = append(out, row)
 	}
 	return out
 }
