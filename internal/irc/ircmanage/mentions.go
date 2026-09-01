@@ -399,10 +399,17 @@ func (m *Manager) upsertPeerMember(c *conn, nick, mode, joinedAt string) {
 
 // dispatchPeerMember emits the GUILD_MEMBER_UPDATE carrying the peer's
 // user object (roles from their channel mode; "" keeps the row plain).
+// The user object carries the peer-facts bio so the sheet renders it
+// straight from the store (the profile merge path needs a guild-member
+// bio the client never gets from us).
 func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 	roles := []any{}
 	if mode != "" {
 		roles = []any{model.IrcRoleID(mode)}
+	}
+	var bio any
+	if text := (ChannelMember{Nick: nick, Account: c.peerFactFor(nick).Account, Host: peerHostString(c, nick)}).BioText(); text != "" {
+		bio = text
 	}
 	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
 		"guild_id": c.networkID,
@@ -411,11 +418,21 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 			"username":      nick,
 			"discriminator": "0",
 			"bot":           false,
+			"bio":           bio,
 		},
 		"nick":      nil,
 		"roles":     roles,
 		"joined_at": joinedAt,
 	})
+}
+
+// peerHostString renders a nick's known user@host ("" when unknown).
+func peerHostString(c *conn, nick string) string {
+	f := c.peerFactFor(nick)
+	if f.User == "" || f.Host == "" {
+		return ""
+	}
+	return f.User + "@" + f.Host
 }
 
 // matchNickAt returns the candidate nick matching at position i (must

@@ -1074,6 +1074,15 @@ func (s *Service) bouncerMembers(networkID string) map[string]bouncerMember {
 	return out
 }
 
+// peerBioValue shapes a bio string for a user payload: null when empty
+// (an empty-but-present bio would render a blank "About me" section).
+func peerBioValue(bio string) any {
+	if bio == "" {
+		return nil
+	}
+	return bio
+}
+
 // memberListItem builds one GUILD_MEMBER_LIST_UPDATE member row. uid is
 // the Discord user id for the row: a bouncer member's real id, or the
 // hashed snowflake for a plain IRC peer. COMPAT: presence lives INSIDE
@@ -1092,14 +1101,18 @@ func memberListItem(cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[
 			// strict web-client schemas require member.id (and the member
 			// list React keys derive from it).
 			"id": uid,
-			"user": map[string]any{
-				"id":            uid,
-				"username":      cm.Nick,
-				"discriminator": "0",
-				"bot":           false,
-			},
-			"roles":     ircRoleIDsFor(mode),
-			"joined_at": joinedAt,
+		"user": map[string]any{
+			"id":            uid,
+			"username":      cm.Nick,
+			"discriminator": "0",
+			"bot":           false,
+			// Peer facts ride the user object itself: the sheet renders
+			// the store user's bio without needing the profile endpoint
+			// (the profile merge only fires for guild-member bios).
+			"bio": peerBioValue(cm.BioText()),
+		},
+		"roles":     ircRoleIDsFor(mode),
+		"joined_at": joinedAt,
 			"presence": map[string]any{
 				"user":   map[string]any{"id": uid},
 				"status": status,
@@ -1312,6 +1325,7 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 			"username":      r.cm.Nick,
 			"discriminator": "0",
 			"bot":           false,
+			"bio":           peerBioValue(r.cm.BioText()),
 		}
 		members = append(members, map[string]any{
 			"user":      user,
@@ -1482,6 +1496,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"username":      cm.Nick,
 				"discriminator": "0",
 				"bot":           false,
+				"bio":           peerBioValue(cm.BioText()),
 			},
 			"roles":     ircRoleIDsFor(cm.Mode),
 			"joined_at": m.JoinedAt.Format(time.RFC3339),

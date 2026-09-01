@@ -1425,6 +1425,19 @@ type ChannelMember struct {
 	Host    string
 }
 
+// BioText renders the peer facts as the profile-sheet bio: NickServ
+// account and host, newline-separated, "" when nothing is known.
+func (cm ChannelMember) BioText() string {
+	var lines []string
+	if cm.Account != "" {
+		lines = append(lines, "NickServ: "+cm.Account)
+	}
+	if cm.Host != "" {
+		lines = append(lines, "Host: "+cm.Host)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // ChannelMembers returns the nicks currently in an IRC channel according
 // to girc's live channel state (fed by NAMES on join plus JOIN/PART/QUIT).
 // Sorted for stable list rendering. Empty when the channel is unknown.
