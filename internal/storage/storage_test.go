@@ -95,34 +95,6 @@ func TestSessions(t *testing.T) {
 	}
 }
 
-func TestRegInviteConsume(t *testing.T) {
-	s := openStore(t)
-	inv := &RegInvite{Code: "code1", MaxUses: 2, CreatedAt: time.Now()}
-	if err := s.CreateRegInvite(inv); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ {
-		if err := s.ConsumeRegInvite("code1"); err != nil {
-			t.Fatalf("consume %d: %v", i, err)
-		}
-	}
-	if err := s.ConsumeRegInvite("code1"); !errors.Is(err, ErrInviteExhausted) {
-		t.Fatalf("expected ErrInviteExhausted, got %v", err)
-	}
-	inf := &RegInvite{Code: "code2", MaxUses: 0, CreatedAt: time.Now()}
-	if err := s.CreateRegInvite(inf); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 5; i++ {
-		if err := s.ConsumeRegInvite("code2"); err != nil {
-			t.Fatalf("unlimited consume %d: %v", i, err)
-		}
-	}
-	if err := s.ConsumeRegInvite("nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
-}
-
 func TestListUsersSorted(t *testing.T) {
 	s := openStore(t)
 	sf := util.NewSnowflake(0, 0)

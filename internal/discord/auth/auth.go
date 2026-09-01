@@ -13,7 +13,6 @@ import (
 
 var (
 	ErrRegistrationClosed = errors.New("registration is closed")
-	ErrInvalidInvite      = errors.New("invalid or exhausted invite code")
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrInvalidUsername    = errors.New("username must be 2-32 chars: a-z 0-9 . _")
 	ErrInvalidEmail       = errors.New("invalid email")
@@ -48,7 +47,7 @@ func (s *Service) Fingerprint() string {
 	return s.sf.New() + "." + hash
 }
 
-func (s *Service) Register(username, email, password, inviteCode string) (*storage.User, string, error) {
+func (s *Service) Register(username, email, password string) (*storage.User, string, error) {
 	if s.registration == "closed" {
 		return nil, "", ErrRegistrationClosed
 	}
@@ -72,14 +71,6 @@ func (s *Service) Register(username, email, password, inviteCode string) (*stora
 		return nil, "", storage.ErrEmailTaken
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return nil, "", err
-	}
-	if s.registration == "invite" {
-		if err := s.store.ConsumeRegInvite(inviteCode); err != nil {
-			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrInviteExhausted) {
-				return nil, "", ErrInvalidInvite
-			}
-			return nil, "", err
-		}
 	}
 	hash, err := util.HashPassword(password)
 	if err != nil {

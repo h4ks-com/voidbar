@@ -29,7 +29,7 @@ func newTestServer(t *testing.T) (*Server, string, string) {
 	cfg := config.Default()
 	cfg.Server.PublicURL = "http://voidbar.test"
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestResumeWrongUser(t *testing.T) {
 	gw, token, _ := newTestServer(t)
 	_, sid, _ := identifyFlow(t, gw, token)
 
-	_, token2, err := gw.auth.Register("mattf", "mattf@x.io", "hunter2hunter2", "")
+	_, token2, err := gw.auth.Register("mattf", "mattf@x.io", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}

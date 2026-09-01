@@ -298,10 +298,9 @@ func (s *Server) handleInstanceDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 type registerRequest struct {
-	Username   string `json:"username"`
-	Email      string `json:"email"`
-	Password   string `json:"password"`
-	InviteCode string `json:"invite_code"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type loginRequest struct {
@@ -319,13 +318,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
-	_, token, err := s.auth.Register(req.Username, req.Email, req.Password, req.InviteCode)
+	_, token, err := s.auth.Register(req.Username, req.Email, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRegistrationClosed):
 			jsonError(w, http.StatusForbidden, "Registration is closed")
-		case errors.Is(err, auth.ErrInvalidInvite):
-			jsonError(w, http.StatusForbidden, "Invalid invite code")
 		case errors.Is(err, auth.ErrInvalidUsername),
 			errors.Is(err, auth.ErrInvalidEmail),
 			errors.Is(err, auth.ErrInvalidPassword):

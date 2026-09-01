@@ -36,8 +36,6 @@ func main() {
 		err = serveCmd(os.Args[2:], log)
 	case "user":
 		err = userCmd(os.Args[2:])
-	case "invite":
-		err = inviteCmd(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -58,8 +56,6 @@ Usage:
   voidbar serve  [--config <path>]
   voidbar user   add  --username <name> --email <addr> [--password <pass>] [--admin] [--config <path>]
   voidbar user   list [--config <path>]
-  voidbar invite create [--uses N] [--by <user-id>] [--config <path>]
-  voidbar invite list  [--config <path>]
 
 Backend only: point a Discord client (e.g. the repackaged Android build)
 at the instance's REST/Gateway endpoints.
@@ -251,84 +247,3 @@ func userListCmd(args []string) error {
 	return nil
 }
 
-func inviteCmd(args []string) error {
-	if len(args) < 1 {
-		return errors.New("invite requires a subcommand: create | list")
-	}
-	switch args[0] {
-	case "create":
-		return inviteCreateCmd(args[1:])
-	case "list":
-		return inviteListCmd(args[1:])
-	default:
-		return fmt.Errorf("unknown invite subcommand %q", args[0])
-	}
-}
-
-func inviteCreateCmd(args []string) error {
-	fs := flag.NewFlagSet("invite create", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config file")
-	uses := fs.Int("uses", 0, "max uses (0 = unlimited)")
-	by := fs.String("by", "", "creating user id")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		return err
-	}
-	store, err := storage.Open(cfg.Storage.Path)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	code, err := util.RandomToken(5)
-	if err != nil {
-		return err
-	}
-	inv := &storage.RegInvite{
-		Code:      code,
-		CreatedBy: *by,
-		MaxUses:   *uses,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := store.CreateRegInvite(inv); err != nil {
-		return err
-	}
-	fmt.Printf("created invite %s (uses=%d)\n", inv.Code, inv.MaxUses)
-	return nil
-}
-
-func inviteListCmd(args []string) error {
-	fs := flag.NewFlagSet("invite list", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config file")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		return err
-	}
-	store, err := storage.Open(cfg.Storage.Path)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	invites, err := store.ListRegInvites()
-	if err != nil {
-		return err
-	}
-	if len(invites) == 0 {
-		fmt.Println("no invites")
-		return nil
-	}
-	fmt.Printf("%-12s %-8s %-8s %s\n", "CODE", "USES", "MAX", "CREATED")
-	for _, inv := range invites {
-		max := "inf"
-		if inv.MaxUses > 0 {
-			max = fmt.Sprintf("%d", inv.MaxUses)
-		}
-		fmt.Printf("%-12s %-8d %-8s %s\n", inv.Code, inv.Uses, max, inv.CreatedAt.Format(time.RFC3339))
-	}
-	return nil
-}

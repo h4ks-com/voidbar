@@ -11,10 +11,9 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("not found")
-	ErrUsernameTaken   = errors.New("username already taken")
-	ErrEmailTaken      = errors.New("email already taken")
-	ErrInviteExhausted = errors.New("invite code exhausted")
+	ErrNotFound      = errors.New("not found")
+	ErrUsernameTaken = errors.New("username already taken")
+	ErrEmailTaken    = errors.New("email already taken")
 )
 
 type User struct {

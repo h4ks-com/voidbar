@@ -70,9 +70,9 @@ func applyEnv(cfg *Config) {
 
 func (c *Config) Validate() error {
 	switch c.Auth.Registration {
-	case "open", "closed", "invite":
+	case "open", "closed":
 	default:
-		return fmt.Errorf("auth.registration must be one of open, closed, invite; got %q", c.Auth.Registration)
+		return fmt.Errorf("auth.registration must be one of open, closed; got %q", c.Auth.Registration)
 	}
 	if c.Server.Listen == "" {
 		return errors.New("server.listen must not be empty")

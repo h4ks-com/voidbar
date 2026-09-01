@@ -38,7 +38,7 @@ public_url = "https://voidbar.example.com"
 path = "/srv/voidbar"
 
 [auth]
-registration = "invite"
+registration = "open"
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -50,7 +50,7 @@ registration = "invite"
 	if cfg.Storage.Path != "/srv/voidbar" {
 		t.Fatalf("storage path = %q", cfg.Storage.Path)
 	}
-	if cfg.Auth.Registration != "invite" {
+	if cfg.Auth.Registration != "open" {
 		t.Fatalf("registration = %q", cfg.Auth.Registration)
 	}
 	if got, want := cfg.MasterKeyPath(), filepath.Join("/srv/voidbar", "master.key"); got != want {
@@ -93,11 +93,11 @@ public_url = "http://x"
 }
 
 func TestInvalidRegistration(t *testing.T) {
-	path := writeConfig(t, `[auth]
-registration = "sometimes"
-`)
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected validation error")
+	for _, mode := range []string{"sometimes", "invite"} {
+		path := writeConfig(t, "[auth]\nregistration = \""+mode+"\"\n")
+		if _, err := Load(path); err == nil {
+			t.Fatalf("expected validation error for %q", mode)
+		}
 	}
 }
 

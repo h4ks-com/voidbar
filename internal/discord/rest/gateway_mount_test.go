@@ -27,7 +27,7 @@ func TestGatewayThroughRESTRouter(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	_, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	_, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}

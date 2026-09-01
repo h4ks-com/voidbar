@@ -237,16 +237,3 @@ func TestRegisterClosedMode(t *testing.T) {
 		t.Fatalf("expected 403, got %d %v", rec.Code, out)
 	}
 }
-
-func TestRegisterInviteMode(t *testing.T) {
-	h := newServer(t, "invite")
-	rec, out := do(t, h, "POST", "/api/v9/auth/register", "", map[string]string{
-		"username":    "doesnm",
-		"email":       "a@x.io",
-		"password":    "hunter2hunter2",
-		"invite_code": "nope",
-	})
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d %v", rec.Code, out)
-	}
-}

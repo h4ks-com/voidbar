@@ -12,9 +12,9 @@ public_url = "http://127.0.0.1:8080"
 path = "./data"
 
 [auth]
-# open | closed | invite
-# closed: users are created via CLI (first user becomes admin automatically)
-# invite: registration requires an invite code (see: voidbar invite create)
+# open | closed
+# closed: users are created via the CLI (voidbar user add); the first
+# user becomes admin automatically
 registration = "closed"
 # Optional explicit path for the master encryption key.
 # Default: <storage.path>/master.key (auto-generated on first run).

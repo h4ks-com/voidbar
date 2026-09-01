@@ -44,7 +44,8 @@ Covered:
 
 - REST v9 + Gateway (HELLO/IDENTIFY/READY/HEARTBEAT/RESUME, zlib-stream,
   session replay) enough for the client to boot and render
-- Register/login (argon2id, raw bearer tokens), `user`/`invite` CLI
+- Register/login (argon2id, raw bearer tokens), `user add/list` CLI (admin
+  is CLI-only; no web panel)
 - Connection strings as invites: paste `irc://host:port/#chan?name=X` into
   the client's "Join a server" field → preview card, join, GUILD_CREATE,
   the guild appears in the rail, the client navigates into the pasted channel
@@ -359,8 +360,6 @@ echo-message, peer facts, invite relays, standard replies are done):
 - **Permission list prune**: drop permission bits the platform can't
   honor (emoji/sticker management etc.) from the client's role editor —
   the permission names live in the userdoccers permissions reference.
-- **Admin**: `voidbar user add/list`, `voidbar invite create/list` exist;
-  no admin UI, no per-user network management beyond the client.
 
 Out of scope: voice/video, threads/forums (local threads rejected —
 channels + categories cover us), custom emoji (nothing to sync them

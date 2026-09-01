@@ -3,7 +3,6 @@ package auth
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
@@ -21,7 +20,7 @@ func newService(t *testing.T, registration string) *Service {
 
 func TestRegisterOpen(t *testing.T) {
 	svc := newService(t, "open")
-	u, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	u, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,26 +34,9 @@ func TestRegisterOpen(t *testing.T) {
 
 func TestRegisterClosed(t *testing.T) {
 	svc := newService(t, "closed")
-	_, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	_, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
-	}
-}
-
-func TestRegisterInvite(t *testing.T) {
-	svc := newService(t, "invite")
-	inv := &storage.RegInvite{Code: "code1", MaxUses: 1, CreatedAt: time.Now()}
-	if err := svc.store.CreateRegInvite(inv); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "wrong"); !errors.Is(err, ErrInvalidInvite) {
-		t.Fatalf("expected ErrInvalidInvite, got %v", err)
-	}
-	if _, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "code1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := svc.Register("mattf", "mattf@x.io", "hunter2hunter2", "code1"); !errors.Is(err, ErrInvalidInvite) {
-		t.Fatalf("expected exhausted invite, got %v", err)
 	}
 }
 
@@ -71,7 +53,7 @@ func TestRegisterValidation(t *testing.T) {
 		{"bad password", "doesnm", "a@x.io", "short", ErrInvalidPassword},
 	}
 	for _, tc := range cases {
-		if _, _, err := svc.Register(tc.user, tc.email, tc.pass, ""); !errors.Is(err, tc.want) {
+		if _, _, err := svc.Register(tc.user, tc.email, tc.pass); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.name, err, tc.want)
 		}
 	}
@@ -79,20 +61,20 @@ func TestRegisterValidation(t *testing.T) {
 
 func TestRegisterDuplicate(t *testing.T) {
 	svc := newService(t, "open")
-	if _, _, err := svc.Register("doesnm", "a@x.io", "hunter2hunter2", ""); err != nil {
+	if _, _, err := svc.Register("doesnm", "a@x.io", "hunter2hunter2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Register("doesnm", "b@x.io", "hunter2hunter2", ""); !errors.Is(err, storage.ErrUsernameTaken) {
+	if _, _, err := svc.Register("doesnm", "b@x.io", "hunter2hunter2"); !errors.Is(err, storage.ErrUsernameTaken) {
 		t.Fatalf("expected ErrUsernameTaken, got %v", err)
 	}
-	if _, _, err := svc.Register("mattf", "a@x.io", "hunter2hunter2", ""); !errors.Is(err, storage.ErrEmailTaken) {
+	if _, _, err := svc.Register("mattf", "a@x.io", "hunter2hunter2"); !errors.Is(err, storage.ErrEmailTaken) {
 		t.Fatalf("expected ErrEmailTaken, got %v", err)
 	}
 }
 
 func TestLogin(t *testing.T) {
 	svc := newService(t, "open")
-	if _, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", ""); err != nil {
+	if _, _, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2"); err != nil {
 		t.Fatal(err)
 	}
 	for _, login := range []string{"doesnm", "doesnm@0ut0f.space"} {
@@ -114,7 +96,7 @@ func TestLogin(t *testing.T) {
 
 func TestLogout(t *testing.T) {
 	svc := newService(t, "open")
-	_, token, err := svc.Register("doesnm", "a@x.io", "hunter2hunter2", "")
+	_, token, err := svc.Register("doesnm", "a@x.io", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}

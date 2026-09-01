@@ -109,7 +109,7 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,11 +228,11 @@ func TestCreateDM(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	buddy, _, err := svc.Register("ircbuddy", "ircbuddy@0ut0f.space", "hunter2hunter2", "")
+	buddy, _, err := svc.Register("ircbuddy", "ircbuddy@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestTypingBothWays(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestReactBothWays(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +869,7 @@ func TestDeleteBothWays(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1196,7 +1196,7 @@ func TestChannelTopicUpdate(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1566,7 +1566,7 @@ func TestScrollBackfillIntoNetworkHistory(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1757,7 +1757,7 @@ func TestMessageSearch(t *testing.T) {
 	cfg := config.Default()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1963,7 +1963,7 @@ func TestAttachmentUploadFlow(t *testing.T) {
 	cfg.Server.PublicURL = "http://127.0.0.1:0"
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
-	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2", "")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
 	if err != nil {
 		t.Fatal(err)
 	}
