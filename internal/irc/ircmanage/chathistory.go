@@ -267,7 +267,7 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 				// for never-seen peers must resolve.
 				m.upsertMentionedPeers(c, mentionedUsers)
 			}
-			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano), c.peerBioText(f.author))
+			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano), c.peerBioText(f.author), m.peerAvatarForUser(c.userID, f.author))
 			if len(f.mentions) > 0 {
 				payload["mentions"] = f.mentions
 			}
@@ -389,7 +389,7 @@ func parseChatTime(tag string) time.Time {
 // live relay and the chathistory prefill. bio carries the peer facts:
 // the client upserts the author user into its store from every message,
 // and a bio-less author would blank the profile sheet's About-me.
-func buildMessagePayload(msgID, channelID, author, content, ts, bio string) map[string]any {
+func buildMessagePayload(msgID, channelID, author, content, ts, bio string, avatar any) map[string]any {
 	authorObj := map[string]any{
 		"id":            model.IrcAuthorID("irc:" + author),
 		"username":      author,
@@ -398,6 +398,9 @@ func buildMessagePayload(msgID, channelID, author, content, ts, bio string) map[
 	}
 	if bio != "" {
 		authorObj["bio"] = bio
+	}
+	if avatar != nil {
+		authorObj["avatar"] = avatar
 	}
 	return map[string]any{
 		"id":               msgID,

@@ -34,6 +34,8 @@ type Service struct {
 	sf      *util.Snowflake
 	manager *ircmanage.Manager
 	log     *slog.Logger
+	// publicURL is the CDN base avatar URLs are minted from (SetPublicURL).
+	publicURL string
 }
 
 func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, manager *ircmanage.Manager, log *slog.Logger) *Service {
@@ -288,7 +290,7 @@ func (s *Service) dispatchPinSystemMessage(userID, channelID, messageID string) 
 	s.gw.Dispatch(userID, "MESSAGE_CREATE", map[string]any{
 		"id":               rowID,
 		"channel_id":       channelID,
-		"author":           map[string]any{"id": userID, "username": username, "discriminator": "0", "bot": false},
+		"author":           map[string]any{"id": userID, "username": username, "discriminator": "0", "bot": false, "avatar": s.globalAvatarValue(userID)},
 		"content":          "",
 		"timestamp":        now.Format(time.RFC3339),
 		"edited_timestamp": nil,
@@ -383,15 +385,19 @@ func (s *Service) ReactorUserPayload(userID, reactorID string) map[string]any {
 		return map[string]any{
 			"id": u.ID, "username": u.Username,
 			"discriminator": "0", "bot": false,
+			"avatar": s.globalAvatarValue(u.ID),
 		}
 	}
 	username := "user"
+	avatar := any(nil)
 	if nick, _, _, ok := s.PeerInfoByAuthor(userID, reactorID); ok && nick != "" {
 		username = nick
+		avatar = s.peerAvatarValue(userID, nick)
 	}
 	return map[string]any{
 		"id": reactorID, "username": username,
 		"discriminator": "0", "bot": false,
+		"avatar": avatar,
 	}
 }
 
@@ -624,7 +630,7 @@ func (s *Service) DMChannelsFor(userID string) []*storage.DMChannel {
 // id everywhere (guild payloads, member rows), while plain IRC nicks use
 // the IrcAuthorID hash. Matching is by live nick first, stored nick
 // second (the server may have renamed them).
-func (s *Service) dmPeerFor(netID, nick string) map[string]any {
+func (s *Service) dmPeerFor(userID, netID, nick string) map[string]any {
 	others, err := s.store.ListMemberships(netID)
 	if err == nil {
 		for _, o := range others {
@@ -635,11 +641,19 @@ func (s *Service) dmPeerFor(netID, nick string) map[string]any {
 				}
 			}
 			if strings.EqualFold(n, nick) {
-				return model.DMPeerID(nick, o.UserID)
+				peer := model.DMPeerID(nick, o.UserID)
+				if h := s.MemberAvatarFor(o.UserID, netID); h != nil {
+					peer["avatar"] = h
+				}
+				return peer
 			}
 		}
 	}
-	return model.DMPeer(nick)
+	peer := model.DMPeer(nick)
+	if h := s.peerAvatarValue(userID, nick); h != nil {
+		peer["avatar"] = h
+	}
+	return peer
 }
 
 // DMChannelPayloads shapes the user's DM threads for the client (READY
@@ -650,7 +664,7 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 	for _, dm := range dms {
 		// The peer user rides the recipients array; carry the facts bio
 		// so DM sheets render it (the client upserts recipients too).
-		peer := s.dmPeerFor(dm.NetworkID, dm.Nick)
+		peer := s.dmPeerFor(userID, dm.NetworkID, dm.Nick)
 		if s.manager != nil {
 			if bio := s.manager.PeerBioText(userID, dm.NetworkID, dm.Nick); bio != "" {
 				peer["bio"] = bio
@@ -737,7 +751,7 @@ func (s *Service) dmPayloadFor(userID, netID, nick string) (map[string]any, erro
 		"flags":                       0,
 		"last_message_id":             nil,
 		"last_message_timestamp":      nil,
-		"recipients":                  []any{s.dmPeerFor(netID, dm.Nick)},
+		"recipients":                  []any{s.dmPeerFor(userID, netID, dm.Nick)},
 		"is_message_request":           false,
 		"is_message_request_timestamp": nil,
 		"is_spam":                     false,
@@ -1261,7 +1275,7 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 			if cm.Mode != mode {
 				continue
 			}
-			items = append(items, memberListItem(cm, ids[i], joinedAt, mode))
+			items = append(items, s.memberListItem(userID, guildID, cm, ids[i], joinedAt, mode))
 		}
 	}
 	if byMode[""] > 0 {
@@ -1273,7 +1287,7 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 			if cm.Mode != "" {
 				continue
 			}
-			items = append(items, memberListItem(cm, ids[i], joinedAt, ""))
+			items = append(items, s.memberListItem(userID, guildID, cm, ids[i], joinedAt, ""))
 		}
 	}
 	return map[string]any{
@@ -1378,9 +1392,18 @@ func peerBioValue(bio string) any {
 // "member" keys, and GuildMember itself carries a presence field the
 // client reads via StoreStream.handleItem). IRC away maps to Discord
 // "idle".
-func memberListItem(cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[string]any {
+func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[string]any {
 	if uid == "" {
 		uid = model.IrcAuthorID("irc:" + cm.Nick)
+	}
+	var avatar any
+	if uid != "" && s.store != nil {
+		if _, err := s.store.GetUserByID(uid); err == nil {
+			avatar = s.MemberAvatarFor(uid, guildID)
+		}
+	}
+	if avatar == nil {
+		avatar = s.peerAvatarValue(userID, cm.Nick)
 	}
 	status := presenceStatus(cm.Away)
 	return map[string]any{
@@ -1394,6 +1417,7 @@ func memberListItem(cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[
 				"username":      cm.Nick,
 				"discriminator": "0",
 				"bot":           false,
+				"avatar":        avatar,
 				// Peer facts ride the user object itself: the sheet renders
 				// the store user's bio without needing the profile endpoint
 				// (the profile merge only fires for guild-member bios).
@@ -1546,6 +1570,7 @@ func (s *Service) MemberPayload(userID, guildID, nick string) map[string]any {
 			"username":      nick,
 			"discriminator": "0",
 			"bot":           false,
+			"avatar":        s.MemberAvatarFor(userID, guildID),
 		},
 		"nick":      nick,
 		"roles":     ircRoleIDsFor(mode),
@@ -1625,12 +1650,19 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 		if len(want) > 0 && !want[uid] {
 			continue
 		}
+		var avatar any
+		if r.uid != "" {
+			avatar = s.MemberAvatarFor(r.uid, guildID)
+		} else {
+			avatar = s.peerAvatarValue(userID, r.cm.Nick)
+		}
 		user := map[string]any{
 			"id":            uid,
 			"username":      r.cm.Nick,
 			"discriminator": "0",
 			"bot":           false,
 			"bio":           peerBioValue(r.cm.BioText()),
+			"avatar":        avatar,
 		}
 		members = append(members, map[string]any{
 			"user":      user,
@@ -1761,6 +1793,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"username":      nick,
 				"discriminator": "0",
 				"bot":           false,
+				"avatar":        s.MemberAvatarFor(mem.UserID, net.ID),
 			},
 			// The IRC nick rides as the guild nickname too: the client's
 			// Change-Nickname dialog prefills from member.nick, and it is
@@ -1803,6 +1836,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"discriminator": "0",
 				"bot":           false,
 				"bio":           peerBioValue(cm.BioText()),
+				"avatar":        s.peerAvatarValue(m.UserID, cm.Nick),
 			},
 			"bio":       peerBioValue(cm.BioText()),
 			"roles":     ircRoleIDsFor(cm.Mode),

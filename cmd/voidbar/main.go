@@ -100,9 +100,13 @@ func serveCmd(args []string, log *slog.Logger) error {
 	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)
 	manager.SetMemberNotifier(netSvc.RefreshMember)
 	manager.SetLinkNotifier(netSvc.OnLinkChange)
+	manager.SetPeerAvatarNotifier(netSvc.RefreshPeerAvatar)
 	// Arm the embed media proxy: unfurled images are mirrored locally
 	// and served from the public origin (see SetPublicURL).
 	manager.SetPublicURL(cfg.Server.PublicURL)
+	// The network service mints avatar URLs published upstream from the
+	// same origin.
+	netSvc.SetPublicURL(cfg.Server.PublicURL)
 	restHandler := rest.New(authSvc, cfg, log, gw, netSvc, manager)
 
 	root := http.NewServeMux()

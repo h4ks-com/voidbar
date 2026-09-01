@@ -356,18 +356,29 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   channels recorded on the network; create/rename/delete from the
   client, move channels in and out, sidebar groups by parent. Nothing
   upstream ever hears about them.
+- **Avatars** (IRC counterpart: `draft/metadata-2`, the avatar key —
+  eris serves it): global avatar upload through `PATCH /users/@me`,
+  per-guild override through `PATCH /guilds/:id/members/@me`. Stored
+  images are served from `/avatars/{uid}/{hash}.png` off the discovered
+  CDN base (the same origin the client already uses for attachments).
+  Global-vs-guild follows Discord semantics — per-guild wins in its
+  guild — with one IRC twist: setting the global avatar fans
+  `METADATA * SET avatar` out to every upstream speaking
+  draft/metadata-2 where the bouncer holds a services account (eris:
+  `REGISTER * * <pass>` then SASL, verified live). Inbound, the bouncer
+  subscribes (`METADATA * SUB avatar`) on connect, mirrors peers' avatar
+  URLs into the local store (hash of the bytes, so a changed picture is
+  a new hash), and refreshes member rows via GUILD_MEMBER_UPDATE.
 
 ## Roadmap
 
 ### Client features
 
-- **Avatars** (IRC counterpart: the `draft/metadata` METADATA extension's
-  avatar key — ergo serves it): user avatar upload through the existing
-  attachment pipeline, bridged over METADATA where the upstream speaks
-  it, served in the READY/user payloads.
 - **Network icon** (IRC counterpart: the `draft/ICON` ISUPPORT token):
   guild icon upload → CDN, shown in the guild list; read from ISUPPORT
-  where the upstream advertises one.
+  where the upstream advertises one (eris does not). Note the spec is
+  read-only server-side — there is no client command to set an icon
+  upstream, so the upload half would be voidbar-local by definition.
 
 ### IRCv3 extensions to adopt
 

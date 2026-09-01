@@ -46,6 +46,10 @@ type Manager struct {
 	// GUILD_MEMBER_UPDATE (the nickname UI then reflects IRC reality).
 	memberChange func(userID, networkID, nick string)
 
+	// peerAvatar (optional) is notified when a remote peer's avatar
+	// arrives or changes via draft/metadata-2.
+	peerAvatar func(userID, networkID, nick string)
+
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
 
@@ -192,6 +196,12 @@ type conn struct {
 	multilineCapUp  atomic.Bool
 	multilineBytes  atomic.Int64
 	multilineLines  atomic.Int64
+
+	// metadataCapUp is the sticky "upstream ACKed draft/metadata-2"
+	// flag; peer avatar fetch bookkeeping rides along.
+	metadataCapUp atomic.Bool
+	peerFetchMu   sync.Mutex
+	peerFetching  map[string]bool
 }
 
 func (c *conn) histCap() bool      { return c.histCapUp.Load() }
@@ -562,6 +572,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			// standard-replies: FAIL/WARN/NOTE machine-readable errors;
 			// the handler lands them in the buffer they belong to.
 			"standard-replies": nil,
+			// draft/metadata-2: peer avatars. The avatar key carries a
+			// URL; we subscribe on connect, mirror inbound values into
+			// the local CDN cache, and SET our own on avatar uploads.
+			"draft/metadata-2": nil,
 		},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
@@ -878,6 +892,9 @@ func (m *Manager) registerHandlers(c *conn) {
 				if isMultilineCap(cap) {
 					c.multilineCapUp.Store(true)
 				}
+				if isMetadataCap(cap) {
+					c.metadataCapUp.Store(true)
+				}
 			}
 		}
 		if e.Command == "BATCH" {
@@ -885,6 +902,13 @@ func (m *Manager) registerHandlers(c *conn) {
 				return
 			}
 			m.chatBatchControl(c, e)
+			return
+		}
+		if e.Command == "METADATA" && e.Source != nil {
+			// draft/metadata-2 notification (avatar changes of peers we
+			// share a channel with); inside metadata batches too, the
+			// @batch tag does not reroute these.
+			m.handleMetadataEvent(c, client, &e)
 			return
 		}
 		if e.Command == "TOPIC" && len(e.Params) > 0 {
@@ -1014,6 +1038,9 @@ func (m *Manager) registerHandlers(c *conn) {
 			}
 		}
 		m.log.Info("irc connected", "user", c.userID, "network", c.networkID, "autojoin", channels)
+		// Avatar change notifications (draft/metadata-2): current values
+		// arrive with the join bursts once subscribed.
+		m.metadataSubscribe(c, client)
 		// Peers already sitting in our channels produce no JOIN events;
 		// announce them once the roster settles (see sweepPeerMembers).
 		m.sweepPeerMembers(c, sweep)
@@ -1419,7 +1446,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
-	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author))
+	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author))
 	if len(mentioned) > 0 {
 		// Upserts first (same-session order is preserved): a pill for a
 		// peer the client never saw must not render @invalid-user.
@@ -1528,6 +1555,9 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 			if bio := c.peerBioText(author); bio != "" {
 				authorObj["bio"] = bio
 			}
+			if avatar := m.peerAvatarForUser(c.userID, author); avatar != nil {
+				authorObj["avatar"] = avatar
+			}
 			return authorObj
 		}(),
 	}
@@ -1579,6 +1609,9 @@ func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[
 			peer["bio"] = bio
 		}
 	}
+	if avatar := m.peerAvatarForUser(userID, dm.Nick); avatar != nil {
+		peer["avatar"] = avatar
+	}
 	return map[string]any{
 		"id":                 dm.ID,
 		"type":               1,
@@ -1596,6 +1629,9 @@ func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]an
 	peer := model.DMPeer(dm.Nick)
 	if bio := m.PeerBioText(c.userID, dm.NetworkID, dm.Nick); bio != "" {
 		peer["bio"] = bio
+	}
+	if avatar := m.peerAvatarForUser(c.userID, dm.Nick); avatar != nil {
+		peer["avatar"] = avatar
 	}
 	return map[string]any{
 		"id":                 dm.ID,

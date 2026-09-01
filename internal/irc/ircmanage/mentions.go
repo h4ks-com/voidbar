@@ -458,6 +458,9 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 	if bio != "" {
 		user["bio"] = bio
 	}
+	if avatar := m.peerAvatarForUser(c.userID, nick); avatar != nil {
+		user["avatar"] = avatar
+	}
 	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
 		"guild_id":  c.networkID,
 		"user":      user,

@@ -52,6 +52,9 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("POST /api/v9/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v9/auth/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("GET /api/v9/users/@me", s.requireAuth(s.handleMe))
+	mux.HandleFunc("PATCH /api/v9/users/@me", s.requireAuth(s.handleUpdateMe))
+	mux.HandleFunc("GET /avatars/{user}/{hash}", s.handleAvatarFile)
+	mux.HandleFunc("HEAD /avatars/{user}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	// User notes ("Add Note" in the profile sheet).
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleUserNotes))

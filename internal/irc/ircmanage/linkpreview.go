@@ -322,9 +322,13 @@ func (m *Manager) sendLinkPreview(userID, channelID, msgID, content string) {
 		// MESSAGE_UPDATE re-emits the author user object: keep the facts
 		// bio on it or the update blanks the sheet's About-me.
 		if strings.HasPrefix(row.AuthorID, "irc:") {
-			if bio := m.peerBioForUser(userID, strings.TrimPrefix(row.AuthorID, "irc:")); bio != "" {
-				if au, ok := payload["author"].(map[string]any); ok {
+			nick := strings.TrimPrefix(row.AuthorID, "irc:")
+			if au, ok := payload["author"].(map[string]any); ok {
+				if bio := m.peerBioForUser(userID, nick); bio != "" {
 					au["bio"] = bio
+				}
+				if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
+					au["avatar"] = avatar
 				}
 			}
 		}

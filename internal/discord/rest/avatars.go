@@ -2,11 +2,19 @@ package rest
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"image"
 	"image/png"
 	"math"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/h4ks-com/voidbar/internal/core/network"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
+	"github.com/h4ks-com/voidbar/internal/storage"
 )
 
 // defaultAvatarColors maps the five historical default-avatar CDN hashes
@@ -58,4 +66,68 @@ func defaultAvatarPNG(name string) ([]byte, bool) {
 	b := buf.Bytes()
 	defaultAvatarCache.Store(hash, b)
 	return b, true
+}
+
+// handleUpdateMe serves PATCH /users/@me: the account-wide avatar upload
+// (settings sheet sends a base64 data URI). The stored hash replaces the
+// data URI in the response, so the client's next render goes through the
+// CDN route instead of hauling the data URI around.
+func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	var req map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	if raw, ok := req["avatar"]; ok {
+		// null removes the avatar; a data URI replaces it; the field's
+		// mere absence leaves it alone.
+		dataURI := ""
+		var av *string
+		if err := json.Unmarshal(raw, &av); err == nil && av != nil {
+			dataURI = strings.TrimSpace(*av)
+		}
+		updated, err := s.net.SetGlobalAvatar(u.ID, dataURI)
+		if err != nil {
+			switch {
+			case errors.Is(err, network.ErrBadAvatarDataURI),
+				errors.Is(err, storage.ErrAvatarTooLarge),
+				errors.Is(err, storage.ErrAvatarType):
+				jsonError(w, http.StatusBadRequest, "invalid avatar")
+			default:
+				jsonError(w, http.StatusInternalServerError, "avatar store failed")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, model.ToUser(updated))
+		return
+	}
+	writeJSON(w, http.StatusOK, model.ToUser(u))
+}
+
+// handleAvatarFile serves GET/HEAD /avatars/{uid}/{hash}.png: the stored
+// avatar bytes (uploads and mirrored peer avatars share the store; the
+// uid segment is decorative - hashes are unique).
+func (s *Server) handleAvatarFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("hash")
+	hash := strings.TrimSuffix(name, ".png")
+	if hash == "" {
+		http.NotFound(w, r)
+		return
+	}
+	att, data, err := s.net.GetAvatar(hash)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ct := att.ContentType
+	if ct == "" {
+		ct = "image/png"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(data)
+	}
 }

@@ -377,6 +377,7 @@ type Membership struct {
 	Nick      string    `json:"nick"`
 	Username  string    `json:"username"`
 	Realname  string    `json:"realname"`
+	Avatar    string    `json:"avatar,omitempty"`
 	AutoJoin  []string  `json:"auto_join,omitempty"`
 	JoinedAt  time.Time `json:"joined_at"`
 }

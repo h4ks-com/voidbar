@@ -22,6 +22,7 @@ type User struct {
 	Email     string    `json:"email"`
 	PassHash  string    `json:"pass_hash"`
 	IsAdmin   bool      `json:"is_admin"`
+	Avatar    string    `json:"avatar,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

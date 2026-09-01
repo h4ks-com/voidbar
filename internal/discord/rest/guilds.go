@@ -74,7 +74,7 @@ func (s *Server) invitePayload(code string, net *storage.Network, mem *storage.M
 		"guild":                      map[string]any{"id": net.ID, "name": net.Name, "splash": nil, "banner": nil, "description": nil, "icon": nil, "features": []any{}, "verification_level": 0, "vanity_url_code": nil, "nsfw_level": 0, "premium_subscription_count": 0},
 		"guild_id":                   net.ID,
 		"channel":                    channel,
-		"inviter":                    map[string]any{"id": u.ID, "username": u.Username, "avatar": nil, "discriminator": "0", "public_flags": 0, "bot": false},
+		"inviter":                    map[string]any{"id": u.ID, "username": u.Username, "avatar": model.AvatarPtr(u.Avatar), "discriminator": "0", "public_flags": 0, "bot": false},
 		"target_type":                nil,
 		"target_user":                nil,
 		"target_application":         nil,
@@ -389,11 +389,34 @@ func (s *Server) handleUpdateMemberMe(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 	var req struct {
-		Nick *string `json:"nick"`
+		Nick   *string         `json:"nick"`
+		Avatar json.RawMessage `json:"avatar"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid body")
 		return
+	}
+	// Per-guild avatar (the client's server-profile upload): stored as a
+	// network-scoped override, bridged to that upstream's own metadata
+	// avatar. Null/empty resets to the account-wide avatar.
+	if len(req.Avatar) > 0 {
+		dataURI := ""
+		var av *string
+		if err := json.Unmarshal(req.Avatar, &av); err == nil && av != nil {
+			dataURI = strings.TrimSpace(*av)
+		}
+		if err := s.net.SetNetworkAvatar(u.ID, mem.NetworkID, dataURI); err != nil {
+			if errors.Is(err, network.ErrBadAvatarDataURI) {
+				jsonError(w, http.StatusBadRequest, "invalid avatar")
+				return
+			}
+			if errors.Is(err, storage.ErrAvatarTooLarge) || errors.Is(err, storage.ErrAvatarType) {
+				jsonError(w, http.StatusBadRequest, "invalid avatar")
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, "avatar store failed")
+			return
+		}
 	}
 	live := mem.Nick
 	if s.irc != nil {
@@ -520,7 +543,7 @@ func (s *Server) handleCreateDM(w http.ResponseWriter, r *http.Request, u *stora
 // authorBio (nil for own sends / unknown peers) keeps the peer facts on
 // the author: every ingested user object replaces the client's store
 // user, and a bio-less author blanks the sheet's About-me.
-func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any, authorBio any) map[string]any {
+func messagePayload(id, channelID, content, ts, authorID, authorName string, nonce any, authorBio, authorAvatar any) map[string]any {
 	author := map[string]any{
 		"id":            authorID,
 		"username":      authorName,
@@ -529,6 +552,9 @@ func messagePayload(id, channelID, content, ts, authorID, authorName string, non
 	}
 	if authorBio != nil {
 		author["bio"] = authorBio
+	}
+	if authorAvatar != nil {
+		author["avatar"] = authorAvatar
 	}
 	return map[string]any{
 		"id":               id,
@@ -605,7 +631,7 @@ func (s *Server) historyMessagePayload(u *storage.User, m storage.BufferedMessag
 	if bio := s.net.AuthorBio(u.ID, m.ChannelID, m.AuthorID); bio != "" {
 		authorBio = bio
 	}
-	payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio)
+	payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio, s.net.AuthorAvatar(u.ID, m.ChannelID, m.AuthorID))
 	// System rows (e.g. the pin notice) replay with their type so the
 	// client renders them as system messages, not empty user messages.
 	if m.Type != 0 {
@@ -755,7 +781,7 @@ func (s *Server) searchChannel(userID, channelID string, terms []string) []map[s
 		if bio := s.net.AuthorBio(userID, channelID, m.AuthorID); bio != "" {
 			authorBio = bio
 		}
-		hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio))
+		hits = append(hits, messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio, s.net.AuthorAvatar(userID, channelID, m.AuthorID)))
 	}
 	return hits
 }
@@ -1395,7 +1421,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
 		if len(attachRows) > 0 {
 			msg["attachments"] = attachRows
 		}
@@ -1452,7 +1478,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil)
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
 	if len(attachRows) > 0 {
 		msg["attachments"] = attachRows
 	}
