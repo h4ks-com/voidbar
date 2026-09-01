@@ -19,9 +19,6 @@ type User struct {
 	// accounts created after 2021-02-05 hit the un-dismissable
 	// REGISTER_AGE_GATE modal on every boot.
 	NsfwAllowed bool `json:"nsfw_allowed"`
-	// Nitro unlocks client-side cosmetic UI the bouncer honours anyway
-	// (per-guild avatar upload flows gate on premium).
-	PremiumType int `json:"premium_type,omitempty"`
 }
 
 // AvatarPtr lifts a stored avatar hash into the payload's *string (nil
@@ -42,6 +39,5 @@ func ToUser(u *storage.User) *User {
 		Email:         u.Email,
 		Verified:      true,
 		NsfwAllowed:   true,
-		PremiumType:   2,
 	}
 }
