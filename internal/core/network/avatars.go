@@ -110,16 +110,6 @@ func (s *Service) MemberAvatarFor(userID, guildID string) any {
 	return s.globalAvatarValue(userID)
 }
 
-// userUpdatePayload is the USER_UPDATE wire shape (a plain user object).
-func (s *Service) userUpdatePayload(u *storage.User) map[string]any {
-	payload := map[string]any{
-		"id": u.ID, "username": u.Username,
-		"discriminator": "0", "bot": false,
-		"avatar": s.globalAvatarValue(u.ID),
-	}
-	return payload
-}
-
 // SetGlobalAvatar stores the account-wide avatar (dataURI "" clears it),
 // propagates USER_UPDATE to live sessions, and fans the new URL out to
 // every upstream speaking draft/metadata-2 - that is the "global" part:
@@ -144,12 +134,32 @@ func (s *Service) SetGlobalAvatar(userID, dataURI string) (*storage.User, error)
 		return nil, err
 	}
 	if s.gw != nil {
-		s.gw.Dispatch(userID, "USER_UPDATE", s.userUpdatePayload(u))
+		// Full MeUser shape (same as READY.user): the client's own-user
+		// store re-renders the drawer/profile from this dispatch.
+		s.gw.Dispatch(userID, "USER_UPDATE", model.ToUser(u))
+		// Own member rows carry the avatar inside guild payloads too.
+		if memberships, err := s.store.ListMembershipsForUser(userID); err == nil {
+			for _, m := range memberships {
+				if payload := s.MemberPayload(userID, m.NetworkID, s.liveNickFor(userID, m.NetworkID, m.Nick)); payload != nil {
+					s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
+				}
+			}
+		}
 	}
 	if s.manager != nil {
 		s.manager.SetAvatarAll(userID, s.avatarURL(userID, hash))
 	}
 	return u, nil
+}
+
+// liveNickFor prefers the nick actually held on the wire right now.
+func (s *Service) liveNickFor(userID, networkID, fallback string) string {
+	if s.manager != nil {
+		if live := s.manager.LiveNick(userID, networkID); live != "" {
+			return live
+		}
+	}
+	return fallback
 }
 
 // SetNetworkAvatar sets (dataURI "") the per-guild avatar override and
@@ -173,11 +183,8 @@ func (s *Service) SetNetworkAvatar(userID, guildID, dataURI string) error {
 	if err := s.store.SetMembershipAvatar(mem.NetworkID, userID, hash); err != nil {
 		return err
 	}
-	live := mem.Nick
+	live := s.liveNickFor(userID, mem.NetworkID, mem.Nick)
 	if s.manager != nil {
-		if ln := s.manager.LiveNick(userID, mem.NetworkID); ln != "" {
-			live = ln
-		}
 		s.manager.SetAvatar(userID, mem.NetworkID, s.avatarURL(userID, hash))
 	}
 	if s.gw != nil {
