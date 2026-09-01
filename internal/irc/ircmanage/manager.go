@@ -347,6 +347,17 @@ func (c *conn) forgetPeer(nick string) {
 	delete(c.peers, nick)
 }
 
+// peerBioText renders the peer-facts bio for a nick on this connection
+// ("" when nothing is known).
+func (c *conn) peerBioText(nick string) string {
+	f := c.peerFactFor(nick)
+	host := ""
+	if f.User != "" && f.Host != "" {
+		host = f.User + "@" + f.Host
+	}
+	return (ChannelMember{Nick: nick, Account: f.Account, Host: host}).BioText()
+}
+
 func (c *conn) markPending(ch string) {
 	c.pendMu.Lock()
 	c.pendingJoins[strings.ToLower(ch)] = true
@@ -1201,7 +1212,7 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 		return
 	}
 	if time.Since(dm.CreatedAt) < 3*time.Second {
-		m.gw.Dispatch(userID, "CHANNEL_CREATE", m.dmChannelPayload(dm))
+		m.gw.Dispatch(userID, "CHANNEL_CREATE", m.dmChannelPayloadFor(userID, dm))
 	}
 	ts := model.NowTimestamp()
 	msgID := m.sf.New()
@@ -1258,7 +1269,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
-	payload := buildMessagePayload(msgID, channelID, author, content, ts)
+	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author))
 	if len(mentioned) > 0 {
 		// Upserts first (same-session order is preserved): a pill for a
 		// peer the client never saw must not render @invalid-user.
@@ -1331,7 +1342,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	// First contact: the client learns about the DM thread through
 	// CHANNEL_CREATE (it renders in the Direct Messages list).
 	if time.Since(dm.CreatedAt) < 3*time.Second {
-		m.gw.Dispatch(c.userID, "CHANNEL_CREATE", m.dmChannelPayload(dm))
+		m.gw.Dispatch(c.userID, "CHANNEL_CREATE", m.dmChannelPayload(c, dm))
 	}
 	msgID := m.sf.New()
 	peerID := model.IrcAuthorID("irc:" + author)
@@ -1353,12 +1364,18 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 		"pinned":           false,
 		"type":             0,
 		"flags":            0,
-		"author": map[string]any{
-			"id":            peerID,
-			"username":      author,
-			"discriminator": "0",
-			"bot":           false,
-		},
+		"author": func() map[string]any {
+			authorObj := map[string]any{
+				"id":            peerID,
+				"username":      author,
+				"discriminator": "0",
+				"bot":           false,
+			}
+			if bio := c.peerBioText(author); bio != "" {
+				authorObj["bio"] = bio
+			}
+			return authorObj
+		}(),
 	}
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
 	if msgid != "" {
@@ -1399,17 +1416,41 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 	}
 }
 
+// dmChannelPayloadFor shapes a DMChannel for the client without a live
+// connection at hand (Clyde threads): the peer stays fact-free.
+func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[string]any {
+	peer := model.DMPeer(dm.Nick)
+	if dm.NetworkID != "" {
+		if bio := m.PeerBioText(userID, dm.NetworkID, dm.Nick); bio != "" {
+			peer["bio"] = bio
+		}
+	}
+	return map[string]any{
+		"id":                 dm.ID,
+		"type":               1,
+		"flags":              0,
+		"last_message_id":    nil,
+		"recipients":         []any{peer},
+		"is_message_request": false,
+		"is_spam":            false,
+	}
+}
+
 // dmChannelPayload shapes a DMChannel for the client (DM channel object:
 // type 1, recipients = [peer]).
-func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
+func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]any {
+	peer := model.DMPeer(dm.Nick)
+	if bio := m.PeerBioText(c.userID, dm.NetworkID, dm.Nick); bio != "" {
+		peer["bio"] = bio
+	}
 	return map[string]any{
-		"id":                   dm.ID,
-		"type":                 1,
-		"flags":                0,
-		"last_message_id":      nil,
-		"recipients":           []any{model.DMPeer(dm.Nick)},
-		"is_message_request":   false,
-		"is_spam":              false,
+		"id":                 dm.ID,
+		"type":               1,
+		"flags":              0,
+		"last_message_id":    nil,
+		"recipients":         []any{peer},
+		"is_message_request": false,
+		"is_spam":            false,
 	}
 }
 
@@ -1516,6 +1557,39 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 		return strings.ToLower(members[i].Nick) < strings.ToLower(members[j].Nick)
 	})
 	return members
+}
+
+// PeerBioText returns the peer-facts bio for a nick on the user's live
+// connection ("" when unknown or the link is down).
+func (m *Manager) PeerBioText(userID, networkID, nick string) string {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return c.peerBioText(nick)
+}
+
+// peerBioForUser resolves a nick's facts bio across the user's live
+// connections (first hit wins) - for paths that only know the author,
+// not the network.
+func (m *Manager) peerBioForUser(userID, nick string) string {
+	m.mu.Lock()
+	prefix := userID + "\x00"
+	var conns []*conn
+	for k, c := range m.conns {
+		if strings.HasPrefix(k, prefix) {
+			conns = append(conns, c)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range conns {
+		if bio := c.peerBioText(nick); bio != "" {
+			return bio
+		}
+	}
+	return ""
 }
 
 // PeerInfoByAuthor resolves a hashed IRC author id (IrcAuthorID of

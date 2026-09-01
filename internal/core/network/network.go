@@ -396,13 +396,21 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 	dms := s.DMChannelsFor(userID)
 	out := make([]any, 0, len(dms))
 	for _, dm := range dms {
+		// The peer user rides the recipients array; carry the facts bio
+		// so DM sheets render it (the client upserts recipients too).
+		peer := s.dmPeerFor(dm.NetworkID, dm.Nick)
+		if s.manager != nil {
+			if bio := s.manager.PeerBioText(userID, dm.NetworkID, dm.Nick); bio != "" {
+				peer["bio"] = bio
+			}
+		}
 		out = append(out, map[string]any{
 			"id":                          dm.ID,
 			"type":                        1,
 			"flags":                       0,
 			"last_message_id":             nil,
 			"last_message_timestamp":      nil,
-			"recipients":                  []any{s.dmPeerFor(dm.NetworkID, dm.Nick)},
+			"recipients":                  []any{peer},
 			"is_message_request":           false,
 			"is_message_request_timestamp": nil,
 			"is_spam":                      false,

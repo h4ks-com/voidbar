@@ -33,6 +33,7 @@ func ircNickRune(r rune) bool {
 type mentionUser struct {
 	nick   string // live IRC nick
 	id     string // Discord user id
+	bio    string // peer-facts bio; rides the mentions[] user objects too
 	bounce bool   // bouncer member (client already knows their user)
 	mode   string // highest channel mode (for role colors), "" = plain
 }
@@ -58,6 +59,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 			byLower[strings.ToLower(cm.Nick)] = mentionUser{
 				nick: cm.Nick,
 				id:   model.IrcAuthorID("irc:" + cm.Nick),
+				bio:  cm.BioText(),
 				mode: cm.Mode,
 			}
 		}
@@ -66,6 +68,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 		byLower[strings.ToLower(ircTarget)] = mentionUser{
 			nick: ircTarget,
 			id:   model.IrcAuthorID("irc:" + ircTarget),
+			bio:  m.PeerBioText(userID, networkID, ircTarget),
 		}
 	}
 	if members, err := m.store.ListMemberships(networkID); err == nil {
@@ -263,12 +266,16 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 
 // mentionUserPayload builds one mentions[] entry.
 func mentionUserPayload(u mentionUser) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id":            u.id,
 		"username":      u.nick,
 		"discriminator": "0",
 		"bot":           false,
 	}
+	if u.bio != "" {
+		out["bio"] = u.bio
+	}
+	return out
 }
 
 // mentionChannelPayload builds one mention_channels[] entry.
@@ -407,32 +414,22 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 	if mode != "" {
 		roles = []any{model.IrcRoleID(mode)}
 	}
-	var bio any
-	if text := (ChannelMember{Nick: nick, Account: c.peerFactFor(nick).Account, Host: peerHostString(c, nick)}).BioText(); text != "" {
-		bio = text
+	user := map[string]any{
+		"id":            model.IrcAuthorID("irc:" + nick),
+		"username":      nick,
+		"discriminator": "0",
+		"bot":           false,
+	}
+	if bio := c.peerBioText(nick); bio != "" {
+		user["bio"] = bio
 	}
 	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
-		"guild_id": c.networkID,
-		"user": map[string]any{
-			"id":            model.IrcAuthorID("irc:" + nick),
-			"username":      nick,
-			"discriminator": "0",
-			"bot":           false,
-			"bio":           bio,
-		},
+		"guild_id":  c.networkID,
+		"user":      user,
 		"nick":      nil,
 		"roles":     roles,
 		"joined_at": joinedAt,
 	})
-}
-
-// peerHostString renders a nick's known user@host ("" when unknown).
-func peerHostString(c *conn, nick string) string {
-	f := c.peerFactFor(nick)
-	if f.User == "" || f.Host == "" {
-		return ""
-	}
-	return f.User + "@" + f.Host
 }
 
 // matchNickAt returns the candidate nick matching at position i (must
