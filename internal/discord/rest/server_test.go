@@ -237,3 +237,45 @@ func TestRegisterClosedMode(t *testing.T) {
 		t.Fatalf("expected 403, got %d %v", rec.Code, out)
 	}
 }
+
+func TestUserNotes(t *testing.T) {
+	h := newServer(t, "open")
+	token := registerAndLogin(t, h)
+	target := "5998428274284326925"
+
+	rec, _ := do(t, h, "PUT", "/api/v9/users/@me/notes/"+target, token, map[string]string{"note": "knows IRC"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("put note: %d", rec.Code)
+	}
+	rec, out := do(t, h, "GET", "/api/v9/users/@me/notes/"+target, token, nil)
+	if rec.Code != http.StatusOK || out["note"] != "knows IRC" {
+		t.Fatalf("get note: %d %v", rec.Code, out)
+	}
+	if out["note_user_id"] != target || out["user_id"] == "" {
+		t.Fatalf("note ids wrong: %v", out)
+	}
+	rec, list := do(t, h, "GET", "/api/v9/users/@me/notes", token, nil)
+	if rec.Code != http.StatusOK || list[target] != "knows IRC" {
+		t.Fatalf("list notes: %d %v", rec.Code, list)
+	}
+
+	// Oversized note is rejected (documented 256-char limit).
+	rec, _ = do(t, h, "PUT", "/api/v9/users/@me/notes/"+target, token, map[string]string{"note": strings.Repeat("x", 257)})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized note: %d", rec.Code)
+	}
+
+	// An empty note clears it.
+	rec, _ = do(t, h, "PUT", "/api/v9/users/@me/notes/"+target, token, map[string]string{"note": ""})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("clear note: %d", rec.Code)
+	}
+	rec, out = do(t, h, "GET", "/api/v9/users/@me/notes/"+target, token, nil)
+	if rec.Code != http.StatusOK || out["note"] != "" {
+		t.Fatalf("cleared note should read empty: %d %v", rec.Code, out)
+	}
+	rec, list = do(t, h, "GET", "/api/v9/users/@me/notes", token, nil)
+	if _, still := list[target]; still {
+		t.Fatalf("cleared note still listed: %v", list)
+	}
+}

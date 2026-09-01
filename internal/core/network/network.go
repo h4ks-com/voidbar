@@ -143,6 +143,48 @@ func (s *Service) MergeUserSettings(userID string, patch map[string]any) error {
 	return s.store.MergeUserSettings(userID, patch)
 }
 
+// UserNotes returns the user's private notes ({target id: note}) for the
+// READY payload.
+func (s *Service) UserNotes(userID string) map[string]string {
+	if s.store == nil {
+		return map[string]string{}
+	}
+	notes, err := s.store.ListUserNotes(userID)
+	if err != nil {
+		s.log.Error("list user notes", "err", err)
+		return map[string]string{}
+	}
+	return notes
+}
+
+// UserNote returns one note ("" when absent).
+func (s *Service) UserNote(userID, targetID string) string {
+	if s.store == nil {
+		return ""
+	}
+	note, err := s.store.GetUserNote(userID, targetID)
+	if err != nil {
+		s.log.Error("get user note", "err", err)
+		return ""
+	}
+	return note
+}
+
+// SetUserNote stores (or clears, on an empty note) a note and fans the
+// USER_NOTE_UPDATE event to the user's sessions.
+func (s *Service) SetUserNote(userID, targetID, note string) error {
+	if err := s.store.PutUserNote(userID, targetID, note); err != nil {
+		return err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "USER_NOTE_UPDATE", map[string]any{
+			"id":   targetID,
+			"note": note,
+		})
+	}
+	return nil
+}
+
 // UserSettingsProto returns the persisted serialized settings protobuf for
 // the kind (nil when never written).
 func (s *Service) UserSettingsProto(userID, kind string) []byte {

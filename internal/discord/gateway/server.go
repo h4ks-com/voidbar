@@ -38,6 +38,7 @@ type Server struct {
 	byUser   map[string]map[string]*Session
 
 	settingsForUser func(userID string) map[string]any
+	notesForUser    func(userID string) map[string]string
 }
 
 // SetGuildProviders installs the READY/GUILD_CREATE hooks after
@@ -68,6 +69,20 @@ func (s *Server) userSettings(userID string) map[string]any {
 		}
 	}
 	return model.DefaultUserSettings()
+}
+
+// SetNotesProvider installs the READY notes hook ({target id: note}).
+func (s *Server) SetNotesProvider(notesForUser func(userID string) map[string]string) {
+	s.notesForUser = notesForUser
+}
+
+func (s *Server) userNotes(userID string) map[string]string {
+	if s.notesForUser != nil {
+		if m := s.notesForUser(userID); m != nil {
+			return m
+		}
+	}
+	return map[string]string{}
 }
 
 // SetMemberListProvider installs the GUILD_MEMBER_LIST_UPDATE hook serving
@@ -547,6 +562,7 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		GeoOrderedRTCRegions: []any{},
 		SessionType:      "normal",
 		UserSettings:     s.userSettings(user.ID),
+		Notes:            s.userNotes(user.ID),
 		Experiments:          []any{},
 		GuildExperiments:     []any{},
 		UserGuildSettings: &VersionedArray{

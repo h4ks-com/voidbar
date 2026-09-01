@@ -60,6 +60,7 @@ type ReadyData struct {
 	GeoOrderedRTCRegions []any           `json:"geo_ordered_rtc_regions"`
 	SessionType          string          `json:"session_type"`
 	UserSettings         map[string]any  `json:"user_settings"`
+	Notes                map[string]string `json:"notes"`
 	Experiments          []any           `json:"experiments"`
 	GuildExperiments     []any           `json:"guild_experiments"`
 	UserGuildSettings    *VersionedArray `json:"user_guild_settings"`

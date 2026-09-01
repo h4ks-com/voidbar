@@ -73,6 +73,42 @@ func TestCreateUserUnique(t *testing.T) {
 	}
 }
 
+func TestUserNotes(t *testing.T) {
+	s := openStore(t)
+	if err := s.PutUserNote("u1", "t1", "note one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutUserNote("u1", "t2", "note two"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutUserNote("u2", "t1", "other owner"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetUserNote("u1", "t1"); err != nil || got != "note one" {
+		t.Fatalf("get: %q %v", got, err)
+	}
+	if got, err := s.GetUserNote("u1", "missing"); err != nil || got != "" {
+		t.Fatalf("missing should read empty: %q %v", got, err)
+	}
+	notes, err := s.ListUserNotes("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 2 || notes["t2"] != "note two" {
+		t.Fatalf("list: %v", notes)
+	}
+	if err := s.PutUserNote("u1", "t1", ""); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = s.ListUserNotes("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("empty note should delete: %v", notes)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s := openStore(t)
 	u := newUser(t, s, "doesnm", "a@x.io")

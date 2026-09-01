@@ -244,6 +244,10 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   whose context names a joined channel surfaces there as a message from
   the "server" pseudo-user; everything else (registration-time,
   NickServ) is logged.
+- **User notes** ("Add Note" in the profile sheet): `GET/PUT
+  /users/@me/notes/:id` + the bulk map, the READY `notes` field, and
+  `USER_NOTE_UPDATE` fan-out across sessions. Notes target any
+  user-shaped id (members and IRC peers alike); an empty note clears.
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
@@ -331,8 +335,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 - **Pins**: `PUT/DELETE /channels/:id/pins/:mid` — only the list is
   served today; the client's pin button 404s.
-- **User notes**: `GET/PUT /users/@me/notes/:id` (the client probes the
-  per-id route on profile opens; only the bulk route exists).
 - **Network rename**: `PATCH /guilds/:id` — rename the network record
   from the client's guild settings.
 - **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`

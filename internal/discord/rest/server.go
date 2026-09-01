@@ -53,6 +53,10 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("POST /api/v9/auth/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("GET /api/v9/users/@me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
+	// User notes ("Add Note" in the profile sheet).
+	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleUserNotes))
+	mux.HandleFunc("GET /api/v9/users/@me/notes/{id}", s.requireAuth(s.handleUserNote))
+	mux.HandleFunc("PUT /api/v9/users/@me/notes/{id}", s.requireAuth(s.handlePutUserNote))
 	mux.HandleFunc("GET /api/v9/users/@me/guilds", s.requireAuth(s.handleUserGuilds))
 	mux.HandleFunc("DELETE /api/v9/users/@me/guilds/{guild}", s.requireAuth(s.handleLeaveGuild))
 	// Android 126.21's "Delete server" (settings screen) is a POST to

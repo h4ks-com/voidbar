@@ -56,7 +56,6 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v9/users/@me/entitlements", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/billing/subscriptions", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("GET /api/v9/users/@me/relationships", s.requireAuth(s.handleEmptyArray))
-	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleEmptyMap))
 	mux.HandleFunc("GET /api/v9/users/@me/affinities/users", s.requireAuth(s.handleAffinities))
 	// Android client probes after login; 404s leave stores in retry loops
 	// (and the profile screen spins). All are "nothing to show" shapes.
@@ -134,6 +133,57 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 		"mutual_guilds":        []any{},
 		"mutual_friends_count": 0,
 	})
+}
+
+// maxUserNoteLen matches the documented Modify User Note limit.
+const maxUserNoteLen = 256
+
+// handleUserNotes answers GET /users/@me/notes: the full {target id:
+// note} map for the READY-less fetch path.
+func (s *Server) handleUserNotes(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, map[string]string{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.net.UserNotes(u.ID))
+}
+
+// handleUserNote answers GET /users/@me/notes/{id} with the documented
+// {note, note_user_id, user_id} shape (an absent note reads as "").
+func (s *Server) handleUserNote(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"note": "", "note_user_id": r.PathValue("id"), "user_id": u.ID})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"note":         s.net.UserNote(u.ID, r.PathValue("id")),
+		"note_user_id": r.PathValue("id"),
+		"user_id":      u.ID,
+	})
+}
+
+// handlePutUserNote answers PUT /users/@me/notes/{id}: 204 on success,
+// USER_NOTE_UPDATE fans to the user's other sessions. An empty note
+// clears (and the event carries the empty string, like Discord).
+func (s *Server) handlePutUserNote(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	var req struct {
+		Note *string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Note == nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	if len([]rune(*req.Note)) > maxUserNoteLen {
+		jsonError(w, http.StatusBadRequest, "Note is too long")
+		return
+	}
+	if s.net != nil {
+		if err := s.net.SetUserNote(u.ID, r.PathValue("id"), *req.Note); err != nil {
+			jsonError(w, http.StatusInternalServerError, "Internal server error")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleLocationMetadata answers the login screen's geo/consent probe with
