@@ -128,6 +128,39 @@ func (s *Server) Dispatch(userID, t string, d any) {
 	}
 }
 
+// writeRequest is one queued websocket write: a frame, or a flush
+// barrier (nil frame) that the writer acknowledges once everything
+// before it is on the socket.
+type writeRequest struct {
+	frame []byte
+	done  chan struct{}
+}
+
+// FlushUser blocks until every frame queued for the user's live sessions
+// at call time has been handed to the socket writer - call it after a
+// Dispatch and before writing the HTTP response that matches the event,
+// so clients (which re-render from store state, not response bodies)
+// always process the event first.
+func (s *Server) FlushUser(userID string) {
+	s.mu.RLock()
+	sessions := make([]*Session, 0, len(s.byUser[userID]))
+	for _, sess := range s.byUser[userID] {
+		sessions = append(sessions, sess)
+	}
+	s.mu.RUnlock()
+	for _, sess := range sessions {
+		if sess.offline() {
+			continue
+		}
+		done := make(chan struct{})
+		sess.queueFlush(done)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  4096,
@@ -139,7 +172,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(1 << 20)
-	ch := make(chan []byte, 256)
+	ch := make(chan writeRequest, 256)
 	done := make(chan struct{})
 	compress := r.URL.Query().Get("compress") == "zlib-stream"
 	writeDone := make(chan struct{})
@@ -155,7 +188,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handleConn(conn, ch)
 }
 
-func (s *Server) writePump(conn *websocket.Conn, ch <-chan []byte, done <-chan struct{}, compress bool) {
+func (s *Server) writePump(conn *websocket.Conn, ch <-chan writeRequest, done <-chan struct{}, compress bool) {
 	defer conn.Close()
 	var (
 		zw  *zlib.Writer
@@ -170,11 +203,19 @@ func (s *Server) writePump(conn *websocket.Conn, ch <-chan []byte, done <-chan s
 		select {
 		case <-done:
 			return
-		case frame = <-ch:
-			// nil frames come from a channel closed by session takeover.
-			if frame == nil {
-				return
+		case req := <-ch:
+			// Flush barriers resolve without touching the socket; a
+			// zero-value request (channel closed by session takeover)
+			// ends the pump.
+			if req.frame == nil {
+				if req.done != nil {
+					close(req.done)
+				} else {
+					return
+				}
+				continue
 			}
+			frame = req.frame
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		var err error
@@ -195,7 +236,7 @@ func (s *Server) writePump(conn *websocket.Conn, ch <-chan []byte, done <-chan s
 	}
 }
 
-func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
+func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 	var sess *Session
 
 	hello, err := json.Marshal(opFrame{Op: OpHello, D: mustJSON(HelloData{
@@ -205,7 +246,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 	if err != nil {
 		return
 	}
-	ch <- hello
+	ch <- writeRequest{frame: hello}
 
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
@@ -267,7 +308,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 			old := s.findSession(d.SessionID)
 			if old == nil || old.UserID != user.ID {
 				frame, _ := json.Marshal(opFrame{Op: OpInvalidSession, D: json.RawMessage("false")})
-				ch <- frame
+				ch <- writeRequest{frame: frame}
 				continue
 			}
 			old.attach(ch)
@@ -281,7 +322,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan []byte) {
 			sess = old
 		case OpHeartbeat:
 			ack, _ := json.Marshal(opFrame{Op: OpHeartbeatACK})
-			ch <- ack
+			ch <- writeRequest{frame: ack}
 		case OpPresenceUpdate, OpVoiceStateUpdate:
 			if sess == nil {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")

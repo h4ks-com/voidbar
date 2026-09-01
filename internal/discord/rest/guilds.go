@@ -1215,6 +1215,14 @@ func (s *Server) handleUpdateGuild(w http.ResponseWriter, r *http.Request, u *st
 		jsonError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
+	// The client rebuilds its guild settings screen from store state,
+	// not from this response - it races the GUILD_UPDATE dispatch against
+	// the response and takes whichever lands first. Push the event onto
+	// the socket before the response bytes leave so the store always
+	// wins.
+	if s.gw != nil {
+		s.gw.FlushUser(u.ID)
+	}
 	s.handleGuildDetail(w, r, u)
 }
 

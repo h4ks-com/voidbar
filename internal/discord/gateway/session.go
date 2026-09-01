@@ -19,7 +19,7 @@ type Session struct {
 	mu     sync.Mutex
 	seq    int64
 	events []eventRecord
-	send   chan []byte
+	send   chan writeRequest
 
 	// memberLists tracks which lazy member lists this session asked for
 	// via op 14 (key "<guild>\x00<channel>", empty channel = the
@@ -50,7 +50,7 @@ func (s *Session) memberListSet() map[string]bool {
 	return out
 }
 
-func (s *Session) attach(ch chan []byte) {
+func (s *Session) attach(ch chan writeRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.send != nil && s.send != ch {
@@ -59,7 +59,7 @@ func (s *Session) attach(ch chan []byte) {
 	s.send = ch
 }
 
-func (s *Session) detach(ch chan []byte) {
+func (s *Session) detach(ch chan writeRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.send == ch {
@@ -106,20 +106,40 @@ func (s *Session) sendFrame(frame []byte) {
 		return
 	}
 	select {
-	case s.send <- frame:
+	case s.send <- writeRequest{frame: frame}:
 	default:
 		close(s.send)
 		s.send = nil
 	}
 }
 
-func (s *Session) replay(since int64, ch chan []byte) {
+// queueFlush enqueues a write barrier: it resolves once the connection's
+// writer has handed every earlier frame to the socket. REST handlers use
+// it to order a gateway event ahead of their HTTP response - the client
+// rebuilds UI state from its store, which only the event updates.
+func (s *Session) queueFlush(done chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.send == nil {
+		close(done)
+		return
+	}
+	select {
+	case s.send <- writeRequest{done: done}:
+	default:
+		// The queue is full; earlier frames (the ones we care about)
+		// are already waiting, so the barrier is trivially satisfied.
+		close(done)
+	}
+}
+
+func (s *Session) replay(since int64, ch chan writeRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, ev := range s.events {
 		if ev.seq > since {
 			select {
-			case ch <- ev.frame:
+			case ch <- writeRequest{frame: ev.frame}:
 			default:
 			}
 		}

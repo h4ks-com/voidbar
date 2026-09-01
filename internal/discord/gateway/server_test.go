@@ -340,6 +340,26 @@ func TestDispatchToMultipleSessions(t *testing.T) {
 	}
 }
 
+// TestFlushUserOrdersWrites pins the REST/gateway ordering contract:
+// once FlushUser returns, everything dispatched before it is already on
+// the user's sockets, so a following HTTP response can never beat the
+// event to a store-driven client.
+func TestFlushUserOrdersWrites(t *testing.T) {
+	gw, token, userID := newTestServer(t)
+	connA, _, _ := identifyFlow(t, gw, token)
+	connB, _, _ := identifyFlow(t, gw, token)
+
+	gw.Dispatch(userID, "PING", map[string]any{"x": 1})
+	gw.FlushUser(userID)
+	for _, conn := range []*websocket.Conn{connA, connB} {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("frame not flushed to socket before FlushUser returned: %v", err)
+		}
+	}
+}
+
 func TestZlibStreamCompression(t *testing.T) {
 	gw, token, _ := newTestServer(t)
 	url := startHTTP(t, gw)
