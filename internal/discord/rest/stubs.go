@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -84,16 +85,32 @@ func (s *Server) handleAuthFingerprint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUserProfile answers the Android profile probe. The client renders
-// the user sheet from this; a minimal profile with a connected_account-free
-// body keeps it calm.
+// handleUserProfile answers the Android client's profile probe. IRC
+// peers resolve to their live facts (nick as the display name, services
+// account and host in the bio); everything unknown stays a calm
+// minimal profile so the sheet never spins.
 func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	id := r.PathValue("id")
 	username := "user"
+	globalName := ""
+	bio := ""
 	if id == u.ID {
 		username = u.Username
+	} else if s.net != nil {
+		if nick, account, host, ok := s.net.PeerInfoByAuthor(u.ID, id); ok {
+			username = nick
+			globalName = nick
+			var lines []string
+			if account != "" {
+				lines = append(lines, "NickServ: "+account)
+			}
+			if host != "" {
+				lines = append(lines, "Host: "+host)
+			}
+			bio = strings.Join(lines, "\n")
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	profile := map[string]any{
 		"id":                  id,
 		"username":            username,
 		"discriminator":       "0",
@@ -102,14 +119,18 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 		"public_flags":        0,
 		"flags":               0,
 		"premium_type":        0,
-		"bio":                 "",
+		"bio":                 bio,
 		"connected_accounts":  []any{},
 		"mutual_guilds":       []any{},
 		"mutual_friends_count": 0,
 		"user_profile": map[string]any{
-			"bio": "",
+			"bio": bio,
 		},
-	})
+	}
+	if globalName != "" {
+		profile["global_name"] = globalName
+	}
+	writeJSON(w, http.StatusOK, profile)
 }
 
 // handleLocationMetadata answers the login screen's geo/consent probe with

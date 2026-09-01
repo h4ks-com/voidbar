@@ -99,6 +99,13 @@ type conn struct {
 	awayMu sync.Mutex
 	away   map[string]bool
 
+	// peers records per-nick facts beyond away: the services account
+	// (extended-join/account-notify; "" = logged out, IRC's "*" marker
+	// normalizes to that) and user@host (JOIN source, WHO 352, chghost
+	// updates). The profile sheet reads these on tap.
+	peerMu sync.Mutex
+	peers  map[string]peerFact
+
 	// ownStatus remembers WHICH Discord status the user picked while away
 	// (idle vs dnd): IRC's AWAY is a single bit, but the client's bottom
 	// panel renders the exact status back from PRESENCE_UPDATE.
@@ -265,6 +272,81 @@ func (c *conn) forgetAway(nick string) {
 	delete(c.away, nick)
 }
 
+// peerFact is the per-nick knowledge a profile sheet can show.
+type peerFact struct {
+	Account string // services account, "" when logged out
+	User    string // username side of user@host
+	Host    string // host side (cloak or vhost after chghost)
+}
+
+// setPeerAccount records a nick's services account; "*" (IRC's
+// logged-out marker) normalizes to "".
+func (c *conn) setPeerAccount(nick, account string) {
+	if nick == "" {
+		return
+	}
+	if account == "*" {
+		account = ""
+	}
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	if c.peers == nil {
+		c.peers = make(map[string]peerFact)
+	}
+	f := c.peers[nick]
+	if f.Account == account {
+		return
+	}
+	f.Account = account
+	c.peers[nick] = f
+}
+
+// setPeerHost records a nick's user@host.
+func (c *conn) setPeerHost(nick, user, host string) {
+	if nick == "" {
+		return
+	}
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	if c.peers == nil {
+		c.peers = make(map[string]peerFact)
+	}
+	f := c.peers[nick]
+	if f.User == user && f.Host == host {
+		return
+	}
+	f.User, f.Host = user, host
+	c.peers[nick] = f
+}
+
+// peerFactFor returns the facts known about a nick.
+func (c *conn) peerFactFor(nick string) peerFact {
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	return c.peers[nick]
+}
+
+// renamePeer re-keys a nick's facts on NICK (facts are per-connection
+// and survive the rename, same as away).
+func (c *conn) renamePeer(oldNick, newNick string) {
+	if oldNick == "" || newNick == "" || oldNick == newNick {
+		return
+	}
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	if f, ok := c.peers[oldNick]; ok {
+		delete(c.peers, oldNick)
+		c.peers[newNick] = f
+	}
+}
+
+// forgetPeer drops a nick's facts (they left the network).
+func (c *conn) forgetPeer(nick string) {
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	delete(c.peers, nick)
+}
+
 func (c *conn) markPending(ch string) {
 	c.pendMu.Lock()
 	c.pendingJoins[strings.ToLower(ch)] = true
@@ -357,6 +439,9 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			// PART/JOIN fallback instead of the RENAME broadcast, which
 			// would tear the channel out of the registry's auto-join.
 			"draft/channel-rename": nil,
+			// standard-replies: FAIL/WARN/NOTE machine-readable errors;
+			// the handler lands them in the buffer they belong to.
+			"standard-replies": nil,
 		},
 		// TLS is decided by the connection string (ircs:// / port), not by
 		// the server: an STS upgrade closes the connection mid-session and
@@ -781,9 +866,10 @@ func (m *Manager) registerHandlers(c *conn) {
 		if e.Source == nil || len(e.Params) == 0 {
 			return
 		}
-		// Away state is per-connection: it follows the user across the
-		// rename (away-notify events for the old nick won't come anymore).
+		// Away state and peer facts are per-connection: they follow the
+		// user across the rename (events for the old nick won't come).
 		c.renameAway(e.Source.Name, e.Params[0])
+		c.renamePeer(e.Source.Name, e.Params[0])
 		// girc has already updated its tracked nick by the time user
 		// handlers run, so Params[0] == GetNick() only for our own renames.
 		if !strings.EqualFold(e.Params[0], client.GetNick()) {
@@ -793,6 +879,15 @@ func (m *Manager) registerHandlers(c *conn) {
 	})
 
 	c.client.Handlers.Add(girc.JOIN, func(client *girc.Client, e girc.Event) {
+		// extended-join: JOIN <channel> <account|"*"> <realname> - record
+		// the account (own joins carry it too). The message source's
+		// user@host is fact seed regardless of the cap.
+		if e.Source != nil {
+			c.setPeerHost(e.Source.Name, e.Source.Ident, e.Source.Host)
+			if len(e.Params) >= 2 {
+				c.setPeerAccount(e.Source.Name, e.Params[1])
+			}
+		}
 		// Our own join echo confirms a pending optimistic channel-create.
 		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
 			c.clearPending(e.Params[0])
@@ -834,9 +929,66 @@ func (m *Manager) registerHandlers(c *conn) {
 	c.client.Handlers.Add(girc.QUIT, func(client *girc.Client, e girc.Event) {
 		if e.Source != nil {
 			c.forgetAway(e.Source.Name)
+			c.forgetPeer(e.Source.Name)
 		}
 		m.notifyOccupancy(c, "")
 	})
+	// account-notify: services logins/logouts for anyone we share a
+	// channel with. Pure facts - the profile sheet reads them on tap.
+	c.client.Handlers.Add("ACCOUNT", func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) == 0 {
+			return
+		}
+		c.setPeerAccount(e.Source.Name, e.Params[0])
+	})
+	// chghost: user@host changes (cloaks, vhosts). Facts only; the
+	// member card is refreshed on profile open, not on the change.
+	c.client.Handlers.Add("CHGHOST", func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) < 2 {
+			return
+		}
+		c.setPeerHost(e.Source.Name, e.Params[0], e.Params[1])
+	})
+	// invite-notify: INVITE broadcasts for channels we're in surface as
+	// a message from the inviter. A direct INVITE aimed at us (for a
+	// channel we are NOT in) lands as a DM instead - dropping it would
+	// make the invite silent.
+	c.client.Handlers.Add("INVITE", func(client *girc.Client, e girc.Event) {
+		if e.Source == nil || len(e.Params) < 2 {
+			return
+		}
+		target, channel := e.Params[0], e.Params[1]
+		if client.LookupChannel(channel) != nil {
+			m.log.Info("invite relayed", "user", c.userID, "network", c.networkID, "by", e.Source.Name, "target", target, "channel", channel)
+			m.dispatchMessage(c, channel, e.Source.Name, "invited "+target+" to the channel", model.NowTimestamp(), "")
+			return
+		}
+		if strings.EqualFold(target, client.GetNick()) {
+			m.log.Info("invite to us relayed", "user", c.userID, "network", c.networkID, "by", e.Source.Name, "channel", channel)
+			m.dispatchQuery(c, e.Source.Name, "invited you to "+channel, model.NowTimestamp(), "")
+		}
+	})
+	// standard-replies (FAIL/WARN/NOTE): "<type> <command> <code>
+	// [<context>...] :<description>". A reply whose context names a
+	// channel we're in surfaces there as a message from the "server"
+	// pseudo-user; everything else (registration-time replies, NickServ
+	// exchanges) is logged - it has no buffer to land in.
+	for _, cmd := range []string{"FAIL", "WARN", "NOTE"} {
+		c.client.Handlers.Add(cmd, func(client *girc.Client, e girc.Event) {
+			if len(e.Params) < 3 {
+				return
+			}
+			desc := e.Last()
+			for _, p := range e.Params[2 : len(e.Params)-1] {
+				if strings.HasPrefix(p, "#") && client.LookupChannel(p) != nil {
+					m.log.Info("standard reply relayed", "user", c.userID, "network", c.networkID, "type", e.Command, "command", e.Params[0], "channel", p)
+					m.dispatchMessage(c, p, "server", e.Command+" "+e.Params[1]+": "+desc, model.NowTimestamp(), "")
+					return
+				}
+			}
+			m.log.Info("standard reply", "user", c.userID, "network", c.networkID, "type", e.Command, "command", e.Params[0], "code", e.Params[1], "desc", desc)
+		})
+	}
 	// away-notify AWAY/BACK broadcasts for OTHER users are handled in the
 	// ALL_EVENTS branch (see registerHandlers top) - including the echo of
 	// our own AWAY on servers that send it. eris does NOT self-echo; it
@@ -867,6 +1019,9 @@ func (m *Manager) registerHandlers(c *conn) {
 			return
 		}
 		c.setAway(e.Params[5], flags[0] == 'G')
+		// The same line carries the peer's user@host - seed the facts
+		// for nicks that were in the channel before we joined.
+		c.setPeerHost(e.Params[5], e.Params[2], e.Params[3])
 	})
 	c.client.Handlers.Add("315", func(client *girc.Client, e girc.Event) {
 		if len(e.Params) > 1 {
@@ -1259,12 +1414,15 @@ func (m *Manager) dmChannelPayload(dm *storage.DMChannel) map[string]any {
 }
 
 // ChannelMember is one channel occupant from the live NAMES state, with
-// their highest channel-membership mode (q/a/o/h/v per PREFIX, or "" for
-// plain members) and away state (away-notify / WHO H/G).
+// the facts the client can surface: their highest channel mode, away
+// (away-notify/WHO), services account (extended-join/account-notify)
+// and user@host (JOIN source/WHO/chghost).
 type ChannelMember struct {
-	Nick string
-	Mode string
-	Away bool
+	Nick    string
+	Mode    string
+	Away    bool
+	Account string
+	Host    string
 }
 
 // ChannelMembers returns the nicks currently in an IRC channel according
@@ -1334,12 +1492,54 @@ func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []Ch
 				}
 			}
 		}
-		members = append(members, ChannelMember{Nick: u.Nick, Mode: mode, Away: c.isAway(u.Nick)})
+		f := c.peerFactFor(u.Nick)
+		host := ""
+		if f.User != "" && f.Host != "" {
+			host = f.User + "@" + f.Host
+		}
+		members = append(members, ChannelMember{Nick: u.Nick, Mode: mode, Away: c.isAway(u.Nick), Account: f.Account, Host: host})
 	}
 	sort.Slice(members, func(i, j int) bool {
 		return strings.ToLower(members[i].Nick) < strings.ToLower(members[j].Nick)
 	})
 	return members
+}
+
+// PeerInfoByAuthor resolves a hashed IRC author id (IrcAuthorID of
+// "irc:<nick>") back to live peer facts across the user's connections.
+// Author ids are network-agnostic by design; the first live hit wins.
+func (m *Manager) PeerInfoByAuthor(userID, authorID string) (nick, account, host string, ok bool) {
+	if authorID == "" {
+		return "", "", "", false
+	}
+	m.mu.Lock()
+	var conns []*conn
+	prefix := userID + "\x00"
+	for k, c := range m.conns {
+		if strings.HasPrefix(k, prefix) {
+			conns = append(conns, c)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range conns {
+		c.peerMu.Lock()
+		snapshot := make(map[string]peerFact, len(c.peers))
+		for n, f := range c.peers {
+			snapshot[n] = f
+		}
+		c.peerMu.Unlock()
+		for n, f := range snapshot {
+			if model.IrcAuthorID("irc:"+n) != authorID {
+				continue
+			}
+			host := ""
+			if f.User != "" && f.Host != "" {
+				host = f.User + "@" + f.Host
+			}
+			return n, f.Account, host, true
+		}
+	}
+	return "", "", "", false
 }
 
 // LiveNick returns the nick the user's upstream connection currently

@@ -1035,6 +1035,15 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	}
 }
 
+// PeerInfoByAuthor resolves a hashed IRC author id to live peer facts
+// (nick, services account, user@host); see the manager for semantics.
+func (s *Service) PeerInfoByAuthor(userID, authorID string) (string, string, string, bool) {
+	if s.manager == nil {
+		return "", "", "", false
+	}
+	return s.manager.PeerInfoByAuthor(userID, authorID)
+}
+
 // bouncerMember is one bouncer member of a network under their live
 // nick, with their real user id.
 type bouncerMember struct {
