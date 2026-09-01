@@ -248,6 +248,11 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   /users/@me/notes/:id` + the bulk map, the READY `notes` field, and
   `USER_NOTE_UPDATE` fan-out across sessions. Notes target any
   user-shaped id (members and IRC peers alike); an empty note clears.
+- **Pins** (bouncer-local): the client's pin button PUTs/DELETEs
+  `/channels/:id/pins/:mid` (204, 50-pin ceiling), `GET /pins` lists
+  pinned replay-buffer messages oldest-first, and pin flips fan
+  `MESSAGE_UPDATE` (partial) + `CHANNEL_PINS_UPDATE`. Pins whose
+  message aged out of the buffer stay stored but drop from the list.
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
@@ -333,8 +338,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ### Client features (local, no IRC counterpart needed)
 
-- **Pins**: `PUT/DELETE /channels/:id/pins/:mid` — only the list is
-  served today; the client's pin button 404s.
 - **Network rename**: `PATCH /guilds/:id` — rename the network record
   from the client's guild settings.
 - **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`

@@ -185,6 +185,68 @@ func (s *Service) SetUserNote(userID, targetID, note string) error {
 	return nil
 }
 
+// ChannelPins lists a channel's pinned message ids (oldest-pin-first);
+// the REST layer joins them against the replay buffer for payloads.
+func (s *Service) ChannelPins(channelID string) []storage.PinnedMessage {
+	if s.store == nil {
+		return nil
+	}
+	pins, err := s.store.ListPins(channelID)
+	if err != nil {
+		s.log.Error("list pins", "err", err)
+		return nil
+	}
+	return pins
+}
+
+// MessageByID resolves one buffered message (second return false when it
+// aged out of the replay buffer).
+func (s *Service) MessageByID(channelID, messageID string) (storage.BufferedMessage, bool) {
+	if s.store == nil {
+		return storage.BufferedMessage{}, false
+	}
+	return s.store.MessageByID(channelID, messageID)
+}
+
+// PinCount returns how many messages a channel has pinned.
+func (s *Service) PinCount(channelID string) int {
+	return len(s.ChannelPins(channelID))
+}
+
+// SetChannelPin pins (or unpins) a message and fans the gateway events:
+// a partial MESSAGE_UPDATE flipping the row's pinned flag, plus
+// CHANNEL_PINS_UPDATE so the channel header's pin badge refreshes.
+func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool) error {
+	var err error
+	if pinned {
+		err = s.store.PutPin(channelID, messageID)
+	} else {
+		err = s.store.DeletePin(channelID, messageID)
+	}
+	if err != nil {
+		return err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "MESSAGE_UPDATE", map[string]any{
+			"id":         messageID,
+			"channel_id": channelID,
+			"pinned":     pinned,
+		})
+		pins := s.ChannelPins(channelID)
+		var last *string
+		if len(pins) > 0 {
+			ts := pins[len(pins)-1].PinnedAt.Format(time.RFC3339)
+			last = &ts
+		}
+		s.gw.Dispatch(userID, "CHANNEL_PINS_UPDATE", map[string]any{
+			"channel_id":          channelID,
+			"guild_id":            s.ChannelNetworkID(channelID),
+			"last_pin_timestamp":  last,
+		})
+	}
+	return nil
+}
+
 // UserSettingsProto returns the persisted serialized settings protobuf for
 // the kind (nil when never written).
 func (s *Service) UserSettingsProto(userID, kind string) []byte {

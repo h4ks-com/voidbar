@@ -92,7 +92,10 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("PUT /api/v9/channels/{channel}/messages/{message}/reactions/{emoji}/@me", s.requireAuth(s.handleReactSelf))
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}/messages/{message}/reactions/{emoji}/@me", s.requireAuth(s.handleReactSelf))
 	mux.HandleFunc("POST /api/v9/channels/{channel}/typing", s.requireAuth(s.handleStartTyping))
-	mux.HandleFunc("GET /api/v9/channels/{channel}/pins", s.requireAuth(s.handleEmptyArray))
+	// Channel pins: bouncer-local pins over the replay buffer.
+	mux.HandleFunc("GET /api/v9/channels/{channel}/pins", s.requireAuth(s.handlePinnedMessages))
+	mux.HandleFunc("PUT /api/v9/channels/{channel}/pins/{message}", s.requireAuth(s.handlePinMessage))
+	mux.HandleFunc("DELETE /api/v9/channels/{channel}/pins/{message}", s.requireAuth(s.handleUnpinMessage))
 	mux.HandleFunc("POST /api/v9/channels/{channel}/messages/{message}/ack", s.requireAuth(s.handleNoContentAuthed))
 	if net != nil {
 		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))

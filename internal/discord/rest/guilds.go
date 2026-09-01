@@ -584,56 +584,7 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 	out := make([]any, 0, len(buffered))
 	upsertNicks := map[string]bool{}
 	for _, m := range buffered {
-		var authorBio any
-		if bio := s.net.AuthorBio(u.ID, r.PathValue("channel"), m.AuthorID); bio != "" {
-			authorBio = bio
-		}
-		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio)
-		// Mentioned peers ride along: the mentions array rebuilds from the
-		// stored refs (bouncer members keep their real ids), and the users
-		// get GUILD_MEMBER_UPDATE upserts so pills don't render
-		// @invalid-user for peers the client never saw this session.
-		if len(m.Mentions) > 0 {
-			mentioned := make([]any, 0, len(m.Mentions))
-			for _, mu := range m.Mentions {
-				mentioned = append(mentioned, map[string]any{
-					"id":            mu.ID,
-					"username":      mu.Nick,
-					"discriminator": "0",
-					"bot":           false,
-				})
-				upsertNicks[mu.Nick] = true
-			}
-			payload["mentions"] = mentioned
-		}
-		// Reaction pills come from the persisted state on the message
-		// (updated on every live change), so history is restart-proof.
-		if len(m.Reactions) > 0 {
-			emojis := make([]string, 0, len(m.Reactions))
-			for emoji := range m.Reactions {
-				emojis = append(emojis, emoji)
-			}
-			sort.Strings(emojis)
-			list := make([]any, 0, len(emojis))
-			for _, emoji := range emojis {
-				rc := map[string]any{"count": len(m.Reactions[emoji]), "me": false, "emoji": map[string]any{"id": nil, "name": emoji}}
-				for _, uid := range m.Reactions[emoji] {
-					if uid == u.ID {
-						rc["me"] = true
-						break
-					}
-				}
-				list = append(list, rc)
-			}
-			payload["reactions"] = list
-		}
-		if len(m.Attachments) > 0 {
-			payload["attachments"] = m.Attachments
-		}
-		if len(m.Embeds) > 0 {
-			payload["embeds"] = m.Embeds
-		}
-		out = append(out, payload)
+		out = append(out, s.historyMessagePayload(u, m, upsertNicks))
 	}
 	if len(upsertNicks) > 0 {
 		nicks := make([]string, 0, len(upsertNicks))
@@ -643,6 +594,137 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		s.net.UpsertMentionPeers(u.ID, s.net.ChannelNetworkID(r.PathValue("channel")), nicks)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// historyMessagePayload shapes one replay-buffer message for the REST
+// surface (history pages and the pinned list): author facts bio,
+// mentions, reactions, attachments, embeds. upsertNicks accumulates the
+// mention pills needing GUILD_MEMBER_UPDATE upserts.
+func (s *Server) historyMessagePayload(u *storage.User, m storage.BufferedMessage, upsertNicks map[string]bool) map[string]any {
+	var authorBio any
+	if bio := s.net.AuthorBio(u.ID, m.ChannelID, m.AuthorID); bio != "" {
+		authorBio = bio
+	}
+	payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio)
+	// Mentioned peers ride along: the mentions array rebuilds from the
+	// stored refs (bouncer members keep their real ids), and the users
+	// get GUILD_MEMBER_UPDATE upserts so pills don't render
+	// @invalid-user for peers the client never saw this session.
+	if len(m.Mentions) > 0 {
+		mentioned := make([]any, 0, len(m.Mentions))
+		for _, mu := range m.Mentions {
+			mentioned = append(mentioned, map[string]any{
+				"id":            mu.ID,
+				"username":      mu.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			})
+			upsertNicks[mu.Nick] = true
+		}
+		payload["mentions"] = mentioned
+	}
+	// Reaction pills come from the persisted state on the message
+	// (updated on every live change), so history is restart-proof.
+	if len(m.Reactions) > 0 {
+		emojis := make([]string, 0, len(m.Reactions))
+		for emoji := range m.Reactions {
+			emojis = append(emojis, emoji)
+		}
+		sort.Strings(emojis)
+		list := make([]any, 0, len(emojis))
+		for _, emoji := range emojis {
+			rc := map[string]any{"count": len(m.Reactions[emoji]), "me": false, "emoji": map[string]any{"id": nil, "name": emoji}}
+			for _, uid := range m.Reactions[emoji] {
+				if uid == u.ID {
+					rc["me"] = true
+					break
+				}
+			}
+			list = append(list, rc)
+		}
+		payload["reactions"] = list
+	}
+	if len(m.Attachments) > 0 {
+		payload["attachments"] = m.Attachments
+	}
+	if len(m.Embeds) > 0 {
+		payload["embeds"] = m.Embeds
+	}
+	return payload
+}
+
+// handlePinnedMessages answers GET /channels/{channel}/pins: the
+// channel's pins oldest-first (Discord's order), each message carrying
+// pinned=true. Pins whose message already aged out of the replay
+// buffer are kept in storage but skipped here.
+func (s *Server) handlePinnedMessages(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	channelID := r.PathValue("channel")
+	out := make([]any, 0)
+	upsertNicks := map[string]bool{}
+	for _, pin := range s.net.ChannelPins(channelID) {
+		m, ok := s.storeMessageByID(channelID, pin.ID)
+		if !ok {
+			continue
+		}
+		payload := s.historyMessagePayload(u, m, upsertNicks)
+		payload["pinned"] = true
+		out = append(out, payload)
+	}
+	if len(upsertNicks) > 0 {
+		nicks := make([]string, 0, len(upsertNicks))
+		for nick := range upsertNicks {
+			nicks = append(nicks, nick)
+		}
+		s.net.UpsertMentionPeers(u.ID, s.net.ChannelNetworkID(channelID), nicks)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handlePinMessage answers PUT /channels/{channel}/pins/{message}: 204
+// on success. Unknown messages 404 (the client only offers the button
+// for rendered messages); the 50-pin ceiling is Discord's documented
+// MAX_PINS.
+func (s *Server) handlePinMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	channelID, messageID := r.PathValue("channel"), r.PathValue("message")
+	if _, ok := s.storeMessageByID(channelID, messageID); !ok {
+		jsonError(w, http.StatusNotFound, "Unknown message")
+		return
+	}
+	if s.net.PinCount(channelID) >= storage.MaxChannelPins {
+		jsonError(w, http.StatusBadRequest, "Maximum number of pins reached")
+		return
+	}
+	if err := s.net.SetChannelPin(u.ID, channelID, messageID, true); err != nil {
+		jsonError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnpinMessage answers DELETE /channels/{channel}/pins/{message}
+// (idempotent, 204).
+func (s *Server) handleUnpinMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net != nil {
+		if err := s.net.SetChannelPin(u.ID, r.PathValue("channel"), r.PathValue("message"), false); err != nil {
+			jsonError(w, http.StatusInternalServerError, "Internal server error")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// storeMessageByID resolves a buffered message through the network
+// service (the REST server holds no store of its own).
+func (s *Server) storeMessageByID(channelID, messageID string) (storage.BufferedMessage, bool) {
+	return s.net.MessageByID(channelID, messageID)
 }
 
 // searchChannel returns every replay-buffer hit for the terms (AND,

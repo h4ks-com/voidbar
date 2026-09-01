@@ -109,6 +109,52 @@ func TestUserNotes(t *testing.T) {
 	}
 }
 
+func TestChannelPins(t *testing.T) {
+	s := openStore(t)
+	if err := s.PutPin("c1", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond) // distinct pin times for ordering
+	if err := s.PutPin("c1", "m2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutPin("c2", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	// Re-pinning keeps the original time.
+	pins, err := s.ListPins("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 2 || pins[0].ID != "m1" || pins[1].ID != "m2" {
+		t.Fatalf("pins order/content: %+v", pins)
+	}
+	if err := s.PutPin("c1", "m2"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.ListPins("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again[1].PinnedAt.Equal(pins[1].PinnedAt) {
+		t.Fatalf("re-pin changed time: %+v vs %+v", again, pins)
+	}
+	if err := s.DeletePin("c1", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	pins, err = s.ListPins("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 1 || pins[0].ID != "m2" {
+		t.Fatalf("after delete: %+v", pins)
+	}
+	// Unpinning an unpinned message is fine.
+	if err := s.DeletePin("c1", "nope"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s := openStore(t)
 	u := newUser(t, s, "doesnm", "a@x.io")

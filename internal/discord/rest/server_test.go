@@ -21,6 +21,14 @@ import (
 
 func newServer(t *testing.T, registration string) http.Handler {
 	t.Helper()
+	_, h := newServerWithStore(t, registration)
+	return h
+}
+
+// newServerWithStore also returns the backing store so tests can seed
+// replay-buffer state directly.
+func newServerWithStore(t *testing.T, registration string) (*storage.Storage, http.Handler) {
+	t.Helper()
 	store, err := storage.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +44,7 @@ func newServer(t *testing.T, registration string) http.Handler {
 		func(u string) ([]any, error) { return netSvc.ReadyGuildPayloads(u), nil },
 		netSvc.GuildCreateForUser,
 	)
-	return New(svc, cfg, logger, gw, netSvc, manager)
+	return store, New(svc, cfg, logger, gw, netSvc, manager)
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string, body any) (*httptest.ResponseRecorder, map[string]any) {
@@ -277,5 +285,67 @@ func TestUserNotes(t *testing.T) {
 	rec, list = do(t, h, "GET", "/api/v9/users/@me/notes", token, nil)
 	if _, still := list[target]; still {
 		t.Fatalf("cleared note still listed: %v", list)
+	}
+}
+
+func TestChannelPins(t *testing.T) {
+	store, h := newServerWithStore(t, "open")
+	token := registerAndLogin(t, h)
+	channelID := "700000000000000000"
+
+	seed := func(id, content string) {
+		t.Helper()
+		if err := store.AppendMessage(storage.BufferedMessage{
+			ID: id, ChannelID: channelID, Content: content,
+			AuthorID: "irc:bob", AuthorName: "bob",
+			Timestamp: "2026-01-01T10:00:00Z", Type: 0,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("900000000000000000", "pin me")
+	seed("900000000000000001", "second")
+
+	pin := func(id string) int {
+		rec, _ := do(t, h, "PUT", "/api/v9/channels/"+channelID+"/pins/"+id, token, nil)
+		return rec.Code
+	}
+	if code := pin("900000000000000000"); code != http.StatusNoContent {
+		t.Fatalf("pin: %d", code)
+	}
+	if code := pin("900000000000000001"); code != http.StatusNoContent {
+		t.Fatalf("pin second: %d", code)
+	}
+	// Pinning again is idempotent.
+	if code := pin("900000000000000000"); code != http.StatusNoContent {
+		t.Fatalf("re-pin: %d", code)
+	}
+	// Unknown message 404s.
+	if code := pin("42"); code != http.StatusNotFound {
+		t.Fatalf("pin unknown: %d", code)
+	}
+
+	rec, listAny := doAny(t, h, "GET", "/api/v9/channels/"+channelID+"/pins", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list pins: %d", rec.Code)
+	}
+	list, ok := listAny.([]any)
+	if !ok || len(list) != 2 {
+		t.Fatalf("expected 2 pins, got %v", listAny)
+	}
+	first, _ := list[0].(map[string]any)
+	if first["id"] != "900000000000000000" || first["pinned"] != true || first["content"] != "pin me" {
+		t.Fatalf("pin payload wrong: %v", first)
+	}
+
+	// Unpin one; the list shrinks.
+	rec, _ = do(t, h, "DELETE", "/api/v9/channels/"+channelID+"/pins/900000000000000000", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unpin: %d", rec.Code)
+	}
+	rec, listAny = doAny(t, h, "GET", "/api/v9/channels/"+channelID+"/pins", token, nil)
+	list, _ = listAny.([]any)
+	if rec.Code != http.StatusOK || len(list) != 1 {
+		t.Fatalf("expected 1 pin after unpin: %d %v", rec.Code, listAny)
 	}
 }
