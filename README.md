@@ -72,6 +72,15 @@ Covered:
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
   render in the client; nick collisions don't eat foreign messages
+- **Multiline**: the composer's shift+enter travels as ONE
+  `draft/multiline` batch upstream (blank inner lines intact, trailing
+  blank lines trimmed) and comes back joined - one message, one msgid,
+  one reaction anchor. Upstreams without the cap degrade to one
+  PRIVMSG per non-empty line (blank lines cannot survive the wire
+  there). Incoming batches - live or nested inside a chathistory page -
+  join into a single message with embedded newlines; `message-tags` is
+  requested so the batch frames carry their `@batch` reference
+  client-to-server.
 - **Replay buffer**: the last 500 messages per channel are persisted
   (Badger) and served over `GET /channels/:id/messages` with Discord
   pagination (`limit`/`before`/`after`); own sends are buffered too, and
@@ -354,9 +363,6 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 - **Network icon** (IRC counterpart: the `draft/ICON` ISUPPORT token):
   guild icon upload → CDN, shown in the guild list; read from ISUPPORT
   where the upstream advertises one.
-- **Multiline**: the composer's newlines split into multiple PRIVMSGs on
-  send; incoming `draft/multiline` batches (and chathistory equivalents)
-  join into one message.
 
 ### IRCv3 extensions to adopt
 

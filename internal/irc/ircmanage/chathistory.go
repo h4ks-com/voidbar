@@ -99,8 +99,10 @@ func (m *Manager) chatBatchControl(c *conn, e girc.Event) {
 			acc.target = e.Params[2]
 		}
 		c.openChatBatch(ref[1:], acc)
+		c.pushChatStack(ref[1:])
 	case strings.HasPrefix(ref, "-"):
 		if acc := c.closeChatBatch(ref[1:]); acc != nil {
+			c.popChatStack(ref[1:])
 			// A pending scroll-fetch waiter (FetchOlder) takes the batch
 			// silently - history must not storm attached clients as
 			// MESSAGE_CREATE - whether or not it still listens: a waiter

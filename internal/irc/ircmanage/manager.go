@@ -151,8 +151,16 @@ type conn struct {
 	// chatBatches holds in-flight draft/chathistory batches by reference;
 	// frames accumulate here until the BATCH close flushes them into the
 	// buffer (prefill). Only touched from the connection's event loop.
-	batchMu    sync.Mutex
+	// chatStack tracks their nesting order (innermost last) so a
+	// draft/multiline batch opened inside one binds to the right parent.
+	batchMu     sync.Mutex
 	chatBatches map[string]*chatBatch
+	chatStack   []string
+
+	// lineBatches holds in-flight draft/multiline batches by reference
+	// (live traffic or frames nested in a chathistory batch); the close
+	// joins the frames into one message.
+	lineBatches map[string]*lineBatch
 
 	// Scroll backfill (CHATHISTORY BEFORE) state. pageCh/pageTarget/
 	// pageBatch/pageIssued are guarded by batchMu (the event loop hands
@@ -170,9 +178,14 @@ type conn struct {
 	// asynchronously), which raced the prefill trigger into skipping
 	// channels; ordering the flag on the same event loop removes the race.
 	histCapUp atomic.Bool
+
+	// multilineCapUp is the sticky "upstream ACKed draft/multiline"
+	// flag, ordered on the event loop for the same reason.
+	multilineCapUp atomic.Bool
 }
 
-func (c *conn) histCap() bool { return c.histCapUp.Load() }
+func (c *conn) histCap() bool       { return c.histCapUp.Load() }
+func (c *conn) multilineCap() bool  { return c.multilineCapUp.Load() }
 
 // msgRef is the Discord identity of one bridged IRC message.
 type msgRef struct {
@@ -214,6 +227,70 @@ func (c *conn) appendChatFrame(ref string, f chatFrame) {
 	c.batchMu.Lock()
 	defer c.batchMu.Unlock()
 	if acc, ok := c.chatBatches[ref]; ok {
+		acc.frames = append(acc.frames, f)
+	}
+}
+
+// pushChatStack records a newly opened chathistory batch as the
+// innermost nesting parent; popChatStack drops it on close.
+func (c *conn) pushChatStack(ref string) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	c.chatStack = append(c.chatStack, ref)
+}
+
+func (c *conn) popChatStack(ref string) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if n := len(c.chatStack); n > 0 && c.chatStack[n-1] == ref {
+		c.chatStack = c.chatStack[:n-1]
+	}
+}
+
+// peekChatStack returns the innermost open chathistory batch.
+func (c *conn) peekChatStack() (string, bool) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if len(c.chatStack) == 0 {
+		return "", false
+	}
+	return c.chatStack[len(c.chatStack)-1], true
+}
+
+// openLineBatch registers a draft/multiline batch reference.
+func (c *conn) openLineBatch(ref string, acc *lineBatch) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if c.lineBatches == nil {
+		c.lineBatches = make(map[string]*lineBatch)
+	}
+	c.lineBatches[ref] = acc
+}
+
+// closeLineBatch unregisters a multiline batch reference and returns its
+// accumulator.
+func (c *conn) closeLineBatch(ref string) *lineBatch {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	acc := c.lineBatches[ref]
+	delete(c.lineBatches, ref)
+	return acc
+}
+
+// lineBatchActive reports whether a multiline batch reference is being
+// accumulated.
+func (c *conn) lineBatchActive(ref string) bool {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	_, ok := c.lineBatches[ref]
+	return ok
+}
+
+// appendLineFrame adds one frame to a multiline batch reference.
+func (c *conn) appendLineFrame(ref string, f lineFrame) {
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if acc, ok := c.lineBatches[ref]; ok {
 		acc.frames = append(acc.frames, f)
 	}
 }
@@ -442,6 +519,16 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			"server-time":             nil,
 			"batch":                   nil,
 			"draft/chathistory":       nil,
+			// message-tags: girc strips tags from OUTGOING events unless
+			// this cap is on - the draft/multiline batch frames below
+			// carry the @batch reference tag client-to-server.
+			"message-tags": nil,
+			// draft/multiline: the composer's shift+enter. With the cap
+			// the upstream, multi-line bodies travel as one batch and
+			// come back joined; without it they degrade to per-line
+			// PRIVMSGs (see sendLines).
+			"draft/multiline": nil,
+			"multiline":       nil,
 			// Push-based presence: AWAY/BACK broadcasts instead of WHO
 			// polling - including the echo of our own AWAY, which is what
 			// flips the member sidebar when the status picker changes.
@@ -709,6 +796,11 @@ func (m *Manager) registerHandlers(c *conn) {
 		if m.inChatBatch(c, e) {
 			return
 		}
+		// Live draft/multiline frames likewise: the batch close joins
+		// them into the one message they are.
+		if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.lineBatchActive(ref) {
+			return
+		}
 		// girc already filters echoes natively: events whose source equals
 		// the CURRENT nick (GetID, i.e. post-collision) are flagged Echo and
 		// never reach command handlers (girc conn.go/handler.go). Do NOT
@@ -737,9 +829,15 @@ func (m *Manager) registerHandlers(c *conn) {
 				if cap == "draft/chathistory" || cap == "chathistory" {
 					c.histCapUp.Store(true)
 				}
+				if isMultilineCap(cap) {
+					c.multilineCapUp.Store(true)
+				}
 			}
 		}
 		if e.Command == "BATCH" {
+			if m.multilineBatchControl(c, e) {
+				return
+			}
 			m.chatBatchControl(c, e)
 			return
 		}
@@ -791,9 +889,15 @@ func (m *Manager) registerHandlers(c *conn) {
 			return
 		}
 		if e.Command == "PRIVMSG" || e.Command == "NOTICE" {
-			if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.chatBatchActive(ref) {
-				m.chatBatchFrame(c, e, ref)
-				return
+			if ref, ok := e.Tags.Get("batch"); ok && ref != "" {
+				if c.lineBatchActive(ref) {
+					m.lineBatchFrame(c, e, ref)
+					return
+				}
+				if c.chatBatchActive(ref) {
+					m.chatBatchFrame(c, e, ref)
+					return
+				}
 			}
 		}
 		if !e.Echo || (e.Command != "PRIVMSG" && e.Command != "NOTICE") || len(e.Params) == 0 {
@@ -1775,7 +1879,7 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, chan
 	if typingAllowed(client) {
 		sendTypingTag(client, nick, "done")
 	}
-	client.Cmd.Message(nick, content)
+	m.sendLines(c, client, nick, content)
 	return nil
 }
 
@@ -1857,7 +1961,7 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 	if typingAllowed(client) {
 		sendTypingTag(client, channel, "done")
 	}
-	client.Cmd.Message(channel, content)
+	m.sendLines(c, client, channel, content)
 	return nil
 }
 
