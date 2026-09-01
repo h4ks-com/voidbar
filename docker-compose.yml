@@ -1,14 +1,6 @@
-# docker-compose for Voidbar (backend only).
-#
-#   docker compose build
-#   docker compose up
-#
-# Then point a Discord client (e.g. an Android build repackaged with
-# discord-apk-patcher) at http://127.0.0.1:18084/.
-
-services:
   voidbar:
-    build: .
+  #  build: .
+    image: ghcr.io/h4ks-com/voidbar:latest
     ports:
       - "127.0.0.1:18084:8080"
     environment:
