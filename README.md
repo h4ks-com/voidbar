@@ -403,6 +403,11 @@ with), guild discovery.
 
 ## Known issues / troubleshooting
 
+- **Peer avatars are nick-scoped.** IRC metadata attaches to the services
+  account, but every Discord-side identity in voidbar is the nick (the
+  author-id seed). A user switching nicks starts with a blank avatar
+  until they set (or change) one from the new nick — eris does not
+  re-push current values on JOIN (the spec makes it a SHOULD).
 - **Remote-auth QR** (`/remote-auth`) is stubbed; the client hardcodes
   `wss:` so on an http instance you'll see periodic WS errors in the
   client logs. Non-fatal, login by email/password works.

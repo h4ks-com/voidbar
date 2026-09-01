@@ -25,7 +25,13 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logLevel := slog.LevelInfo
+	if v := os.Getenv("VOIDBAR_LOG_LEVEL"); v != "" {
+		if err := logLevel.UnmarshalText([]byte(v)); err != nil {
+			logLevel = slog.LevelInfo
+		}
+	}
+	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
