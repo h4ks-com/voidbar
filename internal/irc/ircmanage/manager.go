@@ -1303,7 +1303,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// Persist into the channel's replay buffer (bouncer semantics: history
 	// survives client reconnects and server restarts). The live relay must
 	// not depend on storage health, so failures are logged, not fatal.
-	if err := m.store.AppendMessage(storage.BufferedMessage{
+	row := storage.BufferedMessage{
 		ID:          msgID,
 		ChannelID:   channelID,
 		AuthorID:    "irc:" + author,
@@ -1313,7 +1313,11 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		Type:        0,
 		MsgID:       msgid,
 		Attachments: linkAtts,
-	}); err != nil {
+	}
+	for _, u := range mentioned {
+		row.Mentions = append(row.Mentions, storage.MentionRef{Nick: u.nick, ID: u.id})
+	}
+	if err := m.store.AppendMessage(row); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", channelID, "msg_id", msgID)
 	} else {
 		// Link previews ride behind the message: fetch + MESSAGE_UPDATE.

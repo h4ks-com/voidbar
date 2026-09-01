@@ -1043,6 +1043,25 @@ func (s *Service) MemberListPayload(userID, guildID, channelID string) any {
 	}
 }
 
+// UpsertMentionPeers fans the GUILD_MEMBER_UPDATE upserts for peers
+// mentioned in history the client is fetching (pills render
+// @invalid-user for users the client never saw this session).
+func (s *Service) UpsertMentionPeers(userID, networkID string, nicks []string) {
+	if s.manager == nil {
+		return
+	}
+	s.manager.UpsertPeersByNick(userID, networkID, nicks)
+}
+
+// ChannelNetworkID resolves a channel row to its network.
+func (s *Service) ChannelNetworkID(channelID string) string {
+	ch, err := s.store.GetChannel(channelID)
+	if err != nil {
+		return ""
+	}
+	return ch.NetworkID
+}
+
 // PeerInfoByAuthor resolves a hashed IRC author id to live peer facts
 // (nick, services account, user@host); see the manager for semantics.
 func (s *Service) PeerInfoByAuthor(userID, authorID string) (string, string, string, bool) {
@@ -1109,18 +1128,22 @@ func memberListItem(cm ircmanage.ChannelMember, uid, joinedAt, mode string) map[
 			// strict web-client schemas require member.id (and the member
 			// list React keys derive from it).
 			"id": uid,
-		"user": map[string]any{
-			"id":            uid,
-			"username":      cm.Nick,
-			"discriminator": "0",
-			"bot":           false,
-			// Peer facts ride the user object itself: the sheet renders
-			// the store user's bio without needing the profile endpoint
-			// (the profile merge only fires for guild-member bios).
-			"bio": peerBioValue(cm.BioText()),
-		},
-		"roles":     ircRoleIDsFor(mode),
-		"joined_at": joinedAt,
+			"user": map[string]any{
+				"id":            uid,
+				"username":      cm.Nick,
+				"discriminator": "0",
+				"bot":           false,
+				// Peer facts ride the user object itself: the sheet renders
+				// the store user's bio without needing the profile endpoint
+				// (the profile merge only fires for guild-member bios).
+				"bio": peerBioValue(cm.BioText()),
+			},
+			// The member-level bio is the sheet's PRIMARY About-me source
+			// in a guild context (WidgetUserSheetViewModel reads it before
+			// the user bio) - the facts live here too.
+			"bio":       peerBioValue(cm.BioText()),
+			"roles":     ircRoleIDsFor(mode),
+			"joined_at": joinedAt,
 			"presence": map[string]any{
 				"user":   map[string]any{"id": uid},
 				"status": status,
@@ -1337,6 +1360,7 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 		}
 		members = append(members, map[string]any{
 			"user":      user,
+			"bio":       peerBioValue(r.cm.BioText()),
 			"roles":     ircRoleIDsFor(r.cm.Mode),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
@@ -1506,6 +1530,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"bot":           false,
 				"bio":           peerBioValue(cm.BioText()),
 			},
+			"bio":       peerBioValue(cm.BioText()),
 			"roles":     ircRoleIDsFor(cm.Mode),
 			"joined_at": m.JoinedAt.Format(time.RFC3339),
 		})

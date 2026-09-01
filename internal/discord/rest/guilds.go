@@ -575,8 +575,26 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 		}
 	}
 	out := make([]any, 0, len(buffered))
+	upsertNicks := map[string]bool{}
 	for _, m := range buffered {
 		payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce)
+		// Mentioned peers ride along: the mentions array rebuilds from the
+		// stored refs (bouncer members keep their real ids), and the users
+		// get GUILD_MEMBER_UPDATE upserts so pills don't render
+		// @invalid-user for peers the client never saw this session.
+		if len(m.Mentions) > 0 {
+			mentioned := make([]any, 0, len(m.Mentions))
+			for _, mu := range m.Mentions {
+				mentioned = append(mentioned, map[string]any{
+					"id":            mu.ID,
+					"username":      mu.Nick,
+					"discriminator": "0",
+					"bot":           false,
+				})
+				upsertNicks[mu.Nick] = true
+			}
+			payload["mentions"] = mentioned
+		}
 		// Reaction pills come from the persisted state on the message
 		// (updated on every live change), so history is restart-proof.
 		if len(m.Reactions) > 0 {
@@ -605,6 +623,13 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 			payload["embeds"] = m.Embeds
 		}
 		out = append(out, payload)
+	}
+	if len(upsertNicks) > 0 {
+		nicks := make([]string, 0, len(upsertNicks))
+		for nick := range upsertNicks {
+			nicks = append(nicks, nick)
+		}
+		s.net.UpsertMentionPeers(u.ID, s.net.ChannelNetworkID(r.PathValue("channel")), nicks)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

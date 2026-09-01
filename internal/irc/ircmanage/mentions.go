@@ -1,9 +1,11 @@
 package ircmanage
 
 import (
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/h4ks-com/voidbar/internal/discord/model"
 )
@@ -217,10 +219,37 @@ func cutChannelMarker(s string) (string, int, bool) {
 	return rest[:end], len(s) - len(rest) + end + 1, true
 }
 
+// mentionURLRe spans a URL-ish token from its scheme (or www.) to the
+// next whitespace.
+var mentionURLRe = regexp.MustCompile(`(?i)\b(?:https?://|www\.)\S+`)
+
+// urlMask marks runes that sit inside a URL. Nick matching must not
+// apply there: hosts and paths contain nick-shaped segments
+// (.../uploads/<nick>/... must not markerize).
+func urlMask(runes []rune) []bool {
+	mask := make([]bool, len(runes))
+	runeByte := make([]int, len(runes))
+	byteIdx := 0
+	for i, r := range runes {
+		runeByte[i] = byteIdx
+		byteIdx += utf8.RuneLen(r)
+	}
+	for _, m := range mentionURLRe.FindAllStringIndex(string(runes), -1) {
+		lo, hi := m[0], m[1]
+		for i := range runes {
+			if runeByte[i] >= lo && runeByte[i] < hi {
+				mask[i] = true
+			}
+		}
+	}
+	return mask
+}
+
 // Discordize scans IRC text for bare nicks (an optional leading @ is
 // swallowed - some people write @nick) and #channel references, rewrites
 // them into Discord markers, and returns the mentioned users/channels so
-// callers can build the payload arrays and upsert unknown peers.
+// callers can build the payload arrays and upsert unknown peers. Nick
+// matches inside URLs are left alone.
 func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (string, []mentionUser, []mentionChannel) {
 	users := m.mentionUsers(userID, networkID, ircTarget)
 	chans := m.mentionChannels(userID, networkID)
@@ -228,6 +257,7 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 		return content, nil, nil
 	}
 	runes := []rune(content)
+	mask := urlMask(runes)
 	var b strings.Builder
 	var mentionedUsers []mentionUser
 	var mentionedChans []mentionChannel
@@ -240,23 +270,27 @@ func (m *Manager) Discordize(userID, networkID, ircTarget, content string) (stri
 		if runes[at] == '@' && at+1 < len(runes) {
 			at++
 		}
-		if u, width := matchNickAt(runes, at, users); width > 0 {
-			b.WriteString("<@" + u.id + ">")
-			if !seenUser[u.id] {
-				seenUser[u.id] = true
-				mentionedUsers = append(mentionedUsers, u)
+		if !mask[at] {
+			if u, width := matchNickAt(runes, at, users); width > 0 {
+				b.WriteString("<@" + u.id + ">")
+				if !seenUser[u.id] {
+					seenUser[u.id] = true
+					mentionedUsers = append(mentionedUsers, u)
+				}
+				i = at + width
+				continue
 			}
-			i = at + width
-			continue
 		}
-		if c, width := matchChannelAt(runes, i, chans); width > 0 {
-			b.WriteString("<#" + c.id + ">")
-			if !seenChan[c.id] {
-				seenChan[c.id] = true
-				mentionedChans = append(mentionedChans, c)
+		if !mask[i] {
+			if c, width := matchChannelAt(runes, i, chans); width > 0 {
+				b.WriteString("<#" + c.id + ">")
+				if !seenChan[c.id] {
+					seenChan[c.id] = true
+					mentionedChans = append(mentionedChans, c)
+				}
+				i += width
+				continue
 			}
-			i += width
-			continue
 		}
 		b.WriteRune(runes[i])
 		i++
@@ -420,16 +454,50 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 		"discriminator": "0",
 		"bot":           false,
 	}
-	if bio := c.peerBioText(nick); bio != "" {
+	bio := c.peerBioText(nick)
+	if bio != "" {
 		user["bio"] = bio
 	}
 	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{
 		"guild_id":  c.networkID,
 		"user":      user,
+		"bio":       bioIfSet(bio),
 		"nick":      nil,
 		"roles":     roles,
 		"joined_at": joinedAt,
 	})
+}
+
+// bioIfSet keeps member-level bio absent when unknown (a null would
+// render an empty About-me section).
+func bioIfSet(bio string) any {
+	if bio == "" {
+		return nil
+	}
+	return bio
+}
+
+// UpsertPeersByNick pushes the GUILD_MEMBER_UPDATE upserts for nicks
+// resolved outside the live relay (history fetches): pills for peers the
+// client never saw this session render @invalid-user otherwise.
+func (m *Manager) UpsertPeersByNick(userID, networkID string, nicks []string) {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok || c == nil {
+		return
+	}
+	mem, err := m.store.GetMembership(networkID, userID)
+	if err != nil {
+		return
+	}
+	joinedAt := mem.JoinedAt.Format(time.RFC3339)
+	for _, nick := range nicks {
+		if nick == "" {
+			continue
+		}
+		m.dispatchPeerMember(c, nick, "", joinedAt)
+	}
 }
 
 // matchNickAt returns the candidate nick matching at position i (must

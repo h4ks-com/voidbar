@@ -16,6 +16,12 @@ const MsgBufferCap = 500
 // BufferedMessage is the persisted form of a relayed message. It stores the
 // fields the Discord payload shape needs; everything else is rebuilt at
 // read time so the wire format can evolve without migrations.
+// MentionRef is one mentioned user of a buffered message.
+type MentionRef struct {
+	Nick string // live IRC nick at send time
+	ID   string // Discord user id the marker used
+}
+
 type BufferedMessage struct {
 	ID         string `json:"id"`
 	ChannelID  string `json:"channel_id"`
@@ -37,6 +43,11 @@ type BufferedMessage struct {
 	// them identically to live dispatches.
 	Attachments []any `json:"attachments,omitempty"`
 	Embeds      []any `json:"embeds,omitempty"`
+	// Mentions holds the markerized message's mentioned users (nick for
+	// fact lookups, the exact Discord id the pill used), so history
+	// fetches can rebuild the mentions array and upsert peer users the
+	// client may not have seen this session.
+	Mentions []MentionRef `json:"mention_refs,omitempty"`
 }
 
 // padID renders a message id so that lexicographic order matches id order:
