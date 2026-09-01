@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -162,6 +163,11 @@ type conn struct {
 	// joins the frames into one message.
 	lineBatches map[string]*lineBatch
 
+	// sendJobs serializes every outgoing PRIVMSG batch behind one
+	// worker: girc's rate limiter paces writes (~1s/event), which must
+	// never block the REST path, and FIFO order across sends must hold.
+	sendJobs chan sendJob
+
 	// Scroll backfill (CHATHISTORY BEFORE) state. pageCh/pageTarget/
 	// pageBatch/pageIssued are guarded by batchMu (the event loop hands
 	// completed batches off through them); pageMu serializes asks.
@@ -180,12 +186,28 @@ type conn struct {
 	histCapUp atomic.Bool
 
 	// multilineCapUp is the sticky "upstream ACKed draft/multiline"
-	// flag, ordered on the event loop for the same reason.
-	multilineCapUp atomic.Bool
+	// flag, ordered on the event loop for the same reason. The
+	// advertised max-bytes/max-lines budget rides along (atomic ints;
+	// defaults until an LS line carries values).
+	multilineCapUp  atomic.Bool
+	multilineBytes  atomic.Int64
+	multilineLines  atomic.Int64
 }
 
-func (c *conn) histCap() bool       { return c.histCapUp.Load() }
-func (c *conn) multilineCap() bool  { return c.multilineCapUp.Load() }
+func (c *conn) histCap() bool      { return c.histCapUp.Load() }
+func (c *conn) multilineCap() bool { return c.multilineCapUp.Load() }
+
+// multilineLimits returns the negotiated batch budget (bytes, lines).
+func (c *conn) multilineLimits() (int, int) {
+	b, l := int(c.multilineBytes.Load()), int(c.multilineLines.Load())
+	if b <= 0 {
+		b = 4096
+	}
+	if l <= 0 {
+		l = 24
+	}
+	return b, l
+}
 
 // msgRef is the Discord identity of one bridged IRC message.
 type msgRef struct {
@@ -571,8 +593,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		renames:      make(map[string]string),
 		reactions:    make(map[string]map[string]map[string]bool),
 		chatBatches:  make(map[string]*chatBatch),
+		sendJobs:     make(chan sendJob, 64),
 	}
 	m.conns[k] = c
+	go m.runSendWorker(c)
 
 	// Supervisor: owns the (user, network) link for the lifetime of the
 	// membership. Bouncer semantics demand the upstream connection outlives
@@ -688,6 +712,7 @@ func (m *Manager) Drop(userID, networkID string) {
 	if ok {
 		delete(m.conns, k)
 		close(c.cancel)
+		close(c.sendJobs)
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -819,6 +844,27 @@ func (m *Manager) registerHandlers(c *conn) {
 	// control frames and the batched history PRIVMSGs (own past messages
 	// included - girc flags those Echo too, so they can only be seen here).
 	c.client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, e girc.Event) {
+		if e.Command == "CAP" && len(e.Params) >= 3 && e.Params[1] == "LS" {
+			// draft/multiline advertises its budget as a cap value on LS
+			// (max-bytes REQUIRED, max-lines RECOMMENDED); ACK lines echo
+			// our bare REQ back, so LS is the only place to read it.
+			for _, tok := range strings.Fields(e.Params[2]) {
+				if name, val, ok := strings.Cut(tok, "="); ok && isMultilineCap(name) {
+					for _, kv := range strings.Split(val, ",") {
+						if k, v, ok := strings.Cut(kv, "="); ok {
+							if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+								switch k {
+								case "max-bytes":
+									c.multilineBytes.Store(n)
+								case "max-lines":
+									c.multilineLines.Store(n)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		if e.Command == "CAP" && len(e.Params) >= 3 && e.Params[1] == "ACK" {
 			// Sticky chathistory marker, ordered on this event loop
 			// (see conn.histCapUp): the ACK line always precedes the
@@ -1874,12 +1920,10 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, chan
 	if msgID != "" {
 		c.pushPendingSend(nick, msgRef{Snowflake: msgID, ChannelID: channelID})
 	}
-	// Tell the other side typing is over (draft/typing "done"), then the
-	// message itself.
-	if typingAllowed(client) {
-		sendTypingTag(client, nick, "done")
-	}
-	m.sendLines(c, client, nick, content)
+	// The typing-done TAGMSG and the message itself go through the
+	// connection's ordered send queue: rate-limiter pacing must stay off
+	// the caller's path (a big paste is ~1s of girc delay per line).
+	c.enqueueSend(nick, content, true)
 	return nil
 }
 
@@ -1956,12 +2000,8 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 	if msgID != "" {
 		c.pushPendingSend(channel, msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: networkID})
 	}
-	// Tell the other side typing is over (draft/typing "done"), then the
-	// message itself.
-	if typingAllowed(client) {
-		sendTypingTag(client, channel, "done")
-	}
-	m.sendLines(c, client, channel, content)
+	// See SendQuery: the ordered queue owns the wire writes.
+	c.enqueueSend(channel, content, false)
 	return nil
 }
 

@@ -72,15 +72,20 @@ Covered:
   collision-suffixed, is shown as the author)
 - **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
   render in the client; nick collisions don't eat foreign messages
-- **Multiline**: the composer's shift+enter travels as ONE
-  `draft/multiline` batch upstream (blank inner lines intact, trailing
-  blank lines trimmed) and comes back joined - one message, one msgid,
-  one reaction anchor. Upstreams without the cap degrade to one
-  PRIVMSG per non-empty line (blank lines cannot survive the wire
-  there). Incoming batches - live or nested inside a chathistory page -
-  join into a single message with embedded newlines; `message-tags` is
-  requested so the batch frames carry their `@batch` reference
-  client-to-server.
+- **Multiline**: the composer's shift+enter travels as `draft/multiline`
+  batch(es) upstream (blank inner lines intact, trailing blanks trimmed)
+  and comes back joined - one message, one msgid, one reaction anchor.
+  The advertised `max-bytes`/`max-lines` budget (read off the CAP LS
+  value) splits bigger pastes into several batches, and lines too long
+  for one frame are word-split into `draft/multiline-concat` chunks
+  that re-join without a newline (both directions). Upstreams without
+  the cap degrade to one PRIVMSG per non-empty line (blank lines
+  cannot survive the wire there). Incoming batches - live or nested
+  inside a chathistory page - join into a single message with embedded
+  newlines; `message-tags` is requested so the batch frames carry
+  their `@batch` reference client-to-server. Wire writes go through a
+  per-connection ordered queue: girc's rate limiter (~1s/event) paces
+  batches without ever blocking the REST send path.
 - **Replay buffer**: the last 500 messages per channel are persisted
   (Badger) and served over `GET /channels/:id/messages` with Discord
   pagination (`limit`/`before`/`after`); own sends are buffered too, and

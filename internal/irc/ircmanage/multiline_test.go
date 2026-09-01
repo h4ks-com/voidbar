@@ -2,6 +2,7 @@ package ircmanage
 
 import (
 	"bufio"
+	"strconv"
 	"io"
 	"log/slog"
 	"net"
@@ -117,7 +118,7 @@ func serveMultiline(t *testing.T, ln net.Listener, tap *wireTap, multilineACK bo
 			tap.record(line)
 			switch {
 			case strings.HasPrefix(line, "CAP LS"):
-				w("CAP * LS :batch echo-message server-time message-tags draft/chathistory draft/multiline\r\n")
+				w(lsLine() + "\r\n")
 			case strings.HasPrefix(line, "CAP REQ"):
 				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
 				ack, nak := "", ""
@@ -324,6 +325,180 @@ func TestMultilineIncomingLive(t *testing.T) {
 	if !found {
 		t.Fatalf("joined multiline message missing; buffer: %+v", msgs)
 	}
+}
+
+// TestPlanMultiline pins the batch packing rules: line limits split into
+// several batches, byte budgets are respected, and long lines are
+// word-split into concat-tagged chunks that re-join without a newline.
+func TestPlanMultiline(t *testing.T) {
+	// Line-limit split: 30 lines with max-lines 24 -> 24 + 6.
+	batches := planMultiline(mklines(30), 24, 4096)
+	if len(batches) != 2 || len(batches[0]) != 24 || len(batches[1]) != 6 {
+		t.Fatalf("max-lines split: %d batches %v lens", len(batches), lensOf(batches))
+	}
+	// Byte budget: with 10 bytes allowed, two 4-byte lines plus their
+	// joiner fit (9), the third does not.
+	batches = planMultiline([]string{"aaaa", "bbbb", "cccc"}, 24, 10)
+	if len(batches) != 2 {
+		t.Fatalf("byte split: %d batches", len(batches))
+	}
+	// Long line: word-split with trailing space kept on the earlier
+	// chunk, concat on every chunk after the first.
+	long := "word " + strings.Repeat("x", 400) + " tail"
+	batches = planMultiline([]string{long}, 24, 65536)
+	if len(batches) != 1 {
+		t.Fatalf("one logical line must stay one batch: %d", len(batches))
+	}
+	var plain, concat int
+	for _, f := range batches[0] {
+		if f.concat {
+			concat++
+			continue
+		}
+		plain++
+		if len(f.text) > frameBudget {
+			t.Fatalf("frame over budget: %d", len(f.text))
+		}
+	}
+	if plain != 1 || concat == 0 {
+		t.Fatalf("split shape: plain=%d concat=%d", plain, concat)
+	}
+	var joined strings.Builder
+	for i, f := range batches[0] {
+		if i > 0 && !f.concat {
+			joined.WriteByte('\n')
+		}
+		joined.WriteString(f.text)
+	}
+	if joined.String() != long {
+		t.Fatalf("concat re-join mismatch:\n%q\n%q", joined.String(), long)
+	}
+}
+
+func mklines(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "line " + strconv.Itoa(i)
+	}
+	return out
+}
+
+func lensOf(batches [][]outFrame) []int {
+	out := make([]int, len(batches))
+	for i, b := range batches {
+		out[i] = len(b)
+	}
+	return out
+}
+
+// TestMultilineSendRespectsLimits: the advertised max-lines value splits
+// a longer paste into several batches on the wire.
+func TestMultilineSendRespectsLimits(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	fakeLSLine = "CAP * LS :batch echo-message server-time message-tags draft/chathistory draft/multiline=max-bytes=4096,max-lines=2"
+	t.Cleanup(func() { fakeLSLine = "" })
+	fx := newMultilineFixture(t, ln, true, nil)
+	waitTap(t, fx.tap, "JOIN #test", 1)
+
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "one\ntwo\nthree", "sf1", "ch1"); err != nil {
+		t.Fatal(err)
+	}
+	// Two batches: (one, two) and (three).
+	waitTapCount(t, fx.tap, "BATCH +vb", 2)
+	waitTapCount(t, fx.tap, "BATCH -vb", 2)
+	deadline := time.Now().Add(10 * time.Second)
+	refOne, refThree := "", ""
+	for time.Now().Before(deadline) && (refOne == "" || refThree == "") {
+		refOne, refThree = batchRefOf(fx.tap, "PRIVMSG #test one"), batchRefOf(fx.tap, "PRIVMSG #test three")
+		time.Sleep(50 * time.Millisecond)
+	}
+	if refOne == "" || refThree == "" {
+		t.Fatalf("frames missing: one=%q three=%q\n%s", refOne, refThree, strings.Join(fx.tap.lines, "\n"))
+	}
+	if refOne == refThree {
+		t.Fatalf("max-lines=2 must split the third line into a second batch (both %q):\n%s", refOne, strings.Join(fx.tap.lines, "\n"))
+	}
+	if refTwo := batchRefOf(fx.tap, "PRIVMSG #test two"); refTwo != refOne {
+		t.Fatalf("second line must share the first batch: %q vs %q\n%s", refTwo, refOne, strings.Join(fx.tap.lines, "\n"))
+	}
+}
+
+// batchRefOf extracts the @batch reference of the wire frame containing
+// the given substring (empty when absent).
+func batchRefOf(tap *wireTap, substr string) string {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	for _, l := range tap.lines {
+		if !strings.Contains(l, substr) || !strings.HasPrefix(l, "@batch=") {
+			continue
+		}
+		tag := strings.TrimPrefix(l, "@batch=")
+		if i := strings.IndexByte(tag, ';'); i >= 0 {
+			tag = tag[:i]
+		}
+		if i := strings.IndexByte(tag, ' '); i >= 0 {
+			tag = tag[:i]
+		}
+		return tag
+	}
+	return ""
+}
+
+// TestMultilineIncomingConcat: concat-tagged frames glue into one line.
+func TestMultilineIncomingConcat(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	fx := newMultilineFixture(t, ln, true, func(w func(string), nick, ch string) {
+		w("BATCH +p1 draft/multiline " + ch + "\r\n")
+		w("@batch=p1 :bob!b@h PRIVMSG " + ch + " :how is \r\n")
+		w("@batch=p1;draft/multiline-concat :bob!b@h PRIVMSG " + ch + " :everyone?\r\n")
+		w("@batch=p1 :bob!b@h PRIVMSG " + ch + " :next line\r\n")
+		w("BATCH -p1\r\n")
+	})
+	waitForCount(t, fx.sink, "irc message relayed", 1)
+
+	ch := fx.testChannel(t)
+	msgs := fx.store.ChannelMessages(ch.ID, "", "", 50)
+	found := false
+	for _, m := range msgs {
+		if m.AuthorName == "bob" && m.Content == "how is everyone?\nnext line" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("concat join missing; buffer: %+v", msgs)
+	}
+}
+
+// fakeLSLine lets a test override the server's CAP LS line before the
+// client connects (limit-value parsing tests). Tests in this package run
+// sequentially.
+var fakeLSLine string
+
+func lsLine() string {
+	if fakeLSLine != "" {
+		return fakeLSLine
+	}
+	return "CAP * LS :batch echo-message server-time message-tags draft/chathistory draft/multiline"
+}
+
+func waitTapCount(t *testing.T, tap *wireTap, substr string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if tap.count(substr) >= want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d %q; got %d:\n%s", want, substr, tap.count(substr), strings.Join(tap.lines, "\n"))
 }
 
 // TestMultilineIncomingHistory: a multiline batch nested in a chathistory
