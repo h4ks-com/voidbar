@@ -85,9 +85,12 @@ func (s *Server) handleAuthFingerprint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUserProfile answers the Android client's profile probe. IRC
-// peers resolve to their live facts (nick as the display name, services
-// account and host in the bio); everything unknown stays a calm
+// handleUserProfile answers the client's profile probe with the
+// documented response body: everything nests under `user` (partial user
+// object carrying an extra bio key) and `user_profile` (profile
+// metadata) - top-level username/bio fields are ignored by the client.
+// IRC peers resolve to their live facts (nick as the display name,
+// services account and host in the bio); unknown ids stay a calm
 // minimal profile so the sheet never spins.
 func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	id := r.PathValue("id")
@@ -110,27 +113,27 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 			bio = strings.Join(lines, "\n")
 		}
 	}
-	profile := map[string]any{
-		"id":                  id,
-		"username":            username,
-		"discriminator":       "0",
-		"avatar":              nil,
-		"bot":                 false,
-		"public_flags":        0,
-		"flags":               0,
-		"premium_type":        0,
-		"bio":                 bio,
-		"connected_accounts":  []any{},
-		"mutual_guilds":       []any{},
-		"mutual_friends_count": 0,
-		"user_profile": map[string]any{
-			"bio": bio,
-		},
+	user := map[string]any{
+		"id":            id,
+		"username":      username,
+		"discriminator": "0",
+		"avatar":        nil,
+		"bot":           false,
+		"public_flags":  0,
+		"flags":         0,
+		"premium_type":  0,
+		"bio":           bio,
 	}
 	if globalName != "" {
-		profile["global_name"] = globalName
+		user["global_name"] = globalName
 	}
-	writeJSON(w, http.StatusOK, profile)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":   user,
+		"user_profile": map[string]any{"bio": bio, "pronouns": ""},
+		"connected_accounts":   []any{},
+		"mutual_guilds":        []any{},
+		"mutual_friends_count": 0,
+	})
 }
 
 // handleLocationMetadata answers the login screen's geo/consent probe with
