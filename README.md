@@ -253,6 +253,15 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
   pinned replay-buffer messages oldest-first, and pin flips fan
   `MESSAGE_UPDATE` (partial) + `CHANNEL_PINS_UPDATE`. Pins whose
   message aged out of the buffer stay stored but drop from the list.
+  Pinning drops the "{user} pinned a message" system row (type 6) into
+  the channel, live and replayed.
+- **Network rename**: the guild settings' Overview `PATCH /guilds/:id`
+  renames the network (1-100 chars); GUILD_UPDATE fans the full guild
+  payload so every session re-renders the rail. @everyone carries
+  MANAGE_GUILD so the client unlocks the rename field.
+- **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`
+  — who reacted (tap on a pill): members as their real user rows, IRC
+  peers resolved from live facts.
 - **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
   (with `done` on send), IRC typing -> `TYPING_START`. Works on any
   `message-tags` server (no capability advertisement needed; honors
@@ -336,15 +345,15 @@ Env vars can also live in a TOML file (`--config path`); keys mirror them
 
 ## Roadmap
 
-### Client features (local, no IRC counterpart needed)
+### Client features
 
-- **Network rename**: `PATCH /guilds/:id` — rename the network record
-  from the client's guild settings.
-- **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`
-  — who reacted (tap on a reaction); add/remove for self already work.
-- **Avatars**: user avatar upload through the existing attachment
-  pipeline, served in the READY/user payloads.
-- **Network icon**: guild icon upload → CDN, shown in the guild list.
+- **Avatars** (IRC counterpart: the `draft/metadata` METADATA extension's
+  avatar key — ergo serves it): user avatar upload through the existing
+  attachment pipeline, bridged over METADATA where the upstream speaks
+  it, served in the READY/user payloads.
+- **Network icon** (IRC counterpart: the `draft/ICON` ISUPPORT token):
+  guild icon upload → CDN, shown in the guild list; read from ISUPPORT
+  where the upstream advertises one.
 - **Multiline**: the composer's newlines split into multiple PRIVMSGs on
   send; incoming `draft/multiline` batches (and chathistory equivalents)
   join into one message.

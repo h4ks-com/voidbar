@@ -1185,6 +1185,68 @@ func (s *Server) handleGuildPreview(w http.ResponseWriter, r *http.Request, u *s
 	})
 }
 
+// handleUpdateGuild implements PATCH /guilds/{guild}: the guild settings'
+// Overview rename. Only the name is honored (everything else about a
+// network comes from the connection); the response mirrors
+// handleGuildDetail so the client's settings screen settles.
+func (s *Server) handleUpdateGuild(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	guildID := r.PathValue("guild")
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	var req struct {
+		Name *string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(*req.Name)
+	if name == "" || len([]rune(name)) > 100 {
+		jsonError(w, http.StatusBadRequest, "Name must be 1-100 characters")
+		return
+	}
+	if _, err := s.net.RenameNetwork(u.ID, guildID, name); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonError(w, http.StatusNotFound, "Unknown Guild")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	s.handleGuildDetail(w, r, u)
+}
+
+// handleReactionReactors answers GET
+// /channels/{channel}/messages/{message}/reactions/{emoji}: who reacted
+// (the tap-on-a-pill sheet). The persisted reaction state maps emoji ->
+// reactor ids; members resolve to their real user rows, IRC peers to
+// live-facts nicks.
+func (s *Server) handleReactionReactors(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.net == nil {
+		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
+		return
+	}
+	channelID, messageID := r.PathValue("channel"), r.PathValue("message")
+	emoji := decodeEmoji(r.PathValue("emoji"))
+	if emoji == "" {
+		jsonError(w, http.StatusBadRequest, "missing emoji")
+		return
+	}
+	m, ok := s.net.MessageByID(channelID, messageID)
+	if !ok {
+		jsonError(w, http.StatusNotFound, "Unknown message")
+		return
+	}
+	reactors := m.Reactions[emoji]
+	out := make([]any, 0, len(reactors))
+	for _, uid := range reactors {
+		out = append(out, s.net.ReactorUserPayload(u.ID, uid))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handleLeaveGuild implements DELETE /users/@me/guilds/{guild} — the
 // client's "Leave server" action. 204 per Discord; the client also reacts
 // to the GUILD_DELETE dispatch, which is what actually clears the rail.

@@ -7,13 +7,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/h4ks-com/voidbar/internal/config"
 	"github.com/h4ks-com/voidbar/internal/core/network"
 	"github.com/h4ks-com/voidbar/internal/discord/auth"
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
@@ -285,6 +288,96 @@ func TestUserNotes(t *testing.T) {
 	rec, list = do(t, h, "GET", "/api/v9/users/@me/notes", token, nil)
 	if _, still := list[target]; still {
 		t.Fatalf("cleared note still listed: %v", list)
+	}
+}
+
+func TestRenameGuild(t *testing.T) {
+	store, h := newServerWithStore(t, "open")
+	token := registerAndLogin(t, h)
+	rec, me := do(t, h, "GET", "/api/v9/users/@me", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me: %d", rec.Code)
+	}
+	uid, _ := me["id"].(string)
+	// Seed a network the user is a member of.
+	net := &storage.Network{ID: "800000000000000000", Name: "OldName", ConnID: "irc.old.example"}
+	if err := store.UpsertNetwork(net); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{NetworkID: net.ID, UserID: uid, Nick: "tester", AutoJoin: []string{"#test"}, JoinedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, out := do(t, h, "PATCH", "/api/v9/guilds/"+net.ID, token, map[string]string{"name": "NewName"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename: %d %v", rec.Code, out)
+	}
+	if out["name"] != "NewName" {
+		t.Fatalf("renamed guild payload: %v", out)
+	}
+	// The rename persists.
+	got, err := store.GetNetwork(net.ID)
+	if err != nil || got.Name != "NewName" {
+		t.Fatalf("persisted name: %v %v", got, err)
+	}
+	// Empty names are rejected.
+	rec, _ = do(t, h, "PATCH", "/api/v9/guilds/"+net.ID, token, map[string]string{"name": "   "})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("blank rename: %d", rec.Code)
+	}
+	// Unknown guild 404s.
+	rec, _ = do(t, h, "PATCH", "/api/v9/guilds/42", token, map[string]string{"name": "X"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown guild rename: %d", rec.Code)
+	}
+}
+
+func TestReactionReactors(t *testing.T) {
+	store, h := newServerWithStore(t, "open")
+	token := registerAndLogin(t, h)
+	rec, me := do(t, h, "GET", "/api/v9/users/@me", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me: %d", rec.Code)
+	}
+	uid, _ := me["id"].(string)
+	channelID := "710000000000000000"
+
+	// Seed a message with a reaction from us and an IRC peer hash.
+	peerID := model.IrcAuthorID("irc:bob")
+	if err := store.AppendMessage(storage.BufferedMessage{
+		ID: "910000000000000000", ChannelID: channelID, Content: "react to me",
+		AuthorID: "irc:bob", AuthorName: "bob",
+		Timestamp: "2026-01-01T10:00:00Z", Type: 0,
+		Reactions: map[string][]string{"👍": {uid, peerID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	path := "/api/v9/channels/" + channelID + "/messages/910000000000000000/reactions/" + url.PathEscape("👍")
+	rec, listAny := doAny(t, h, "GET", path, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reactors: %d", rec.Code)
+	}
+	list, ok := listAny.([]any)
+	if !ok || len(list) != 2 {
+		t.Fatalf("expected 2 reactors, got %v", listAny)
+	}
+	names := map[string]bool{}
+	for _, rowAny := range list {
+		row, _ := rowAny.(map[string]any)
+		if name, _ := row["username"].(string); name != "" {
+			names[name] = true
+		}
+	}
+	// The own member resolves to the real username.
+	if !names["doesnm"] {
+		t.Fatalf("own reactor missing: %v", list)
+	}
+
+	// Unknown message 404s.
+	rec, _ = do(t, h, "GET", "/api/v9/channels/"+channelID+"/messages/42/reactions/"+url.PathEscape("👍"), token, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown message reactors: %d", rec.Code)
 	}
 }
 

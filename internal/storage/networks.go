@@ -401,6 +401,27 @@ func (s *Storage) UpsertNetwork(n *Network) error {
 	})
 }
 
+// RenameNetwork updates a network's display name (the guild name the
+// client shows and edits).
+func (s *Storage) RenameNetwork(id, name string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(networkKey(id))
+		if err != nil {
+			return err
+		}
+		var n Network
+		if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &n) }); err != nil {
+			return err
+		}
+		n.Name = name
+		b, err := json.Marshal(n)
+		if err != nil {
+			return err
+		}
+		return txn.Set(networkKey(id), b)
+	})
+}
+
 // NetworkByConnID resolves a network from its canonical connection-string id.
 func (s *Storage) NetworkByConnID(connID string) (*Network, error) {
 	var guildID []byte

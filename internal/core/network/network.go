@@ -312,6 +312,48 @@ func (s *Service) dispatchPinSystemMessage(userID, channelID, messageID string) 
 	})
 }
 
+// RenameNetwork renames a network from the client's guild settings and
+// fans GUILD_UPDATE (the full guild payload, same shape as
+// GUILD_CREATE) so every session re-renders the rail.
+func (s *Service) RenameNetwork(userID, guildID, name string) (*storage.Network, error) {
+	m, err := s.store.GetMembership(guildID, userID)
+	if err != nil {
+		return nil, err
+	}
+	net, err := s.store.GetNetwork(guildID)
+	if err != nil {
+		return nil, err
+	}
+	net.Name = name
+	if err := s.store.UpsertNetwork(net); err != nil {
+		return nil, err
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(userID, "GUILD_UPDATE", s.buildGuild(m, net))
+	}
+	return net, nil
+}
+
+// ReactorUserPayload shapes one reactors-list entry: a bouncer member's
+// real user row, an IRC peer resolved from live facts, or a calm
+// fallback so the sheet never renders an @invalid-user.
+func (s *Service) ReactorUserPayload(userID, reactorID string) map[string]any {
+	if u, err := s.store.GetUserByID(reactorID); err == nil {
+		return map[string]any{
+			"id": u.ID, "username": u.Username,
+			"discriminator": "0", "bot": false,
+		}
+	}
+	username := "user"
+	if nick, _, _, ok := s.PeerInfoByAuthor(userID, reactorID); ok && nick != "" {
+		username = nick
+	}
+	return map[string]any{
+		"id": reactorID, "username": username,
+		"discriminator": "0", "bot": false,
+	}
+}
+
 // UserSettingsProto returns the persisted serialized settings protobuf for
 // the kind (nil when never written).
 func (s *Service) UserSettingsProto(userID, kind string) []byte {

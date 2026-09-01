@@ -99,7 +99,11 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("POST /api/v9/channels/{channel}/messages/{message}/ack", s.requireAuth(s.handleNoContentAuthed))
 	if net != nil {
 		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))
+		// Guild settings' Overview rename.
+		mux.HandleFunc("PATCH /api/v9/guilds/{guild}", s.requireAuth(s.handleUpdateGuild))
 	}
+	// Reaction reactors: who reacted (tap on a reaction pill).
+	mux.HandleFunc("GET /api/v9/channels/{channel}/messages/{message}/reactions/{emoji}", s.requireAuth(s.handleReactionReactors))
 	// Instance discovery for third-party web clients (Flicker and other
 	// Spacebar-compatible clients): they probe the origin the user typed
 	// and derive the API/gateway/CDN endpoints from these documents.
