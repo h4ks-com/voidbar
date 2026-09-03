@@ -109,7 +109,12 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request, u *stora
 // uid segment is decorative - hashes are unique).
 func (s *Server) handleAvatarFile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("hash")
-	hash := strings.TrimSuffix(name, ".png")
+	// IconUtils emits both .png (cdn branch) and .jpg (api branch); the
+	// extension is decorative - the store is keyed by the bare hash.
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".webp", ".gif"} {
+		name = strings.TrimSuffix(name, ext)
+	}
+	hash := name
 	if hash == "" {
 		http.NotFound(w, r)
 		return

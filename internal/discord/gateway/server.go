@@ -263,6 +263,12 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 			s.closeWS(conn, CloseDecodeError, "decode error")
 			return
 		}
+		// Inbound ops at debug: op1/3/4 carries no state, but their
+		// timing around client-initiated closes is the only client-side
+		// signal a release build gives us.
+		if p.Op != OpDispatch {
+			s.log.Debug("gateway inbound op", "op", p.Op, "len", len(data))
+		}
 		switch p.Op {
 		case OpIdentify:
 			if sess != nil {

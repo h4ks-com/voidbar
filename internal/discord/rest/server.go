@@ -55,6 +55,12 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("PATCH /api/v9/users/@me", s.requireAuth(s.handleUpdateMe))
 	mux.HandleFunc("GET /avatars/{user}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("HEAD /avatars/{user}/{hash}", s.handleAvatarFile)
+	// The client's IconUtils also emits the API-style avatar form
+	// /users/{id}/avatars/{hash}.jpg (its empty-cdn-prefix branch);
+	// serve it from the same store so every URL shape it can build
+	// resolves. No auth: same discovery-CDN semantics as /avatars.
+	mux.HandleFunc("GET /users/{user}/avatars/{hash}", s.handleAvatarFile)
+	mux.HandleFunc("HEAD /users/{user}/avatars/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	// User notes ("Add Note" in the profile sheet).
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleUserNotes))
