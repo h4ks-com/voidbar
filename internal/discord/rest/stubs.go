@@ -96,12 +96,25 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 	username := "user"
 	globalName := ""
 	bio := ""
+	var avatar any
 	if id == u.ID {
 		username = u.Username
+		// In a guild context the per-guild override wins over the
+		// account-wide avatar (Discord's member/user precedence).
+		if s.net != nil {
+			if guildID := r.URL.Query().Get("guild_id"); guildID != "" {
+				avatar = s.net.MemberAvatarFor(u.ID, guildID)
+			} else {
+				avatar = s.net.SelfAvatar(u.ID)
+			}
+		}
 	} else if s.net != nil {
 		if nick, account, host, ok := s.net.PeerInfoByAuthor(u.ID, id); ok {
 			username = nick
 			globalName = nick
+			if h := s.net.PeerAvatar(u.ID, nick); h != "" {
+				avatar = h
+			}
 			var lines []string
 			if account != "" {
 				lines = append(lines, "NickServ: "+account)
@@ -116,7 +129,7 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 		"id":            id,
 		"username":      username,
 		"discriminator": "0",
-		"avatar":        nil,
+		"avatar":        avatar,
 		"bot":           false,
 		"public_flags":  0,
 		"flags":         0,

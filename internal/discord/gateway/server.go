@@ -231,6 +231,7 @@ func (s *Server) writePump(conn *websocket.Conn, ch <-chan writeRequest, done <-
 			err = conn.WriteMessage(websocket.TextMessage, frame)
 		}
 		if err != nil {
+			s.log.Debug("gateway write failed", "err", err)
 			return
 		}
 	}
@@ -253,10 +254,12 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			s.log.Debug("gateway read ended", "err", err, "authed", sess != nil)
 			break
 		}
 		var p Payload
 		if err := json.Unmarshal(data, &p); err != nil {
+			s.log.Debug("gateway close: decode error")
 			s.closeWS(conn, CloseDecodeError, "decode error")
 			return
 		}
@@ -277,7 +280,9 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 				return
 			}
 			sess = s.createSession(user.ID)
-			sess.attach(ch)
+			if sess.attach(ch) {
+				s.log.Debug("gateway identify took over a live session", "user", user.ID, "session", sess.ID)
+			}
 			if _, err := sess.dispatch("READY", s.buildReady(sess, user), true); err != nil {
 				s.log.Error("ready failed", "err", err)
 				return
@@ -311,7 +316,9 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 				ch <- writeRequest{frame: frame}
 				continue
 			}
-			old.attach(ch)
+			if old.attach(ch) {
+				s.log.Debug("gateway resume took over a live session", "user", user.ID, "session", old.ID)
+			}
 			old.replay(d.Seq, ch)
 			// RESUMED with an empty object: d:null made the client's event
 			// hydrator read properties of null (_getConnectionPath/_trace).
@@ -502,6 +509,7 @@ func rawIDsToStrings(raw json.RawMessage) []string {
 }
 
 func (s *Server) closeWS(conn *websocket.Conn, code int, reason string) {
+	s.log.Debug("gateway closeWS", "code", code, "reason", reason)
 	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(5*time.Second))
 }
 

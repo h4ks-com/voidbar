@@ -50,13 +50,18 @@ func (s *Session) memberListSet() map[string]bool {
 	return out
 }
 
-func (s *Session) attach(ch chan writeRequest) {
+// attach binds the session to a connection's write queue, reporting
+// whether it displaced a live queue (the old socket loses its writer
+// and dies without a close frame).
+func (s *Session) attach(ch chan writeRequest) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.send != nil && s.send != ch {
+	tookOver := s.send != nil && s.send != ch
+	if tookOver {
 		close(s.send)
 	}
 	s.send = ch
+	return tookOver
 }
 
 func (s *Session) detach(ch chan writeRequest) {
