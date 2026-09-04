@@ -635,6 +635,14 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 			nicks = append(nicks, nick)
 		}
 		s.net.UpsertMentionPeers(u.ID, s.net.ChannelNetworkID(r.PathValue("channel")), nicks)
+		// The member upserts travel the gateway while this response
+		// travels REST - two queues racing into the client. When REST
+		// wins, the pills render before the users land and stay
+		// @invalid-user until the row re-renders (scroll, reopen). A
+		// short breather lets the gateway events apply first; it costs
+		// one pause per channel open with unknown pills, nothing
+		// otherwise.
+		time.Sleep(150 * time.Millisecond)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

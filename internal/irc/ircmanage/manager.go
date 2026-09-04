@@ -1150,6 +1150,14 @@ func (m *Manager) registerHandlers(c *conn) {
 		// Our own join echo confirms a pending optimistic channel-create.
 		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
 			c.clearPending(e.Params[0])
+			// The membership channel list must track server-side
+			// autojoins too (SASL-join, services force-join): the
+			// guild sidebar renders from it, so an unpersisted join
+			// would vanish from the channel list on the next
+			// GUILD_CREATE. Idempotent for client-initiated joins.
+			if _, err := m.store.MembershipAddChannel(c.networkID, c.userID, e.Params[0]); err != nil {
+				m.log.Warn("autojoin persist failed", "err", err, "channel", e.Params[0])
+			}
 			// Freshly joined: ask the upstream for recent history once.
 			m.maybeChatPrefill(c, e.Params[0])
 		} else if e.Source != nil {
@@ -1166,11 +1174,25 @@ func (m *Manager) registerHandlers(c *conn) {
 	// Someone left (or was kicked from) a channel we're in: the sidebar
 	// rows are stale until resynced.
 	c.client.Handlers.Add(girc.PART, func(client *girc.Client, e girc.Event) {
+		// Our own part (client leave or upstream force-part): the
+		// channel leaves the auto-join list, mirroring the JOIN sync.
+		if e.Source != nil && strings.EqualFold(e.Source.Name, client.GetNick()) && len(e.Params) > 0 {
+			if err := m.store.MembershipRemoveChannel(c.networkID, c.userID, e.Params[0]); err != nil {
+				m.log.Warn("autojoin drop failed", "err", err, "channel", e.Params[0])
+			}
+		}
 		if len(e.Params) > 0 {
 			m.notifyOccupancy(c, e.Params[0])
 		}
 	})
 	c.client.Handlers.Add(girc.KICK, func(client *girc.Client, e girc.Event) {
+		// Kicks out ourselves drop the auto-join too (Params: channel,
+		// target, [reason]).
+		if len(e.Params) >= 2 && strings.EqualFold(e.Params[1], client.GetNick()) {
+			if err := m.store.MembershipRemoveChannel(c.networkID, c.userID, e.Params[0]); err != nil {
+				m.log.Warn("autojoin drop failed", "err", err, "channel", e.Params[0])
+			}
+		}
 		if len(e.Params) > 0 {
 			m.notifyOccupancy(c, e.Params[0])
 		}
@@ -1525,6 +1547,13 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 }
 
 func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid string) {
+	// Ergo's history service replays missed traffic on connect; the
+	// bouncer fetches its own via draft/chathistory, so the automatic
+	// HistServ delivery is a duplicate flood. Service bots are dropped
+	// like soju does.
+	if strings.EqualFold(author, "HistServ") {
+		return
+	}
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
 		// Query (DM): target is our own nick, author is the peer.
 		m.dispatchQuery(c, author, content, ts, msgid)
