@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"encoding/hex"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -32,7 +33,10 @@ func newAdminTestServer(t *testing.T, key string) (*httptest.Server, *auth.Servi
 }
 
 func TestAdminCreateUser(t *testing.T) {
-	srv, _ := newAdminTestServer(t, "k1")
+	// SetAdminKey hexes the raw key for header-safe comparison.
+	rawKey := "k1"
+	hexKey := hex.EncodeToString([]byte(rawKey))
+	srv, _ := newAdminTestServer(t, rawKey)
 	defer srv.Close()
 
 	body := func() *bytes.Reader {
@@ -64,7 +68,7 @@ func TestAdminCreateUser(t *testing.T) {
 
 	// correct key -> 201; the instance is empty so the user becomes admin
 	req, _ = http.NewRequest("POST", srv.URL+"/api/v9/admin/users", body())
-	req.Header.Set("X-Master-Key", "k1")
+	req.Header.Set("X-Master-Key", hexKey)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +85,7 @@ func TestAdminCreateUser(t *testing.T) {
 
 	// list requires the key and sees the user
 	req, _ = http.NewRequest("GET", srv.URL+"/api/v9/admin/users", nil)
-	req.Header.Set("X-Master-Key", "k1")
+	req.Header.Set("X-Master-Key", hexKey)
 	resp2, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

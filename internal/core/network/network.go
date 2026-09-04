@@ -507,6 +507,10 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 	if u, err := s.store.GetUserByID(userID); err == nil && u.Username != "" {
 		nick = u.Username
 	}
+	// ?nick= overrides the account username for this network.
+	if conn.Nick != "" {
+		nick = conn.Nick
+	}
 
 	mem, err := s.store.GetMembership(net.ID, userID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -803,6 +807,26 @@ func (s *Service) FindByChannelName(userID, ircName string) (*storage.Network, *
 				}
 				return net, mem, nil
 			}
+		}
+	}
+	return nil, nil, storage.ErrNotFound
+}
+
+// FindByHost resolves a bare token to a network the user already joined
+// by hostname - the invite-join fallback for channel-less connection
+// strings (the client's parsed "code" is often just the host).
+func (s *Service) FindByHost(userID, host string) (*storage.Network, *storage.Membership, error) {
+	mems, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, mem := range mems {
+		net, err := s.store.GetNetwork(mem.NetworkID)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(net.Host, host) {
+			return net, mem, nil
 		}
 	}
 	return nil, nil, storage.ErrNotFound

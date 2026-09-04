@@ -141,9 +141,11 @@ func (s *Server) handleGetInvite(w http.ResponseWriter, r *http.Request, u *stor
 // handleJoinInvite completes the join started by the preview GET: the
 // client submits the fragment it parsed out of the pasted connection
 // string (e.g. "#vbtest2") as the invite code. The preview GET has already
-// created the network and membership, so the code resolves back through
-// the member's auto-join channels; a full connection string as the code
-// works too.
+// created the network and membership, so the code must resolve to
+// something that EXISTS: a channel name, the host of a joined network
+// (channel-less strings leave the client's parser emitting the host or
+// plain garbage like "x"), or a full connection string (re-Joins
+// idempotently by ConnID). Bare garbage must not mint new networks.
 func (s *Server) handleJoinInvite(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	code := r.PathValue("code")
 	if code == "" {
@@ -159,23 +161,31 @@ func (s *Server) handleJoinInvite(w http.ResponseWriter, r *http.Request, u *sto
 		mem *storage.Membership
 		err error
 	)
-	if _, perr := network.ParseConnString(code); perr == nil {
-		// The raw connection string itself was submitted as the code.
-		net, err = s.net.Join(u.ID, code)
-		if err != nil {
-			jsonError(w, http.StatusBadRequest, "invalid connection string")
-			return
+	// The connstr parser is deliberately scheme-tolerant (bare
+	// "host:port" is a valid paste); gate the network-creating branch on
+	// an explicit scheme so bare fragments never become hosts.
+	if strings.Contains(code, "://") {
+		if _, perr := network.ParseConnString(code); perr == nil {
+			net, err = s.net.Join(u.ID, code)
+			if err != nil {
+				jsonError(w, http.StatusBadRequest, "invalid connection string")
+				return
+			}
+			mem, err = s.net.MembershipFor(u.ID, net.ID)
 		}
-		mem, err = s.net.MembershipFor(u.ID, net.ID)
-	} else {
+	}
+	if net == nil {
 		// A parsed fragment: find the network the preview already joined.
 		net, mem, err = s.net.FindByChannelName(u.ID, code)
+	}
+	if net == nil {
+		net, mem, err = s.net.FindByHost(u.ID, code)
 	}
 	var chans []*storage.Channel
 	if err == nil {
 		chans, _ = s.net.ChannelsFor(net.ID, mem.AutoJoin)
 	} else {
-		jsonError(w, http.StatusNotFound, "Unknown Invite")
+		jsonError(w, http.StatusNotFound, "Unknown Invite: nothing matches "+code)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.invitePayload(code, net, mem, chans, u))

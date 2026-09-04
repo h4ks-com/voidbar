@@ -215,6 +215,53 @@ func TestJoinInvite(t *testing.T) {
 	}
 }
 
+// TestJoinInviteChannelless: a channel-less connection string previews
+// fine; the join step must resolve the client's parsed code against
+// EXISTING networks (channel name, then host) and never mint junk
+// networks from bare garbage like "x".
+func TestJoinInviteChannelless(t *testing.T) {
+	h := newServer(t, "open")
+	token := registerAndLogin(t, h)
+
+	const conn = "ircs://h4ks.com?nick=voidsnm"
+	rec, out := do(t, h, "GET", "/api/v9/invites/x?inputValue="+url.QueryEscape(conn), token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %v", rec.Code, out)
+	}
+
+	guildCount := func() int {
+		rec, raw := doAny(t, h, "GET", "/api/v9/users/@me/guilds", token, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("guilds: %d", rec.Code)
+		}
+		list, _ := raw.([]any)
+		return len(list)
+	}
+	before := guildCount()
+
+	// Bare garbage must 404 and create nothing.
+	rec, out = do(t, h, "POST", "/api/v9/invites/x", token, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("garbage code: got %d want 404", rec.Code)
+	}
+	if got := guildCount(); got != before {
+		t.Fatalf("garbage code minted a network: %d -> %d", before, got)
+	}
+
+	// The host resolves to the network the preview joined.
+	rec, out = do(t, h, "POST", "/api/v9/invites/h4ks.com", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host code: %d %v", rec.Code, out)
+	}
+	guild, _ := out["guild"].(map[string]any)
+	if guild == nil || guild["name"] != "h4ks.com" {
+		t.Fatalf("host code guild: %v", out)
+	}
+	if got := guildCount(); got != before {
+		t.Fatalf("host join changed guild count: %d -> %d", before, got)
+	}
+}
+
 // TestCreateDM: POST /users/@me/channels with a fellow member's user id
 // opens a 1:1 channel (recipient resolved through the network's
 // membership list); unknown ids are rejected; the channel then shows up

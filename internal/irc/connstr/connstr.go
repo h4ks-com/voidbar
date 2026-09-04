@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -20,7 +21,10 @@ var (
 	ErrNoHost     = errors.New("connection string has no host")
 	ErrBadPort    = errors.New("invalid port")
 	ErrBadChannel = errors.New("invalid channel")
+	ErrBadNick    = errors.New("invalid nick")
 )
+
+var nickRe = regexp.MustCompile(`^[A-Za-z0-9_\-\[\]\\` + "`" + `^{}|]{1,32}$`)
 
 // Conn is a parsed connection string.
 type Conn struct {
@@ -30,6 +34,9 @@ type Conn struct {
 	Name     string // display name, optional
 	Password string // server password, optional
 	Channels []string
+	// Nick is the IRC nickname to connect with (?nick=voidsnm);
+	// empty falls back to the bouncer account username.
+	Nick string
 	// ChannelKeys carries per-channel +k keys from the inline
 	// "#chan:key" token syntax, keyed by lowercased channel name.
 	ChannelKeys map[string]string
@@ -139,6 +146,12 @@ func Parse(raw string) (*Conn, error) {
 	}
 	if name := q.Get("name"); name != "" {
 		c.Name = name
+	}
+	if nick := q.Get("nick"); nick != "" {
+		if !nickRe.MatchString(nick) {
+			return nil, fmt.Errorf("%w: %q", ErrBadNick, nick)
+		}
+		c.Nick = nick
 	}
 	if v := q.Get("tls"); v != "" && (v == "1" || v == "true") {
 		c.TLS = true
