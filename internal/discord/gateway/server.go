@@ -37,8 +37,9 @@ type Server struct {
 	sessions map[string]*Session
 	byUser   map[string]map[string]*Session
 
-	settingsForUser func(userID string) map[string]any
-	notesForUser    func(userID string) map[string]string
+	settingsForUser   func(userID string) map[string]any
+	notesForUser      func(userID string) map[string]string
+	readStatesForUser func(userID string) []any
 }
 
 // SetGuildProviders installs the READY/GUILD_CREATE hooks after
@@ -74,6 +75,12 @@ func (s *Server) userSettings(userID string) map[string]any {
 // SetNotesProvider installs the READY notes hook ({target id: note}).
 func (s *Server) SetNotesProvider(notesForUser func(userID string) map[string]string) {
 	s.notesForUser = notesForUser
+}
+
+// SetReadStateProvider installs the READY read_state hook (persisted read
+// markers + mention badges; nil entries = everything read).
+func (s *Server) SetReadStateProvider(readStatesForUser func(userID string) []any) {
+	s.readStatesForUser = readStatesForUser
 }
 
 func (s *Server) userNotes(userID string) map[string]string {
@@ -351,12 +358,12 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 				return
 			}
 			var d struct {
-				GuildID  json.RawMessage   `json:"guild_id"`
-				UserIDs  []json.RawMessage `json:"user_ids"`
-				Query    string            `json:"query"`
-				Limit    int               `json:"limit"`
-				Presences bool             `json:"presences"`
-				Nonce    string            `json:"nonce"`
+				GuildID   json.RawMessage   `json:"guild_id"`
+				UserIDs   []json.RawMessage `json:"user_ids"`
+				Query     string            `json:"query"`
+				Limit     int               `json:"limit"`
+				Presences bool              `json:"presences"`
+				Nonce     string            `json:"nonce"`
 			}
 			if err := json.Unmarshal(p.D, &d); err != nil {
 				continue
@@ -616,10 +623,16 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		},
 	}
 	clydePresence := map[string]any{
-		"user": map[string]any{"id": model.ClydeID},
+		"user":          map[string]any{"id": model.ClydeID},
 		"status":        "online",
 		"client_status": map[string]any{"web": "online"},
 		"activities":    []any{},
+	}
+	readStateEntries := []any{}
+	if s.readStatesForUser != nil {
+		if rows := s.readStatesForUser(user.ID); rows != nil {
+			readStateEntries = rows
+		}
 	}
 	return &ReadyData{
 		V:                    9,
@@ -634,9 +647,9 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		Relationships:        []any{clydeFriend},
 		Sessions:             []any{},
 		GeoOrderedRTCRegions: []any{},
-		SessionType:      "normal",
-		UserSettings:     s.userSettings(user.ID),
-		Notes:            s.userNotes(user.ID),
+		SessionType:          "normal",
+		UserSettings:         s.userSettings(user.ID),
+		Notes:                s.userNotes(user.ID),
 		Experiments:          []any{},
 		GuildExperiments:     []any{},
 		UserGuildSettings: &VersionedArray{
@@ -645,9 +658,9 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			Version: 0,
 		},
 		ReadState: &VersionedArray{
-			Entries: []any{},
+			Entries: readStateEntries,
 			Partial: false,
-			Version: 0,
+			Version: 1,
 		},
 		UserSettingsProto: "",
 		ConnectedAccounts: []any{},

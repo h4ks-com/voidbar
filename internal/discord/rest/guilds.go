@@ -1442,6 +1442,32 @@ func (s *Server) clydeCommand(u *storage.User, dm *storage.DMChannel, req *sendM
 	return echo
 }
 
+// handleAckMessage records a read marker: the read position moves to the
+// acked message and the mention badge clears, then MESSAGE_ACK fans out to
+// the user's other sessions (the acking client already applied it
+// optimistically).
+func (s *Server) handleAckMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	channelID := r.PathValue("channel")
+	messageID := r.PathValue("message")
+	if channelID == "" || messageID == "" {
+		jsonError(w, http.StatusBadRequest, "missing channel or message")
+		return
+	}
+	rs, err := s.net.MarkChannelRead(u.ID, channelID, messageID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to mark read")
+		return
+	}
+	if s.gw != nil {
+		s.gw.Dispatch(u.ID, "MESSAGE_ACK", map[string]any{
+			"channel_id":     channelID,
+			"message_id":     rs.LastMessageID,
+			"mention_count":  rs.MentionCount,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleSendMessage relays a Discord message to IRC. The channel id is a
 // snowflake resolved through the channel registry.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {

@@ -119,7 +119,7 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("GET /api/v9/channels/{channel}/pins", s.requireAuth(s.handlePinnedMessages))
 	mux.HandleFunc("PUT /api/v9/channels/{channel}/pins/{message}", s.requireAuth(s.handlePinMessage))
 	mux.HandleFunc("DELETE /api/v9/channels/{channel}/pins/{message}", s.requireAuth(s.handleUnpinMessage))
-	mux.HandleFunc("POST /api/v9/channels/{channel}/messages/{message}/ack", s.requireAuth(s.handleNoContentAuthed))
+	mux.HandleFunc("POST /api/v9/channels/{channel}/messages/{message}/ack", s.requireAuth(s.handleAckMessage))
 	if net != nil {
 		mux.HandleFunc("GET /api/v9/guilds/{guild}", s.requireAuth(s.handleGuildDetail))
 		// Guild settings' Overview rename.

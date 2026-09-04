@@ -110,6 +110,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	gw.SetDMChannelsProvider(netSvc.DMChannelPayloads)
 	gw.SetSettingsProvider(netSvc.UserSettings)
 	gw.SetNotesProvider(netSvc.UserNotes)
+	gw.SetReadStateProvider(netSvc.ReadStateEntries)
 	gw.SetMemberListProvider(netSvc.MemberListPayload)
 	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
 	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)
@@ -119,6 +120,8 @@ func serveCmd(args []string, log *slog.Logger) error {
 	// Upstream draft/ICON network icons are mirrored into the avatar
 	// store and re-announced as GUILD_UPDATE.
 	manager.SetIconNotifier(netSvc.OnNetworkIcon)
+	// Self-mentions bump the read-state badge so pings survive restarts.
+	manager.SetMentionNotifier(netSvc.OnMentionRelayed)
 	// Arm the embed media proxy: unfurled images are mirrored locally
 	// and served from the public origin (see SetPublicURL).
 	manager.SetPublicURL(cfg.Server.PublicURL)

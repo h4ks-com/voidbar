@@ -2296,3 +2296,69 @@ func TestClydeControlBot(t *testing.T) {
 		t.Fatalf("guilds after leave: %v", guilds)
 	}
 }
+
+// TestReadStateAck: the ack endpoint persists a read marker, clears the
+// mention badge, and rehydrates it through the READY read_state provider.
+func TestReadStateAck(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+
+	const conn = "ircs://irc.libera.chat:6697/#go?name=Libera"
+	net, err := netSvc.Join(user.ID, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chans, err := netSvc.ChannelsFor(net.ID, []string{"#go"})
+	if err != nil || len(chans) != 1 {
+		t.Fatalf("channels: %v %v", err, chans)
+	}
+	chID := chans[0].ID
+
+	// Two mentions bump the badge.
+	netSvc.OnMentionRelayed(user.ID, chID)
+	netSvc.OnMentionRelayed(user.ID, chID)
+	entries := netSvc.ReadStateEntries(user.ID)
+	if len(entries) != 1 {
+		t.Fatalf("read state entries: %v", entries)
+	}
+	e := entries[0].(map[string]any)
+	if e["id"] != chID || e["mention_count"] != 2 {
+		t.Fatalf("entry: %v", e)
+	}
+
+	// Ack clears the badge and pins the marker.
+	msgID := netSvc.NewMessageID()
+	rec, _ := do(t, h, "POST", "/api/v9/channels/"+chID+"/messages/"+msgID+"/ack", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("ack: %d", rec.Code)
+	}
+	e = netSvc.ReadStateEntries(user.ID)[0].(map[string]any)
+	if e["mention_count"] != 0 || e["last_message_id"] != msgID {
+		t.Fatalf("after ack: %v", e)
+	}
+
+	// An ack for an older message must not move the marker back.
+	older := "1" + msgID[1:] // same length, smaller value
+	rec, _ = do(t, h, "POST", "/api/v9/channels/"+chID+"/messages/"+older+"/ack", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("older ack: %d", rec.Code)
+	}
+	e = netSvc.ReadStateEntries(user.ID)[0].(map[string]any)
+	if e["last_message_id"] != msgID {
+		t.Fatalf("marker regressed: %v", e)
+	}
+}

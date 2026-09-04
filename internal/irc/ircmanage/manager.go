@@ -55,6 +55,10 @@ type Manager struct {
 	// re-arms the announcement so the next reconnect retries the mirror.
 	iconChange func(userID, networkID, iconURL string) bool
 
+	// mentionRelay (optional) is notified when a relayed channel message
+	// mentions the user's own nick, to bump the read-state badge.
+	mentionRelay func(userID, channelID string)
+
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
 
@@ -831,6 +835,14 @@ func (m *Manager) SetIconNotifier(fn func(userID, networkID, iconURL string) boo
 	m.iconChange = fn
 }
 
+// SetMentionNotifier installs the callback fired when a relayed message
+// mentions the user themselves: the Discord side bumps the channel's
+// pending-mention badge so the ping survives client restarts via READY
+// read_state.
+func (m *Manager) SetMentionNotifier(fn func(userID, channelID string)) {
+	m.mentionRelay = fn
+}
+
 // fireLinkChange notifies the network service of a link state transition.
 func (m *Manager) fireLinkChange(c *conn, up bool) {
 	if m.linkChange == nil {
@@ -1537,10 +1549,17 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		// peer the client never saw must not render @invalid-user.
 		m.upsertMentionedPeers(c, mentioned)
 		mentions := make([]any, 0, len(mentioned))
+		selfMentioned := false
 		for _, u := range mentioned {
 			mentions = append(mentions, mentionUserPayload(u))
+			if u.id == c.userID {
+				selfMentioned = true
+			}
 		}
 		payload["mentions"] = mentions
+		if selfMentioned && m.mentionRelay != nil {
+			m.mentionRelay(c.userID, channelID)
+		}
 	}
 	if len(mentionChans) > 0 {
 		chs := make([]any, 0, len(mentionChans))
@@ -1701,7 +1720,7 @@ func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[
 		"id":                 dm.ID,
 		"type":               1,
 		"flags":              0,
-		"last_message_id":    nil,
+		"last_message_id":    m.dmLastMessageID(dm.ID),
 		"recipients":         []any{peer},
 		"is_message_request": false,
 		"is_spam":            false,
@@ -1722,11 +1741,20 @@ func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]an
 		"id":                 dm.ID,
 		"type":               1,
 		"flags":              0,
-		"last_message_id":    nil,
+		"last_message_id":    m.dmLastMessageID(dm.ID),
 		"recipients":         []any{peer},
 		"is_message_request": false,
 		"is_spam":            false,
 	}
+}
+
+// dmLastMessageID is the DM thread buffer's newest row id ("" -> nil).
+func (m *Manager) dmLastMessageID(dmID string) any {
+	msgs := m.store.ChannelMessages(dmID, "", "", 1)
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs[0].ID
 }
 
 // ChannelMember is one channel occupant from the live NAMES state, with

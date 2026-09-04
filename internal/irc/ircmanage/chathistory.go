@@ -230,6 +230,11 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			f.mentions = make([]any, 0, len(mentionedUsers))
 			for _, u := range mentionedUsers {
 				f.mentions = append(f.mentions, mentionUserPayload(u))
+				if u.id == c.userID && m.mentionRelay != nil {
+					// History can mention the user too (catch-up after
+					// downtime); the badge must survive restarts.
+					m.mentionRelay(c.userID, ch.ID)
+				}
 			}
 		}
 		if len(mentionedChans) > 0 {

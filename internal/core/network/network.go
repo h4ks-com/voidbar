@@ -253,9 +253,9 @@ func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool
 			last = &ts
 		}
 		s.gw.Dispatch(userID, "CHANNEL_PINS_UPDATE", map[string]any{
-			"channel_id":          channelID,
-			"guild_id":            s.ChannelNetworkID(channelID),
-			"last_pin_timestamp":  last,
+			"channel_id":         channelID,
+			"guild_id":           s.ChannelNetworkID(channelID),
+			"last_pin_timestamp": last,
 		})
 		if pinned {
 			s.dispatchPinSystemMessage(userID, channelID, messageID)
@@ -675,12 +675,12 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 			}
 		}
 		out = append(out, map[string]any{
-			"id":                          dm.ID,
-			"type":                        1,
-			"flags":                       0,
-			"last_message_id":             nil,
-			"last_message_timestamp":      nil,
-			"recipients":                  []any{peer},
+			"id":                           dm.ID,
+			"type":                         1,
+			"flags":                        0,
+			"last_message_id":              s.lastMessageIDOf(dm.ID),
+			"last_message_timestamp":       nil,
+			"recipients":                   []any{peer},
 			"is_message_request":           false,
 			"is_message_request_timestamp": nil,
 			"is_spam":                      false,
@@ -750,15 +750,15 @@ func (s *Service) dmPayloadFor(userID, netID, nick string) (map[string]any, erro
 		return nil, err
 	}
 	return map[string]any{
-		"id":                          dm.ID,
-		"type":                        1,
-		"flags":                       0,
-		"last_message_id":             nil,
-		"last_message_timestamp":      nil,
-		"recipients":                  []any{s.dmPeerFor(userID, netID, dm.Nick)},
+		"id":                           dm.ID,
+		"type":                         1,
+		"flags":                        0,
+		"last_message_id":              s.lastMessageIDOf(dm.ID),
+		"last_message_timestamp":       nil,
+		"recipients":                   []any{s.dmPeerFor(userID, netID, dm.Nick)},
 		"is_message_request":           false,
 		"is_message_request_timestamp": nil,
-		"is_spam":                     false,
+		"is_spam":                      false,
 	}, nil
 }
 
@@ -1185,19 +1185,21 @@ func (s *Service) GuildChannelsPayload(guildID string, autoJoin []string) ([]any
 // CHANNEL_CREATE for an IRC-backed text channel.
 func (s *Service) channelPayload(guildID string, ch *storage.Channel, position int) map[string]any {
 	return map[string]any{
-		"id":                    ch.ID,
-		"guild_id":              guildID,
-		"name":                  ch.Name,
-		"type":                  0,
-		"position":              position,
-		"topic":                 ircmanage.TopicValue(ch.Topic),
-		"last_message_id":       "0",
+		"id":       ch.ID,
+		"guild_id": guildID,
+		"name":     ch.Name,
+		"type":     0,
+		"position": position,
+		"topic":    ircmanage.TopicValue(ch.Topic),
+		// Real buffer tail ("" while empty): read-state comparisons
+		// against a static "0" would mark every channel forever-unread.
+		"last_message_id":       s.lastMessageIDOf(ch.ID),
 		"permission_overwrites": []any{},
 		"rate_limit_per_user":   0,
 		"nsfw":                  false,
 		"flags":                 0,
 		// Local grouping (type 4 categories): nil when ungrouped.
-		"parent_id":             parentValue(ch.ParentID),
+		"parent_id": parentValue(ch.ParentID),
 		// COMPAT: the client resolves the member sidebar through the
 		// channel's own member_list_id (Channel.memberListId) — the lazy
 		// list map is keyed by exactly this string, and GUILD_MEMBER_LIST_
@@ -1206,6 +1208,19 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		// channels.
 		"member_list_id": model.MemberListID(guildID, ch.ID),
 	}
+}
+
+// lastMessageIDOf is the replay buffer's newest row id ("" when empty) -
+// the channel's last_message_id on the wire.
+func (s *Service) lastMessageIDOf(channelID string) any {
+	if s.store == nil {
+		return nil
+	}
+	msgs := s.store.ChannelMessages(channelID, "", "", 1)
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs[0].ID
 }
 
 // MemberListPayload answers op 14 (lazy request) with a
@@ -1960,9 +1975,7 @@ type UserNetworkSummary struct {
 	Host string
 	Name string
 	Up   bool
-}
-
-// UserNetworks lists the user's joined networks for the control bot.
+} // UserNetworks lists the user's joined networks for the control bot.
 func (s *Service) UserNetworks(userID string) []UserNetworkSummary {
 	memberships, err := s.store.ListMembershipsForUser(userID)
 	if err != nil {
@@ -1981,6 +1994,57 @@ func (s *Service) UserNetworks(userID string) []UserNetworkSummary {
 		out = append(out, UserNetworkSummary{Host: host, Name: net.Name, Up: s.linkUp(m.UserID, net.ID)})
 	}
 	return out
+}
+
+// snowflakeGreater compares two snowflake ids numerically (they are
+// decimal strings of the same width in practice; parse defensively).
+func snowflakeGreater(a, b string) bool {
+	if len(a) != len(b) {
+		return len(a) > len(b)
+	}
+	return a > b
+}
+
+// MarkChannelRead records an ack: the read position moves forward only
+// (acking an older message after a newer one is a no-op) and the mention
+// badge clears. Returns the effective state for the MESSAGE_ACK fanout.
+func (s *Service) MarkChannelRead(userID, channelID, messageID string) (storage.ReadState, error) {
+	rs, _ := s.store.GetReadState(userID, channelID)
+	if snowflakeGreater(rs.LastMessageID, messageID) {
+		return rs, nil
+	}
+	rs.ChannelID = channelID
+	rs.LastMessageID = messageID
+	rs.MentionCount = 0
+	err := s.store.PutReadState(userID, rs)
+	return rs, err
+}
+
+// OnMentionRelayed bumps the pending-mention badge for a channel - the
+// red dot that must survive client restarts via READY read_state.
+func (s *Service) OnMentionRelayed(userID, channelID string) {
+	rs, _ := s.store.GetReadState(userID, channelID)
+	rs.ChannelID = channelID
+	rs.MentionCount++
+	_ = s.store.PutReadState(userID, rs)
+}
+
+// ReadStateEntries shapes the READY read_state rows.
+func (s *Service) ReadStateEntries(userID string) []any {
+	rows, err := s.store.ReadStates(userID)
+	if err != nil {
+		return nil
+	}
+	entries := make([]any, 0, len(rows))
+	for _, rs := range rows {
+		entries = append(entries, map[string]any{
+			"id":              rs.ChannelID,
+			"last_message_id": rs.LastMessageID,
+			"mention_count":   rs.MentionCount,
+			"version":         1,
+		})
+	}
+	return entries
 }
 
 // linkUp reports upstream health for a membership; a nil manager (tests)
@@ -2010,7 +2074,7 @@ func (s *Service) OnLinkChange(userID, networkID string, up bool) {
 		return
 	}
 	s.gw.Dispatch(userID, "GUILD_UNAVAILABLE", map[string]any{
-		"guild_id":     networkID,
-		"unavailable":  true,
+		"guild_id":    networkID,
+		"unavailable": true,
 	})
 }
