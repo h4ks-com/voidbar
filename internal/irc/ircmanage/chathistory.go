@@ -316,6 +316,11 @@ func (m *Manager) FetchOlder(userID, networkID, ircChannel, anchorMsgID, ceiling
 	if !c.histCap() {
 		return 0
 	}
+	// A selector previously killed this link (server-side hang): asking
+	// again would just grey the guild out in a reconnect loop.
+	if c.histSelectorBroken.Load() {
+		return 0
+	}
 	if !strings.HasPrefix(ircChannel, "#") && !strings.HasPrefix(ircChannel, "&") {
 		return 0
 	}

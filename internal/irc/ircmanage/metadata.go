@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/lrstanley/girc"
@@ -91,6 +93,54 @@ func (m *Manager) metadataSubscribe(c *conn, client *girc.Client) {
 	m.log.Debug("metadata avatar subscribed", "user", c.userID, "network", c.networkID)
 }
 
+// metadataSyncChannel pulls the current avatar values for everyone in a
+// channel right after joining. Pushing current values in the join burst
+// is a SHOULD in the spec - some servers (eris) only push changes, so
+// without an explicit SYNC the peers' existing avatars never surface.
+func (m *Manager) metadataSyncChannel(c *conn, ircChannel string) {
+	if !c.metadataCapUp.Load() {
+		return
+	}
+	m.mu.Lock()
+	client := c.client
+	m.mu.Unlock()
+	if client == nil {
+		return
+	}
+	client.Send(&girc.Event{Command: "METADATA", Params: []string{ircChannel, "SYNC"}})
+	m.log.Debug("metadata channel sync", "user", c.userID, "network", c.networkID, "channel", ircChannel)
+}
+
+// metadataSyncRetry re-asks a postponed sync (RPL_METADATASYNCLATER),
+// honoring the server's RetryAfter hint. Capped per target so a busy
+// server cannot loop us forever.
+func (m *Manager) metadataSyncRetry(c *conn, target string, retryAfter int) {
+	if retryAfter <= 0 {
+		retryAfter = 5
+	}
+	c.metaRetryMu.Lock()
+	if c.metaRetries == nil {
+		c.metaRetries = make(map[string]int)
+	}
+	c.metaRetries[target]++
+	n := c.metaRetries[target]
+	c.metaRetryMu.Unlock()
+	if n > 3 {
+		return
+	}
+	time.AfterFunc(time.Duration(retryAfter)*time.Second, func() {
+		m.mu.Lock()
+		ok := m.conns[key(c.userID, c.networkID)] == c
+		client := c.client
+		m.mu.Unlock()
+		if !ok || client == nil || !c.metadataCapUp.Load() {
+			return
+		}
+		client.Send(&girc.Event{Command: "METADATA", Params: []string{target, "SYNC"}})
+		m.log.Debug("metadata sync retried", "user", c.userID, "network", c.networkID, "target", target, "attempt", n)
+	})
+}
+
 // handleMetadataEvent processes an inbound `METADATA <target> <key>
 // <visibility> <value>` notification. Own-nick targets are skipped: the
 // bouncer is the source of truth for its own avatar.
@@ -99,12 +149,56 @@ func (m *Manager) handleMetadataEvent(c *conn, client *girc.Client, e *girc.Even
 		return
 	}
 	nick := e.Params[0]
-	if nick == "" || strings.EqualFold(nick, client.GetNick()) {
-		return
-	}
 	url := ""
 	if len(e.Params) > 3 {
 		url = e.Params[3]
+	}
+	m.applyPeerAvatar(c, client, nick, url)
+}
+
+// handleMetadataKeyValue processes 761 RPL_KEYVALUE answers (GET/LIST/
+// SYNC payloads and SET confirmations): `761 <ournick> <target> <key>
+// <visibility> :<value>`. Same avatar handling as live notifications.
+func (m *Manager) handleMetadataKeyValue(c *conn, client *girc.Client, e *girc.Event) {
+	// Params: our nick, target, key, visibility, value (last param may
+	// be absent for a removed key).
+	if len(e.Params) < 4 || e.Params[2] != metadataAvatarKey {
+		return
+	}
+	url := ""
+	if len(e.Params) > 4 {
+		url = e.Params[4]
+	}
+	m.applyPeerAvatar(c, client, e.Params[1], url)
+}
+
+// handleMetadataNotSet processes 766 RPL_KEYNOTSET (`766 <ournick>
+// <target> <key>`): the peer has no avatar - clear any stale mirror.
+func (m *Manager) handleMetadataNotSet(c *conn, client *girc.Client, e *girc.Event) {
+	if len(e.Params) < 3 || e.Params[2] != metadataAvatarKey {
+		return
+	}
+	m.applyPeerAvatar(c, client, e.Params[1], "")
+}
+
+// handleMetadataSyncLater processes 774 RPL_METADATASYNCLATER: the
+// server postponed the sync (big channel, load) and says when to retry.
+func (m *Manager) handleMetadataSyncLater(c *conn, client *girc.Client, e *girc.Event) {
+	if len(e.Params) < 2 {
+		return
+	}
+	retry := 0
+	if len(e.Params) > 2 {
+		retry, _ = strconv.Atoi(e.Params[2])
+	}
+	m.metadataSyncRetry(c, e.Params[1], retry)
+}
+
+// applyPeerAvatar mirrors one peer avatar value (empty = clear) from any
+// metadata source - notifications, SYNC batches, GET answers.
+func (m *Manager) applyPeerAvatar(c *conn, client *girc.Client, nick, url string) {
+	if nick == "" || strings.EqualFold(nick, client.GetNick()) {
+		return
 	}
 	if url == "" {
 		_ = m.store.PutPeerAvatar(c.userID, nick, "")

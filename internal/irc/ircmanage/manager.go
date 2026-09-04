@@ -220,6 +220,16 @@ type conn struct {
 	metadataCapUp atomic.Bool
 	peerFetchMu   sync.Mutex
 	peerFetching  map[string]bool
+
+	// metaRetries counts postponed metadata syncs per target, capping
+	// RPL_METADATASYNCLATER retry loops.
+	metaRetryMu sync.Mutex
+	metaRetries map[string]int
+
+	// histSelectorBroken trips when an anchored CHATHISTORY request
+	// coincided with the link dying (servers whose selector handling
+	// hangs the connection); anchored pages stop until reconnect.
+	histSelectorBroken atomic.Bool
 }
 
 func (c *conn) histCap() bool      { return c.histCapUp.Load() }
@@ -695,6 +705,18 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 				return
 			default:
 			}
+		// An anchored CHATHISTORY page in flight when the link died is
+		// the selector-kill signature (some servers hang the connection
+		// on any start-selector other than *): stop asking, scroll-up
+		// falls back to the buffer instead of a grey-reconnect loop.
+		c.batchMu.Lock()
+		inFlight := c.pageCh != nil && time.Since(c.pageIssued) < 10*time.Second
+		c.batchMu.Unlock()
+		if inFlight {
+			if !c.histSelectorBroken.Swap(true) {
+				m.log.Warn("chathistory selector killed the link; disabling anchored pages", "user", userID, "network", networkID)
+			}
+		}
 		if cErr != nil {
 			// Surface the failure as a Clyde system DM - the guild
 			// just sits greyed-out otherwise, with the reason buried
@@ -954,6 +976,22 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.handleMetadataEvent(c, client, &e)
 			return
 		}
+		if e.Command == "761" {
+			// RPL_KEYVALUE: answers to METADATA GET/LIST/SET and SYNC
+			// batches - the current avatar values of channel peers.
+			m.handleMetadataKeyValue(c, client, &e)
+			return
+		}
+		if e.Command == "766" {
+			// RPL_KEYNOTSET: the peer carries no avatar key.
+			m.handleMetadataNotSet(c, client, &e)
+			return
+		}
+		if e.Command == "774" {
+			// RPL_METADATASYNCLATER: retry the channel sync later.
+			m.handleMetadataSyncLater(c, client, &e)
+			return
+		}
 		if e.Command == "TOPIC" && len(e.Params) > 0 {
 			// Every TOPIC broadcast lands here - our own set too, as girc
 			// flags it Echo and only this ALL_EVENTS branch sees echoes.
@@ -1160,6 +1198,9 @@ func (m *Manager) registerHandlers(c *conn) {
 			}
 			// Freshly joined: ask the upstream for recent history once.
 			m.maybeChatPrefill(c, e.Params[0])
+			// Pull current peer avatars (servers that don't push them
+			// with the join burst need the explicit SYNC).
+			m.metadataSyncChannel(c, e.Params[0])
 		} else if e.Source != nil {
 			// A foreign peer joined: their member rows are pickable in
 			// the client's mention autocomplete, but the pill renders
