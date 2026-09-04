@@ -71,7 +71,7 @@ func (s *Server) invitePayload(code string, net *storage.Network, mem *storage.M
 	return map[string]any{
 		"type":                       0,
 		"code":                       code,
-		"guild":                      map[string]any{"id": net.ID, "name": net.Name, "splash": nil, "banner": nil, "description": nil, "icon": nil, "features": []any{}, "verification_level": 0, "vanity_url_code": nil, "nsfw_level": 0, "premium_subscription_count": 0},
+		"guild":                      map[string]any{"id": net.ID, "name": net.Name, "splash": nil, "banner": nil, "description": nil, "icon": network.GuildIconValue(net), "features": []any{}, "verification_level": 0, "vanity_url_code": nil, "nsfw_level": 0, "premium_subscription_count": 0},
 		"guild_id":                   net.ID,
 		"channel":                    channel,
 		"inviter":                    map[string]any{"id": u.ID, "username": u.Username, "avatar": model.AvatarPtr(u.Avatar), "discriminator": "0", "public_flags": 0, "bot": false},
@@ -1199,7 +1199,7 @@ func (s *Server) handleGuildPreview(w http.ResponseWriter, r *http.Request, u *s
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                       guildID,
 		"name":                     net.Name,
-		"icon":                     nil,
+		"icon":                     network.GuildIconValue(net),
 		"splash":                   nil,
 		"discovery_splash":         nil,
 		"emojis":                   []any{},

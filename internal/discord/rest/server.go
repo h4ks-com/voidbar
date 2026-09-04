@@ -61,6 +61,11 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	// resolves. No auth: same discovery-CDN semantics as /avatars.
 	mux.HandleFunc("GET /users/{user}/avatars/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("HEAD /users/{user}/avatars/{hash}", s.handleAvatarFile)
+	// Guild icons mirrored from upstream draft/ICON: the client requests
+	// /icons/{guild}/{hash}.png (IconUtils' guild-icon chain); the bytes
+	// live in the avatar store under the same hash. No auth, CDN-style.
+	mux.HandleFunc("GET /icons/{guild}/{hash}", s.handleAvatarFile)
+	mux.HandleFunc("HEAD /icons/{guild}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	// User notes ("Add Note" in the profile sheet).
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleUserNotes))

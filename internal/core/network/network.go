@@ -349,7 +349,7 @@ func (s *Service) guildUpdatePayload(m *storage.Membership, net *storage.Network
 	return map[string]any{
 		"id":                            net.ID,
 		"name":                          net.Name,
-		"icon":                          nil,
+		"icon":                          GuildIconValue(net),
 		"owner_id":                      model.ClydeID,
 		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
 		"member_count":                  count,
@@ -1858,7 +1858,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	return map[string]any{
 		"id":                            net.ID,
 		"name":                          net.Name,
-		"icon":                          nil,
+		"icon":                          GuildIconValue(net),
 		"owner_id":                      model.ClydeID,
 		"joined_at":                     m.JoinedAt.Format(time.RFC3339),
 		"channels":                      channels,

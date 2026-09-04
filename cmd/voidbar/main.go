@@ -107,6 +107,9 @@ func serveCmd(args []string, log *slog.Logger) error {
 	manager.SetMemberNotifier(netSvc.RefreshMember)
 	manager.SetLinkNotifier(netSvc.OnLinkChange)
 	manager.SetPeerAvatarNotifier(netSvc.RefreshPeerAvatar)
+	// Upstream draft/ICON network icons are mirrored into the avatar
+	// store and re-announced as GUILD_UPDATE.
+	manager.SetIconNotifier(netSvc.OnNetworkIcon)
 	// Arm the embed media proxy: unfurled images are mirrored locally
 	// and served from the public origin (see SetPublicURL).
 	manager.SetPublicURL(cfg.Server.PublicURL)

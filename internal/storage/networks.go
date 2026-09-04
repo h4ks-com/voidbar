@@ -28,10 +28,16 @@ type Network struct {
 	// ChannelKeys holds per-channel +k keys (lowercased name -> key) from
 	// the inline "#chan:key" connection-string syntax.
 	ChannelKeys map[string]string `json:"channel_keys,omitempty"`
+	// IconHash/IconURL mirror the upstream draft/ICON network icon: the
+	// bytes live in the avatar store under IconHash (served from
+	// /icons/{guild}/{hash}), IconURL is the upstream original used to
+	// dedupe re-mirrors across reconnects.
+	IconHash    string            `json:"icon_hash,omitempty"`
+	IconURL     string            `json:"icon_url,omitempty"`
 	// Categories are local grouping channels (type 4); IRC has none.
 	Categories []Category        `json:"categories,omitempty"`
-	CreatedBy   string            `json:"created_by"`
-	CreatedAt   time.Time         `json:"created_at"`
+	CreatedBy   string           `json:"created_by"`
+	CreatedAt   time.Time        `json:"created_at"`
 }
 
 // Channel is a Discord-facing channel backed by an IRC channel or query.
@@ -399,6 +405,32 @@ func (s *Storage) UpsertNetwork(n *Network) error {
 			return err
 		}
 		return txn.Set(netConnKey(n.ConnID), []byte(n.ID))
+	})
+}
+
+// SetNetworkIcon persists the mirrored network icon (avatar-store hash +
+// upstream URL) on the network record.
+func (s *Storage) SetNetworkIcon(netID, hash, iconURL string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(networkKey(netID))
+		if err != nil {
+			return err
+		}
+		b, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		var n Network
+		if err := json.Unmarshal(b, &n); err != nil {
+			return err
+		}
+		n.IconHash = hash
+		n.IconURL = iconURL
+		nb, err := json.Marshal(n)
+		if err != nil {
+			return err
+		}
+		return txn.Set(networkKey(netID), nb)
 	})
 }
 

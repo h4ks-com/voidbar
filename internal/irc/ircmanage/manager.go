@@ -50,6 +50,10 @@ type Manager struct {
 	// arrives or changes via draft/metadata-2.
 	peerAvatar func(userID, networkID, nick string)
 
+	// iconChange (optional) is notified when the upstream advertises or
+	// changes its draft/ICON network icon in ISUPPORT.
+	iconChange func(userID, networkID, iconURL string)
+
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
 
@@ -89,6 +93,11 @@ type conn struct {
 	// when the read loop dies); drives guild (un)availability on the
 	// Discord side.
 	linkUp atomic.Bool
+
+	// iconSeen is the last draft/ICON URL already notified for this
+	// connection; ISUPPORT arrives in batches, so the token is announced
+	// once per (changed) value instead of once per 005 line.
+	iconSeen string
 
 	// pendingJoins tracks channels this connection is trying to join
 	// (lowercased). Optimistic channel-creates only roll back on upstream
@@ -800,6 +809,13 @@ func (m *Manager) SetMemberNotifier(fn func(userID, networkID, nick string)) {
 	m.memberChange = fn
 }
 
+// SetIconNotifier installs the callback fired when an upstream advertises
+// (or changes) its draft/ICON network icon in ISUPPORT. The Discord side
+// mirrors the image and maps it to the guild icon.
+func (m *Manager) SetIconNotifier(fn func(userID, networkID, iconURL string)) {
+	m.iconChange = fn
+}
+
 // fireLinkChange notifies the network service of a link state transition.
 func (m *Manager) fireLinkChange(c *conn, up bool) {
 	if m.linkChange == nil {
@@ -986,6 +1002,29 @@ func (m *Manager) registerHandlers(c *conn) {
 			m.log.Debug("msgid persist failed", "err", err, "msg", ref.Snowflake)
 		}
 		m.log.Debug("msgid mapped", "user", c.userID, "network", c.networkID, "snowflake", ref.Snowflake, "msgid", msgid)
+	})
+
+	// draft/ICON rides ISUPPORT (005), which lands after 001 in several
+	// batches; parse the params directly so the check does not depend on
+	// girc's internal handler having ingested the batch yet. All handlers
+	// for a connection run on girc's single dispatch loop, so iconSeen
+	// needs no lock. A missing or unchanged URL stays silent.
+	c.client.Handlers.Add("005", func(client *girc.Client, e girc.Event) {
+		for _, p := range e.Params {
+			if !strings.HasPrefix(p, "draft/ICON=") {
+				continue
+			}
+			url := strings.TrimPrefix(p, "draft/ICON=")
+			if url == "" || url == c.iconSeen {
+				return
+			}
+			c.iconSeen = url
+			if m.iconChange != nil {
+				m.log.Info("network icon advertised", "user", c.userID, "network", c.networkID, "url", url)
+				m.iconChange(c.userID, c.networkID, url)
+			}
+			return
+		}
 	})
 
 	c.client.Handlers.Add(girc.CONNECTED, func(client *girc.Client, e girc.Event) {
