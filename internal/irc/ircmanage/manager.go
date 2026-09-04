@@ -100,6 +100,10 @@ type conn struct {
 	// once per (changed) value instead of once per 005 line.
 	iconSeen string
 
+	// lastLinkErr dedupes Clyde link-failure notices: one system DM per
+	// distinct error text, re-armed when registration completes.
+	lastLinkErr string
+
 	// pendingJoins tracks channels this connection is trying to join
 	// (lowercased). Optimistic channel-creates only roll back on upstream
 	// error numerics while their channel is pending; a stale numeric for a
@@ -687,8 +691,16 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 				return
 			default:
 			}
-			if cErr != nil {
-				m.log.Warn("irc link down, retrying", "user", userID, "network", networkID, "err", cErr, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
+		if cErr != nil {
+			// Surface the failure as a Clyde system DM - the guild
+			// just sits greyed-out otherwise, with the reason buried
+			// in server logs. Retries repeat the same error; notify
+			// on change only.
+			if msg := cErr.Error(); msg != c.lastLinkErr {
+				c.lastLinkErr = msg
+				m.clydeSay(userID, networkID, linkFailureNotice(net, cErr))
+			}
+			m.log.Warn("irc link down, retrying", "user", userID, "network", networkID, "err", cErr, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
 			} else {
 				m.log.Warn("irc link closed, retrying", "user", userID, "network", networkID, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
 			}
@@ -1040,6 +1052,7 @@ func (m *Manager) registerHandlers(c *conn) {
 		if !c.linkUp.Swap(true) {
 			m.fireLinkChange(c, true)
 		}
+		c.lastLinkErr = ""
 		channels := ""
 		sweep := []string(nil)
 		if mem, err := m.store.GetMembership(c.networkID, c.userID); err == nil {
@@ -1427,8 +1440,34 @@ func (m *Manager) clydeDM(userID string) *storage.DMChannel {
 	return dm
 }
 
+// linkFailureNotice renders an upstream connection failure as a Clyde
+// system notice. Certificate hostname mismatches get an actionable hint:
+// the cert names a host the connection string didn't use, so the fix is
+// usually to connect as the host the certificate actually covers.
+func linkFailureNotice(n *storage.Network, err error) string {
+	scheme := "irc://"
+	if n.TLS {
+		scheme = "ircs://"
+	}
+	addr := n.Host
+	if n.Port != 0 {
+		addr = fmt.Sprintf("%s:%d", n.Host, n.Port)
+	}
+	msg := err.Error()
+	text := fmt.Sprintf("Connection to %s%s failed: %s", scheme, addr, msg)
+	const certMark = "x509: certificate is valid for "
+	if i := strings.Index(msg, certMark); i >= 0 {
+		rest := msg[i+len(certMark):]
+		if comma := strings.IndexByte(rest, ','); comma > 0 {
+			cname := strings.TrimSpace(rest[:comma])
+			text += fmt.Sprintf("\nThat certificate belongs to %s - connect as %s%s instead, or have the hostname added to the certificate.", cname, scheme, cname)
+		}
+	}
+	return text
+}
+
 // clydeSay delivers a system notice as a DM from Clyde (bot), creating the
-// thread on first contact like a real query would.
+// thread on first contact like a query would.
 func (m *Manager) clydeSay(userID, networkID, text string) {
 	dm := m.clydeDM(userID)
 	if dm == nil {
