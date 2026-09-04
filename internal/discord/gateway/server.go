@@ -602,6 +602,25 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			privateChannels = dms
 		}
 	}
+	// Clyde is the control bot: friended for every account so his DM (the
+	// setup/control thread) is always reachable - a fresh account with no
+	// notices yet has no other way to open the thread.
+	clydeFriend := map[string]any{
+		"id":   model.ClydeID,
+		"type": 1,
+		"user": map[string]any{
+			"id":            model.ClydeID,
+			"username":      "Clyde",
+			"discriminator": "0",
+			"bot":           true,
+		},
+	}
+	clydePresence := map[string]any{
+		"user": map[string]any{"id": model.ClydeID},
+		"status":        "online",
+		"client_status": map[string]any{"web": "online"},
+		"activities":    []any{},
+	}
 	return &ReadyData{
 		V:                    9,
 		User:                 model.ToUser(user),
@@ -610,9 +629,9 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		ResumeURL:            s.cfg.GatewayWSURL(),
 		ResumeGatewayURL:     s.cfg.GatewayWSURL(),
 		PrivateChannels:      privateChannels,
-		Users:                []any{},
-		Presences:            []any{},
-		Relationships:        []any{},
+		Users:                []any{clydeFriend["user"]},
+		Presences:            []any{clydePresence},
+		Relationships:        []any{clydeFriend},
 		Sessions:             []any{},
 		GeoOrderedRTCRegions: []any{},
 		SessionType:      "normal",

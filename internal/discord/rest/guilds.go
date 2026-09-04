@@ -3,6 +3,7 @@ package rest
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -99,6 +100,12 @@ func (s *Server) invitePayload(code string, net *storage.Network, mem *storage.M
 func (s *Server) handleGetInvite(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	code := r.PathValue("code")
 	inputValue := r.URL.Query().Get("inputValue")
+	// The repacked client routes the whole pasted connection string as
+	// the invite code (discord://app/invite/ircs%3A%2F%2F...), so the
+	// string arrives in the path rather than inputValue.
+	if inputValue == "" {
+		inputValue = code
+	}
 	if s.net == nil {
 		jsonError(w, http.StatusServiceUnavailable, "networks not configured")
 		return
@@ -1320,6 +1327,121 @@ func (s *Server) handleLeaveGuild(w http.ResponseWriter, r *http.Request, u *sto
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// clydeHelpText documents the control-bot surface. The join syntax is the
+// full connection string, which the invite dialog cannot carry (the client
+//'s router drops schemed pastes and truncates queries).
+const clydeHelpText = "I manage your networks. Send me a connection string to join one:\n" +
+	"ircs://irc.example.com:6697/#channel?nick=myself&name=Label&sasl=user:pass\n" +
+	"Everything after the host is optional: #channels to auto-join, nick, name, sasl (SASL PLAIN).\n" +
+	"Commands: help, list, leave <host>"
+
+// clydeReply appends a Clyde-authored message to the control thread -
+// dispatch plus replay buffer, the same shape the upstream clydeSay
+// produces - so answers survive reconnects and reach every session.
+func (s *Server) clydeReply(dm *storage.DMChannel, text string) {
+	msgID := s.net.NewMessageID()
+	ts := model.NowTimestamp()
+	if s.gw != nil {
+		s.gw.Dispatch(dm.OwnerID, "MESSAGE_CREATE",
+			messagePayload(msgID, dm.ID, text, ts, model.ClydeID, "Clyde", nil, nil, nil))
+	}
+	if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
+		ID:         msgID,
+		ChannelID:  dm.ID,
+		AuthorID:   "irc:Clyde",
+		AuthorName: "Clyde",
+		Content:    text,
+		Timestamp:  ts,
+	}); err != nil {
+		s.log.Warn("clyde buffer append failed", "err", err, "channel", dm.ID)
+	}
+	s.net.TouchDMChannel(dm.ID)
+}
+
+// clydeCommand runs one control-thread turn: the user's line is echoed
+// (own-message handling identical to a normal DM send), then interpreted -
+// connection strings join networks, the few keywords manage them, anything
+// else gets the help text. Returns the echo payload as the HTTP response.
+func (s *Server) clydeCommand(u *storage.User, dm *storage.DMChannel, req *sendMessageRequest) map[string]any {
+	echo := messagePayload(s.net.NewMessageID(), dm.ID, req.Content,
+		model.NowTimestamp(), u.ID, u.Username, req.Nonce, nil, s.net.SelfAvatar(u.ID))
+	if s.gw != nil {
+		s.gw.Dispatch(u.ID, "MESSAGE_CREATE", echo)
+	}
+	if err := s.net.AppendBufferedMessage(storage.BufferedMessage{
+		ID:         echo["id"].(string),
+		ChannelID:  dm.ID,
+		AuthorID:   u.ID,
+		AuthorName: u.Username,
+		Content:    req.Content,
+		Nonce:      req.Nonce,
+		Timestamp:  echo["timestamp"].(string),
+	}); err != nil {
+		s.log.Warn("clyde buffer append failed", "err", err, "channel", dm.ID)
+	}
+	s.net.TouchDMChannel(dm.ID)
+
+	line := strings.TrimSpace(req.Content)
+	switch {
+	case line == "" || strings.EqualFold(line, "help"):
+		s.clydeReply(dm, clydeHelpText)
+	case strings.EqualFold(line, "list") || strings.EqualFold(line, "networks"):
+		rows := s.net.UserNetworks(u.ID)
+		if len(rows) == 0 {
+			s.clydeReply(dm, "No networks yet. Send me a connection string to join one (see help).")
+			return echo
+		}
+		var b strings.Builder
+		b.WriteString("Your networks:\n")
+		for _, r := range rows {
+			status := "up"
+			if !r.Up {
+				status = "down"
+			}
+			fmt.Fprintf(&b, "- %s (%s) - %s\n", r.Name, r.Host, status)
+		}
+		s.clydeReply(dm, b.String())
+	case strings.HasPrefix(strings.ToLower(line), "leave "):
+		host := strings.TrimSpace(line[len("leave "):])
+		if host == "" {
+			s.clydeReply(dm, "Usage: leave <host>")
+			return echo
+		}
+		net, _, err := s.net.FindByHost(u.ID, host)
+		if err != nil {
+			s.clydeReply(dm, "No network matching "+host)
+			return echo
+		}
+		name := net.Name
+		if err := s.net.Leave(u.ID, net.ID); err != nil {
+			s.clydeReply(dm, "Failed to leave "+name+": "+err.Error())
+			return echo
+		}
+		s.clydeReply(dm, "Left "+name+".")
+	default:
+		if !strings.Contains(line, "://") {
+			s.clydeReply(dm, "That doesn't look like a connection string.\n\n"+clydeHelpText)
+			return echo
+		}
+		net, err := s.net.Join(u.ID, line)
+		if err != nil {
+			s.clydeReply(dm, "Can't join: "+err.Error())
+			return echo
+		}
+		// Same GUILD_CREATE fan-out the invite preview uses: the rail
+		// updates from the dispatch, not from this DM exchange.
+		if s.gw != nil {
+			for _, payload := range s.net.GuildCreateForUser(u.ID) {
+				if g, ok := payload.(map[string]any); ok && g["id"] == net.ID {
+					s.gw.Dispatch(u.ID, "GUILD_CREATE", g)
+				}
+			}
+		}
+		s.clydeReply(dm, "Joining "+net.Name+". I'll report here if the connection fails.")
+	}
+	return echo
+}
+
 // handleSendMessage relays a Discord message to IRC. The channel id is a
 // snowflake resolved through the channel registry.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
@@ -1414,6 +1536,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if dm, err := s.net.DMChannelByID(channelID); err == nil {
 		if dm.OwnerID != u.ID {
 			jsonError(w, http.StatusNotFound, "unknown channel")
+			return
+		}
+		// The Clyde thread doubles as the control channel (a BouncerServ):
+		// messages are commands, not relays. Connection strings join,
+		// help/list/leave manage - the bot answers in the same thread.
+		if dm.NetworkID == model.ClydeNetID {
+			writeJSON(w, http.StatusOK, s.clydeCommand(u, dm, &req))
 			return
 		}
 		// Snowflake minted before the send: the manager queues it so the

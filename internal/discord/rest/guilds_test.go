@@ -2189,3 +2189,110 @@ func TestAttachmentUploadFlow(t *testing.T) {
 	}
 }
 
+
+// TestClydeControlBot: the Clyde DM thread is the control channel. A
+// connection string sent there joins the network (echoed to the sender,
+// confirmed by the bot, guild visible in the list), help answers with
+// usage, and list reports the join.
+func TestClydeControlBot(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+
+	// Open the control thread like the client does from the friends list.
+	rec, out := do(t, h, "POST", "/api/v9/users/@me/channels", token, map[string]any{
+		"recipient_id": model.ClydeID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open clyde dm: %d %v", rec.Code, out)
+	}
+	dmID := out["id"].(string)
+
+	// Garbage gets the help text as a Clyde reply.
+	rec, out = do(t, h, "POST", "/api/v9/channels/"+dmID+"/messages", token, map[string]any{
+		"content": "hello there",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send: %d %v", rec.Code, out)
+	}
+	// A connection string joins.
+	const conn = "ircs://irc.libera.chat:6697/#go?name=Libera&nick=libtester&sasl=u:p"
+	rec, out = do(t, h, "POST", "/api/v9/channels/"+dmID+"/messages", token, map[string]any{
+		"content": conn,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send connstring: %d %v", rec.Code, out)
+	}
+	if out["content"] != conn {
+		t.Fatalf("echo content: %v", out["content"])
+	}
+	guilds, err := netSvc.GuildsForUser(user.ID)
+	if err != nil || len(guilds) != 1 {
+		t.Fatalf("guilds after join: %v %v", err, guilds)
+	}
+	g := guilds[0].(map[string]any)
+	if g["name"] != "Libera" {
+		t.Fatalf("guild name: %v", g["name"])
+	}
+	// The bot's replies are buffered in the thread: help + confirmation.
+	msgs := netSvc.ChannelMessages(dmID, "", "", 50)
+	if len(msgs) < 3 {
+		t.Fatalf("expected help+join replies buffered, got %d", len(msgs))
+	}
+	var sawHelp, sawJoin bool
+	for _, m := range msgs {
+		if m.AuthorName != "Clyde" {
+			continue
+		}
+		if strings.Contains(m.Content, "connection string") {
+			sawHelp = true
+		}
+		if strings.Contains(m.Content, "Joining Libera") {
+			sawJoin = true
+		}
+	}
+	if !sawHelp || !sawJoin {
+		t.Fatalf("replies: help=%v join=%v", sawHelp, sawJoin)
+	}
+	// list reports the network.
+	rec, out = do(t, h, "POST", "/api/v9/channels/"+dmID+"/messages", token, map[string]any{
+		"content": "list",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send list: %d", rec.Code)
+	}
+	msgs = netSvc.ChannelMessages(dmID, "", "", 50)
+	sawList := false
+	for _, m := range msgs {
+		if m.AuthorName == "Clyde" && strings.Contains(m.Content, "libera.chat:6697") {
+			sawList = true
+		}
+	}
+	if !sawList {
+		t.Fatal("list reply missing")
+	}
+	// leave tears it down.
+	rec, _ = do(t, h, "POST", "/api/v9/channels/"+dmID+"/messages", token, map[string]any{
+		"content": "leave irc.libera.chat",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send leave: %d", rec.Code)
+	}
+	guilds, _ = netSvc.GuildsForUser(user.ID)
+	if len(guilds) != 0 {
+		t.Fatalf("guilds after leave: %v", guilds)
+	}
+}

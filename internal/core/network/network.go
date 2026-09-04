@@ -1955,6 +1955,34 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 	return guilds, nil
 }
 
+// UserNetworkSummary is one row of the control bot's network listing.
+type UserNetworkSummary struct {
+	Host string
+	Name string
+	Up   bool
+}
+
+// UserNetworks lists the user's joined networks for the control bot.
+func (s *Service) UserNetworks(userID string) []UserNetworkSummary {
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil
+	}
+	out := make([]UserNetworkSummary, 0, len(memberships))
+	for _, m := range memberships {
+		net, err := s.store.GetNetwork(m.NetworkID)
+		if err != nil {
+			continue
+		}
+		host := net.Host
+		if net.Port != 0 {
+			host = fmt.Sprintf("%s:%d", net.Host, net.Port)
+		}
+		out = append(out, UserNetworkSummary{Host: host, Name: net.Name, Up: s.linkUp(m.UserID, net.ID)})
+	}
+	return out
+}
+
 // linkUp reports upstream health for a membership; a nil manager (tests)
 // counts as up so payloads stay available.
 func (s *Service) linkUp(userID, networkID string) bool {
