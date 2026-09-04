@@ -66,6 +66,10 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	// live in the avatar store under the same hash. No auth, CDN-style.
 	mux.HandleFunc("GET /icons/{guild}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("HEAD /icons/{guild}/{hash}", s.handleAvatarFile)
+	// IconUtils' other guild-icon branch builds the API-shaped
+	// /guilds/{guild}/icons/{hash}.jpg; serve it from the same store.
+	mux.HandleFunc("GET /guilds/{guild}/icons/{hash}", s.handleAvatarFile)
+	mux.HandleFunc("HEAD /guilds/{guild}/icons/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("GET /api/v9/users/@me/settings", s.requireAuth(s.handleUserSettings))
 	// User notes ("Add Note" in the profile sheet).
 	mux.HandleFunc("GET /api/v9/users/@me/notes", s.requireAuth(s.handleUserNotes))
