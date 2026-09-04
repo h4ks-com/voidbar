@@ -1923,6 +1923,7 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 		guilds = append(guilds, map[string]any{
 			"id":          net.ID,
 			"name":        net.Name,
+			"icon":        GuildIconValue(net),
 			"unavailable": !s.linkUp(m.UserID, net.ID),
 			"joined_at":   m.JoinedAt.Format(time.RFC3339),
 		})

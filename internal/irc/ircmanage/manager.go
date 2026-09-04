@@ -51,8 +51,9 @@ type Manager struct {
 	peerAvatar func(userID, networkID, nick string)
 
 	// iconChange (optional) is notified when the upstream advertises or
-	// changes its draft/ICON network icon in ISUPPORT.
-	iconChange func(userID, networkID, iconURL string)
+	// changes its draft/ICON network icon in ISUPPORT; returning false
+	// re-arms the announcement so the next reconnect retries the mirror.
+	iconChange func(userID, networkID, iconURL string) bool
 
 	mu    sync.Mutex
 	conns map[string]*conn // key: userID + "\x00" + networkID
@@ -811,8 +812,10 @@ func (m *Manager) SetMemberNotifier(fn func(userID, networkID, nick string)) {
 
 // SetIconNotifier installs the callback fired when an upstream advertises
 // (or changes) its draft/ICON network icon in ISUPPORT. The Discord side
-// mirrors the image and maps it to the guild icon.
-func (m *Manager) SetIconNotifier(fn func(userID, networkID, iconURL string)) {
+// mirrors the image and maps it to the guild icon; a false return means
+// the mirror failed, so the manager re-arms and retries on the next
+// reconnect burst.
+func (m *Manager) SetIconNotifier(fn func(userID, networkID, iconURL string) bool) {
 	m.iconChange = fn
 }
 
@@ -1008,7 +1011,8 @@ func (m *Manager) registerHandlers(c *conn) {
 	// batches; parse the params directly so the check does not depend on
 	// girc's internal handler having ingested the batch yet. All handlers
 	// for a connection run on girc's single dispatch loop, so iconSeen
-	// needs no lock. A missing or unchanged URL stays silent.
+	// needs no lock. A failed mirror clears iconSeen so the next
+	// reconnect's 005 retries it.
 	c.client.Handlers.Add("005", func(client *girc.Client, e girc.Event) {
 		for _, p := range e.Params {
 			if !strings.HasPrefix(p, "draft/ICON=") {
@@ -1019,9 +1023,12 @@ func (m *Manager) registerHandlers(c *conn) {
 				return
 			}
 			c.iconSeen = url
-			if m.iconChange != nil {
-				m.log.Info("network icon advertised", "user", c.userID, "network", c.networkID, "url", url)
-				m.iconChange(c.userID, c.networkID, url)
+			if m.iconChange == nil {
+				return
+			}
+			m.log.Info("network icon advertised", "user", c.userID, "network", c.networkID, "url", url)
+			if !m.iconChange(c.userID, c.networkID, url) {
+				c.iconSeen = ""
 			}
 			return
 		}
