@@ -45,7 +45,10 @@ Covered:
 - REST v9 + Gateway (HELLO/IDENTIFY/READY/HEARTBEAT/RESUME, zlib-stream,
   session replay) enough for the client to boot and render
 - Register/login (argon2id, raw bearer tokens), `user add/list` CLI (admin
-  is CLI-only; no web panel)
+  is CLI-only; no web panel). While the server runs, badger's storage lock
+  blocks the CLI's direct path - pass `--server <base-url>` to provision
+  through the master-key admin API (`POST/GET /api/v9/admin/users`,
+  `X-Master-Key: <hex of master.key>`)
 - Connection strings as invites: paste `irc://host:port/#chan?name=X` into
   the client's "Join a server" field → preview card, join, GUILD_CREATE,
   the guild appears in the rail, the client navigates into the pasted channel

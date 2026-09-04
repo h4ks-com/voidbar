@@ -53,6 +53,11 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("POST /api/v9/auth/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("GET /api/v9/users/@me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("PATCH /api/v9/users/@me", s.requireAuth(s.handleUpdateMe))
+	// Master-key admin API: user provisioning against a RUNNING instance
+	// (the storage lock makes direct CLI access impossible while serve
+	// holds it - the docker deployment case).
+	mux.HandleFunc("POST /api/v9/admin/users", s.handleAdminCreateUser)
+	mux.HandleFunc("GET /api/v9/admin/users", s.handleAdminListUsers)
 	mux.HandleFunc("GET /avatars/{user}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("HEAD /avatars/{user}/{hash}", s.handleAvatarFile)
 	// The client's IconUtils also emits the API-style avatar form

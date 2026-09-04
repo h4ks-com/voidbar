@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -78,7 +81,8 @@ func serveCmd(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if _, err := util.LoadOrCreateMasterKey(cfg.MasterKeyPath()); err != nil {
+	masterKey, err := util.LoadOrCreateMasterKey(cfg.MasterKeyPath())
+	if err != nil {
 		return fmt.Errorf("master key: %w", err)
 	}
 	store, err := storage.Open(cfg.Storage.Path)
@@ -88,6 +92,11 @@ func serveCmd(args []string, log *slog.Logger) error {
 	defer store.Close()
 	sf := util.NewSnowflake(0, 0)
 	authSvc := auth.New(store, sf, cfg.Auth.Registration)
+	// The master key arms the /api/v9/admin/users endpoints so user
+	// provisioning works against the running instance (the CLI's
+	// direct-storage path deadlocks on badger's lock while serve holds
+	// it).
+	authSvc.SetAdminKey(masterKey)
 	gw := gateway.New(authSvc, cfg, log, nil, nil)
 	manager := ircmanage.New(store, gw, log, sf)
 	netSvc := network.NewService(store, gw, sf, manager, log)
@@ -169,6 +178,28 @@ func userCmd(args []string) error {
 	}
 }
 
+// adminKeyFor resolves the master key for remote admin calls: explicit
+// flag, env, or the instance's master.key file next to the storage.
+func adminKeyFor(flagKey, configPath string) (string, error) {
+	if flagKey != "" {
+		return flagKey, nil
+	}
+	if env := os.Getenv("VOIDBAR_ADMIN_KEY"); env != "" {
+		return env, nil
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return "", err
+	}
+	key, err := util.LoadOrCreateMasterKey(cfg.MasterKeyPath())
+	if err != nil {
+		return "", err
+	}
+	// The key file holds 32 raw bytes; the API speaks its hex form
+	// (raw bytes are not header-safe).
+	return hex.EncodeToString(key), nil
+}
+
 func userAddCmd(args []string) error {
 	fs := flag.NewFlagSet("user add", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file")
@@ -176,6 +207,8 @@ func userAddCmd(args []string) error {
 	email := fs.String("email", "", "email")
 	password := fs.String("password", "", "password (omit to read from stdin)")
 	admin := fs.Bool("admin", false, "make user an admin")
+	server := fs.String("server", "", "create via a RUNNING voidbar at this base URL (badger's lock blocks direct storage access while serve holds it)")
+	keyFlag := fs.String("master-key", "", "master key for --server (defaults to $VOIDBAR_ADMIN_KEY or the config's master.key)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -192,13 +225,45 @@ func userAddCmd(args []string) error {
 		}
 		pass = strings.TrimSpace(line)
 	}
+	if *server != "" {
+		key, err := adminKeyFor(*keyFlag, *configPath)
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]any{"username": *username, "email": *email, "password": pass, "admin": *admin})
+		req, err := http.NewRequest("POST", strings.TrimSuffix(*server, "/")+"/api/v9/admin/users", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Master-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		var out struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Admin    bool   `json:"admin"`
+			Message  string `json:"message"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusCreated {
+			return fmt.Errorf("server refused (%d): %s", resp.StatusCode, out.Message)
+		}
+		fmt.Printf("created user %s (username=%s admin=%v)\n", out.ID, out.Username, out.Admin)
+		return nil
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
 	store, err := storage.Open(cfg.Storage.Path)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w\nstorage is locked by a running voidbar? pass --server <base-url> to provision through the admin API", err)
 	}
 	defer store.Close()
 	hash, err := util.HashPassword(pass)
@@ -234,8 +299,47 @@ func userAddCmd(args []string) error {
 func userListCmd(args []string) error {
 	fs := flag.NewFlagSet("user list", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file")
+	server := fs.String("server", "", "list via a RUNNING voidbar at this base URL")
+	keyFlag := fs.String("master-key", "", "master key for --server (defaults to $VOIDBAR_ADMIN_KEY or the config's master.key)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *server != "" {
+		key, err := adminKeyFor(*keyFlag, *configPath)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequest("GET", strings.TrimSuffix(*server, "/")+"/api/v9/admin/users", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-Master-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		var users []struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Email    string `json:"email"`
+			Admin    bool   `json:"admin"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("server refused (%d)", resp.StatusCode)
+		}
+		if len(users) == 0 {
+			fmt.Println("no users")
+			return nil
+		}
+		fmt.Printf("%-20s %-32s %-30s %-6s\n", "ID", "USERNAME", "EMAIL", "ADMIN")
+		for _, u := range users {
+			fmt.Printf("%-20s %-32s %-30s %-6v\n", u.ID, u.Username, u.Email, u.Admin)
+		}
+		return nil
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -243,7 +347,7 @@ func userListCmd(args []string) error {
 	}
 	store, err := storage.Open(cfg.Storage.Path)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w\nstorage is locked by a running voidbar? pass --server <base-url> to read through the admin API", err)
 	}
 	defer store.Close()
 	users, err := store.ListUsers()
