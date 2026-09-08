@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -269,7 +270,17 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": Version})
+	body := map[string]any{
+		"status":     "ok",
+		"version":    Version,
+		"goroutines": runtime.NumGoroutine(),
+	}
+	if s.gw != nil {
+		live, total := s.gw.SessionStats()
+		body["gw_sessions_live"] = live
+		body["gw_sessions_total"] = total
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {

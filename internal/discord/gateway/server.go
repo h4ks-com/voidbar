@@ -121,17 +121,50 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, guildsForUser fu
 	}
 }
 
+const sessionTTL = 5 * time.Minute
+
 func (s *Server) Dispatch(userID, t string, d any) {
-	s.mu.RLock()
+	dd, err := json.Marshal(d)
+	if err != nil {
+		s.log.Error("dispatch marshal failed", "err", err, "user", userID, "t", t)
+		return
+	}
+	s.mu.Lock()
+	s.reapStaleLocked()
 	sessions := make([]*Session, 0, len(s.byUser[userID]))
 	for _, sess := range s.byUser[userID] {
 		sessions = append(sessions, sess)
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	for _, sess := range sessions {
-		if _, err := sess.dispatch(t, d, true); err != nil {
+		if _, err := sess.dispatchRaw(t, dd, true); err != nil {
 			s.log.Error("dispatch failed", "err", err, "user", userID, "t", t)
 		}
+	}
+}
+
+// reapStaleLocked drops sessions that have been offline past the resume
+// TTL. Without this every websocket that IDENTIFYs and dies left a
+// session (with its whole replay log) in the maps forever - a reconnect
+// looping phone measured in thousands of sessions leaked both memory and
+// fan-out CPU. Callers hold s.mu.
+func (s *Server) reapStaleLocked() {
+	for id, sess := range s.sessions {
+		if !sess.stale(sessionTTL) {
+			continue
+		}
+		delete(s.sessions, id)
+		if userSessions := s.byUser[sess.UserID]; userSessions != nil {
+			delete(userSessions, id)
+			if len(userSessions) == 0 {
+				delete(s.byUser, sess.UserID)
+			}
+		}
+		sess.mu.Lock()
+		sess.events = nil
+		sess.eventsBytes = 0
+		sess.mu.Unlock()
+		s.log.Debug("gateway session reaped", "user", sess.UserID, "session", id)
 	}
 }
 
@@ -526,6 +559,20 @@ func (s *Server) closeWS(conn *websocket.Conn, code int, reason string) {
 	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(5*time.Second))
 }
 
+// SessionStats reports live and total (live + resumable) gateway
+// sessions; exposed via /health to watch for session leaks on prod.
+func (s *Server) SessionStats() (live, total int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sess := range s.sessions {
+		total++
+		if !sess.offline() {
+			live++
+		}
+	}
+	return live, total
+}
+
 func (s *Server) createSession(userID string) *Session {
 	id, err := util.RandomToken(16)
 	if err != nil {
@@ -534,6 +581,7 @@ func (s *Server) createSession(userID string) *Session {
 	sess := &Session{ID: id, UserID: userID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reapStaleLocked()
 	s.sessions[id] = sess
 	if s.byUser[userID] == nil {
 		s.byUser[userID] = make(map[string]*Session)

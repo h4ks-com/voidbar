@@ -3,9 +3,16 @@ package gateway
 import (
 	"encoding/json"
 	"sync"
+	"time"
 )
 
-const replayLimit = 1024
+const (
+	replayLimit = 256
+	// replayBytes caps the retained replay log per session: a couple of
+	// READY-sized frames alone can run to megabytes, and sessions linger
+	// for their resume TTL, so frames alone are not a safe bound.
+	replayBytes = 4 << 20
+)
 
 type eventRecord struct {
 	seq   int64
@@ -19,7 +26,14 @@ type Session struct {
 	mu     sync.Mutex
 	seq    int64
 	events []eventRecord
-	send   chan writeRequest
+	// eventsBytes tracks the retained replay log size for replayBytes.
+	eventsBytes int
+	send        chan writeRequest
+	// detachedAt is set when the socket goes away; a session that stays
+	// offline past the resume TTL is reaped wholesale (see
+	// Server.reapStaleLocked) - otherwise every reconnect with a fresh
+	// IDENTIFY parked another 256-frame session forever.
+	detachedAt time.Time
 
 	// memberLists tracks which lazy member lists this session asked for
 	// via op 14 (key "<guild>\x00<channel>", empty channel = the
@@ -61,6 +75,7 @@ func (s *Session) attach(ch chan writeRequest) bool {
 		close(s.send)
 	}
 	s.send = ch
+	s.detachedAt = time.Time{}
 	return tookOver
 }
 
@@ -69,6 +84,7 @@ func (s *Session) detach(ch chan writeRequest) {
 	defer s.mu.Unlock()
 	if s.send == ch {
 		s.send = nil
+		s.detachedAt = time.Now()
 	}
 }
 
@@ -78,9 +94,16 @@ func (s *Session) offline() bool {
 	return s.send == nil
 }
 
-func (s *Session) dispatch(t string, d any, record bool) (int64, error) {
+// stale reports whether the session has been offline past ttl and can be
+// dropped entirely - a later RESUME will just get an INVALID_SESSION and
+// re-IDENTIFY, which is the documented cold path.
+func (s *Session) stale(ttl time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.send == nil && !s.detachedAt.IsZero() && time.Since(s.detachedAt) > ttl
+}
+
+func (s *Session) dispatch(t string, d any, record bool) (int64, error) {
 	var dd json.RawMessage
 	if d != nil {
 		b, err := json.Marshal(d)
@@ -89,6 +112,16 @@ func (s *Session) dispatch(t string, d any, record bool) (int64, error) {
 		}
 		dd = b
 	}
+	return s.dispatchRaw(t, dd, record)
+}
+
+// dispatchRaw is dispatch with a pre-marshalled payload. The fan-out path
+// marshals the event once and hands the same bytes to every session -
+// per-session json.Marshal showed up as steady CPU once orphaned sessions
+// accumulated.
+func (s *Session) dispatchRaw(t string, dd json.RawMessage, record bool) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.seq++
 	seq := s.seq
 	frame, err := json.Marshal(Payload{Op: OpDispatch, S: &seq, T: t, D: dd})
@@ -98,15 +131,20 @@ func (s *Session) dispatch(t string, d any, record bool) (int64, error) {
 	}
 	if record {
 		s.events = append(s.events, eventRecord{seq: seq, frame: frame})
+		s.eventsBytes += len(frame)
+		for s.eventsBytes > replayBytes && len(s.events) > 1 {
+			s.eventsBytes -= len(s.events[0].frame)
+			s.events = s.events[1:]
+		}
 		if len(s.events) > replayLimit {
 			s.events = s.events[len(s.events)-replayLimit:]
 		}
 	}
-	s.sendFrame(frame)
+	s.sendFrameLocked(frame)
 	return seq, nil
 }
 
-func (s *Session) sendFrame(frame []byte) {
+func (s *Session) sendFrameLocked(frame []byte) {
 	if s.send == nil {
 		return
 	}
@@ -115,6 +153,7 @@ func (s *Session) sendFrame(frame []byte) {
 	default:
 		close(s.send)
 		s.send = nil
+		s.detachedAt = time.Now()
 	}
 }
 
