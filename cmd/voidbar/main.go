@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	// Registers /debug/pprof handlers on http.DefaultServeMux, which the
+	// optional pprof listener below serves; keep the import side-effect.
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -148,6 +151,18 @@ func serveCmd(args []string, log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Optional net/http/pprof endpoint (VOIDBAR_PPROF_ADDR, e.g.
+	// "127.0.0.1:6060" - bind inside the compose network, not the public
+	// listener). Off unless asked for; the default mux import keeps it
+	// out of the public routes.
+	if addr := os.Getenv("VOIDBAR_PPROF_ADDR"); addr != "" {
+		go func() {
+			log.Info("pprof listening", "addr", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Error("pprof server failed", "err", err)
+			}
+		}()
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.ListenAndServe()
