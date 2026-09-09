@@ -11,18 +11,19 @@ import (
 
 // sendJob is one queued upstream message write (see conn.sendJobs).
 type sendJob struct {
-	target  string
-	content string
-	query   bool // DM path: typing TAGMSG + PRIVMSG to a bare nick
+	target     string
+	content    string
+	query      bool   // DM path: typing TAGMSG + PRIVMSG to a bare nick
+	replyMsgid string // +reply tag when this message is a reply
 }
 
 // enqueueSend hands a message write to the connection's worker. The
 // caller has already validated connectivity; FIFO across calls is the
 // worker's guarantee, and rate-limiter delays (~1s per girc event) stay
 // off the REST path.
-func (c *conn) enqueueSend(target, content string, query bool) {
+func (c *conn) enqueueSend(target, content string, query bool, replyMsgid string) {
 	select {
-	case c.sendJobs <- sendJob{target: target, content: content, query: query}:
+	case c.sendJobs <- sendJob{target: target, content: content, query: query, replyMsgid: replyMsgid}:
 	default:
 		// A full queue means a stuck worker (or a paste storm); the
 		// message is dropped rather than blocking the caller.
@@ -45,7 +46,7 @@ func (m *Manager) runSendWorker(c *conn) {
 		if typingAllowed(client) {
 			sendTypingTag(client, job.target, "done")
 		}
-		m.sendLines(c, client, job.target, job.content)
+		m.sendLines(c, client, job.target, job.content, job.replyMsgid)
 	}
 }
 
@@ -101,8 +102,18 @@ const frameBudget = 350
 // max-lines/max-bytes budget by splitting into several batches, and
 // degrade to one PRIVMSG per non-empty line otherwise (an empty
 // PRIVMSG is a wire error, so blanks cannot survive the fallback).
-func (m *Manager) sendLines(c *conn, client *girc.Client, target, content string) {
+func (m *Manager) sendLines(c *conn, client *girc.Client, target, content, replyMsgid string) {
 	if !strings.Contains(content, "\n") {
+		if replyMsgid != "" {
+			// draft/reply: the +reply client tag rides the PRIVMSG;
+			// message-tags (negotiated) is what actually relays it.
+			client.Send(&girc.Event{
+				Tags:    girc.Tags{"+reply": replyMsgid},
+				Command: "PRIVMSG",
+				Params:  []string{target, content},
+			})
+			return
+		}
 		client.Cmd.Message(target, content)
 		return
 	}
@@ -123,9 +134,16 @@ func (m *Manager) sendLines(c *conn, client *girc.Client, target, content string
 		return
 	}
 	maxBytes, maxLines := c.multilineLimits()
-	for _, batch := range planMultiline(lines, maxLines, maxBytes) {
-		m.sendMultilineBatch(client, target, batch)
+	for i, batch := range planMultiline(lines, maxLines, maxBytes) {
+		m.sendMultilineBatch(client, target, batch, firstOrEmpty(replyMsgid, i == 0))
 	}
+}
+
+func firstOrEmpty(s string, first bool) string {
+	if first {
+		return s
+	}
+	return ""
 }
 
 // planMultiline packs logical lines into batch frame-lists that respect
@@ -195,13 +213,16 @@ func planMultiline(lines []string, maxLines, maxBytes int) [][]outFrame {
 	return out
 }
 
-func (m *Manager) sendMultilineBatch(client *girc.Client, target string, frames []outFrame) {
+func (m *Manager) sendMultilineBatch(client *girc.Client, target string, frames []outFrame, replyMsgid string) {
 	ref := "vb" + strconv.FormatInt(lineBatchSeq.Add(1), 36)
 	client.Send(&girc.Event{Command: "BATCH", Params: []string{"+" + ref, "draft/multiline", target}})
-	for _, f := range frames {
+	for i, f := range frames {
 		tags := girc.Tags{"batch": ref}
 		if f.concat {
 			tags["draft/multiline-concat"] = ""
+		}
+		if i == 0 && replyMsgid != "" {
+			tags["+reply"] = replyMsgid
 		}
 		client.Send(&girc.Event{
 			Tags:    tags,
@@ -256,11 +277,13 @@ func (m *Manager) lineBatchFrame(c *conn, e girc.Event, ref string) {
 		at = parseChatTime(tag)
 	}
 	msgid, _ := e.Tags.Get("msgid")
+	reply, _ := e.Tags.Get("+reply")
 	_, concat := e.Tags.Get("draft/multiline-concat")
 	c.appendLineFrame(ref, lineFrame{
 		line:   e.Last(),
 		at:     at,
 		msgid:  msgid,
+		reply:  reply,
 		echo:   e.Echo,
 		source: e.Source.Name,
 		concat: concat,
@@ -287,6 +310,7 @@ func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 			content: strings.Join(accLines(acc), "\n"),
 			at:      at,
 			msgid:   first.msgid,
+			reply:   first.reply,
 		})
 		return
 	}
@@ -306,7 +330,7 @@ func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 		}
 		return
 	}
-	m.dispatchMessage(c, acc.target, author, strings.Join(accLines(acc), "\n"), at.Format(time.RFC3339Nano), first.msgid)
+	m.dispatchMessage(c, acc.target, author, strings.Join(accLines(acc), "\n"), at.Format(time.RFC3339Nano), first.msgid, first.reply)
 }
 
 // accLines flattens the frames into the joined message's lines,
@@ -329,6 +353,7 @@ type lineFrame struct {
 	line   string
 	at     time.Time
 	msgid  string
+	reply  string // +reply tag of the first frame (thread head)
 	echo   bool
 	source string
 	concat bool // glue to the previous frame without a newline

@@ -472,10 +472,44 @@ func (s *Server) handleUpdateMemberMe(w http.ResponseWriter, r *http.Request, u 
 type sendMessageRequest struct {
 	Content string `json:"content"`
 	Nonce   any    `json:"nonce"`
+	// MessageReference makes the send a reply (Discord message_reference
+	// on the outgoing message; relayed as a +reply IRC client tag).
+	MessageReference *sendReference `json:"message_reference"`
 	// Attachments reference uploaded files: either cloud uploads
 	// (uploaded_filename from POST /channels/:id/attachments) or - in
 	// the legacy multipart flow - files[] parts of this very request.
 	Attachments []sendAttachment `json:"attachments"`
+}
+
+// sendReference carries the message_reference of a reply. The message id
+// arrives as a JSON string, but the same flexID quirk as everywhere else
+// (bare numbers) is tolerated via the custom unmarshal.
+type sendReference struct {
+	MessageID string `json:"message_id"`
+}
+
+func (r *sendReference) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		MessageID flexString `json:"message_id"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	r.MessageID = string(raw.MessageID)
+	return nil
+}
+
+// flexString accepts a JSON string or a bare number, digit-exact (no
+// float64 round-trip: snowflakes lose precision there).
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "null" {
+		s = ""
+	}
+	*f = flexString(s)
+	return nil
 }
 
 type sendAttachment struct {
@@ -651,12 +685,38 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request, u *st
 // surface (history pages and the pinned list): author facts bio,
 // mentions, reactions, attachments, embeds. upsertNicks accumulates the
 // mention pills needing GUILD_MEMBER_UPDATE upserts.
+// attachHistoryReply decorates a history payload with the reply shape
+// (see historyMessagePayload).
+func (s *Server) attachHistoryReply(u *storage.User, payload map[string]any, channelID, refID string) {
+	payload["type"] = 19
+	reference := map[string]any{
+		"type":       0,
+		"message_id": refID,
+		"channel_id": channelID,
+	}
+	payload["message_reference"] = reference
+	if row, ok := s.net.MessageByID(channelID, refID); ok {
+		// Depth 1: a reply-chain's referenced message renders without
+		// chasing ITS reference (also guards self-referencing rows).
+		inner := s.historyMessagePayload(u, row, map[string]bool{})
+		delete(inner, "message_reference")
+		delete(inner, "referenced_message")
+		payload["referenced_message"] = inner
+	}
+}
+
 func (s *Server) historyMessagePayload(u *storage.User, m storage.BufferedMessage, upsertNicks map[string]bool) map[string]any {
 	var authorBio any
 	if bio := s.net.AuthorBio(u.ID, m.ChannelID, m.AuthorID); bio != "" {
 		authorBio = bio
 	}
 	payload := messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp, model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio, s.net.AuthorAvatar(u.ID, m.ChannelID, m.AuthorID))
+	// Replies replay with their reference: message_reference draws the
+	// bar, referenced_message is its preview (dropped when the target
+	// scrolled out of the buffer - the bar still renders).
+	if m.ReplyTo != "" {
+		s.attachHistoryReply(u, payload, m.ChannelID, m.ReplyTo)
+	}
 	// System rows (e.g. the pin notice) replay with their type so the
 	// client renders them as system messages, not empty user messages.
 	if m.Type != 0 {
@@ -1582,11 +1642,18 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		// Snowflake minted before the send: the manager queues it so the
 		// echo-message echo can bind the upstream msgid to it (reactions).
 		msgID := s.net.NewMessageID()
+		// Replies become +reply msgid tags on the wire copy.
+		replyMsgid := ""
+		replyRefID := ""
+		if req.MessageReference != nil && req.MessageReference.MessageID != "" {
+			replyRefID = req.MessageReference.MessageID
+			replyMsgid = s.irc.ReplyTargetMsgid(u.ID, dm.NetworkID, replyRefID)
+		}
 		// Discord-side content (with <@id> markers) is what the client
 		// sees and what gets buffered; the wire copy carries bare nicks.
 		// Attachments travel as plain URLs - IRC has nothing else.
 		wire := strings.TrimSpace(s.irc.IRCize(u.ID, dm.NetworkID, dm.Nick, req.Content) + " " + strings.Join(attachURLs, " "))
-		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, wire, msgID, channelID); err != nil {
+		if err := s.irc.SendQuery(u.ID, dm.NetworkID, dm.Nick, wire, msgID, channelID, replyMsgid); err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -1595,14 +1662,17 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			authorName = mem.Nick
 		}
 	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
-		if len(attachRows) > 0 {
-			msg["attachments"] = attachRows
-		}
-		// Pills render from the user store, but highlighting reads the
-		// mentions array - own sends carry it like inbound relays do.
-		if mentioned, _ := s.irc.MentionPayloadsFromMarkers(u.ID, dm.NetworkID, dm.Nick, req.Content); len(mentioned) > 0 {
-			msg["mentions"] = mentioned
-		}
+	if len(attachRows) > 0 {
+		msg["attachments"] = attachRows
+	}
+	if replyRefID != "" {
+		s.attachHistoryReply(u, msg, channelID, replyRefID)
+	}
+	// Pills render from the user store, but highlighting reads the
+	// mentions array - own sends carry it like inbound relays do.
+	if mentioned, _ := s.irc.MentionPayloadsFromMarkers(u.ID, dm.NetworkID, dm.Nick, req.Content); len(mentioned) > 0 {
+		msg["mentions"] = mentioned
+	}
 		if s.gw != nil {
 			s.gw.Dispatch(u.ID, "MESSAGE_CREATE", msg)
 		}
@@ -1615,6 +1685,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			Nonce:       req.Nonce,
 			Timestamp:   msg["timestamp"].(string),
 			Attachments: attachRows,
+			ReplyTo:     replyRefID,
 		}); err != nil {
 			s.log.Warn("buffer append failed", "err", err, "channel", channelID)
 		} else {
@@ -1632,11 +1703,18 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	}
 	// See the DM path: snowflake before the send, for msgid correlation.
 	msgID := s.net.NewMessageID()
+	// Replies become +reply msgid tags on the wire copy.
+	replyMsgid := ""
+	replyRefID := ""
+	if req.MessageReference != nil && req.MessageReference.MessageID != "" {
+		replyRefID = req.MessageReference.MessageID
+		replyMsgid = s.irc.ReplyTargetMsgid(u.ID, ch.NetworkID, replyRefID)
+	}
 	// The wire copy carries bare nicks instead of <@id> markers (IRC
 	// convention); the Discord-side copy keeps the markers for pills.
 	// Attachments become plain URLs on the wire.
 	wire := strings.TrimSpace(s.irc.IRCize(u.ID, ch.NetworkID, ch.IRCName, req.Content) + " " + strings.Join(attachURLs, " "))
-	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, wire, msgID, channelID); err != nil {
+	if err := s.irc.SendChannel(u.ID, ch.NetworkID, ch.IRCName, wire, msgID, channelID, replyMsgid); err != nil {
 		jsonError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -1654,6 +1732,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
 	if len(attachRows) > 0 {
 		msg["attachments"] = attachRows
+	}
+	if replyRefID != "" {
+		s.attachHistoryReply(u, msg, channelID, replyRefID)
 	}
 	// Own sends carry the mentions arrays too: highlighting reads them,
 	// not the pills (same as inbound relays).
@@ -1682,6 +1763,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		Nonce:       req.Nonce,
 		Timestamp:   msg["timestamp"].(string),
 		Attachments: attachRows,
+		ReplyTo:     replyRefID,
 	}); err != nil {
 		s.log.Warn("buffer append failed", "err", err, "channel", channelID)
 	} else {

@@ -35,6 +35,9 @@ type BufferedMessage struct {
 	// networks), persisted so reactions can anchor to messages that
 	// predate a bouncer restart.
 	MsgID string `json:"irc_msgid,omitempty"`
+	// ReplyTo is the referenced message's Discord id for replies
+	// (message_reference.message_id), so history replays carry them.
+	ReplyTo string `json:"reply_to,omitempty"`
 	// Reactions is emoji -> reacting user ids, persisted on every change so
 	// pills survive bouncer restarts (the live-wire msgid registry cannot).
 	Reactions map[string][]string `json:"reactions,omitempty"`

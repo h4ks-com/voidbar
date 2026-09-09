@@ -26,6 +26,7 @@ type chatFrame struct {
 	content       string
 	at            time.Time
 	msgid         string
+	reply         string // +reply tag: resolved to a reference at flush
 	mentions      []any // filled at flush time (Discordize)
 	mentionChans  []any
 }
@@ -134,12 +135,14 @@ func (m *Manager) chatBatchFrame(c *conn, e girc.Event, ref string) {
 		}
 	}
 	msgid, _ := e.Tags.Get("msgid")
+	reply, _ := e.Tags.Get("+reply")
 	c.appendChatFrame(ref, chatFrame{
 		target:  e.Params[0],
 		author:  e.Source.Name,
 		content: e.Last(),
 		at:      at,
 		msgid:   msgid,
+		reply:   reply,
 	})
 }
 
@@ -255,6 +258,7 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			Timestamp:   ts.Format(time.RFC3339Nano),
 			Type:        0,
 			MsgID:       f.msgid,
+			ReplyTo:     replyRefSnowflake(c, f.reply),
 			Attachments: linkAtts,
 		}); err != nil {
 			m.log.Warn("buffer append failed", "err", err, "channel", ch.ID, "msg_id", msgID)
@@ -281,6 +285,9 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			}
 			if len(linkAtts) > 0 {
 				payload["attachments"] = linkAtts
+			}
+			if ref, ok := c.lookupRef(f.reply); ok && ref.Snowflake != "" {
+				attachReplyReference(m, payload, ref, c.networkID)
 			}
 			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 		}

@@ -214,6 +214,72 @@ func (fx *multilineFixture) testChannel(t *testing.T) *storage.Channel {
 	return ch
 }
 
+// TestReplyBothWays: inbound PRIVMSGs carrying +reply resolve to the
+// referenced message's Discord id in the buffer (the reply bar data),
+// and a Discord send with a reference stamps the outgoing PRIVMSG with
+// the +reply client tag resolved through the msgid registry.
+func TestReplyBothWays(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	injected := make(chan string, 4)
+	fx := newMultilineFixture(t, ln, false, func(w func(string), nick, ch string) {
+		w("@msgid=m1 :peer!u@h PRIVMSG #test :original\r\n")
+		injected <- "m1"
+	})
+	waitTap(t, fx.tap, "JOIN #test", 1)
+	<-injected
+	ch := fx.testChannel(t)
+
+	// The original lands in the buffer with its msgid registered.
+	var snow1 string
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, id, ok := fx.store.LookupMessageByMsgID("net1", "m1"); ok {
+			snow1 = id
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if snow1 == "" {
+		t.Fatal("original message never registered its msgid")
+	}
+
+	// Inbound reply: +reply=m1 must resolve into the buffered ReplyTo.
+	wire := fx.tap
+	wire.mu.Lock()
+	serverWrite := wire.write
+	wire.mu.Unlock()
+	if serverWrite == nil {
+		t.Fatal("no server write hook")
+	}
+	serverWrite("@msgid=m2;+reply=m1 :peer!u@h PRIVMSG #test :a reply\r\n")
+	for time.Now().Before(deadline) {
+		if _, _, ok := fx.store.LookupMessageByMsgID("net1", "m2"); ok {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if chID, msgID, ok := fx.store.LookupMessageByMsgID("net1", "m2"); !ok {
+		t.Fatal("reply m2 never buffered")
+	} else if row, _ := fx.store.MessageByID(chID, msgID); row.ReplyTo != snow1 {
+		t.Fatalf("reply m2 buffered without reference: got %+v want reply_to=%s", row, snow1)
+	}
+
+	// Outbound reply: the reference resolves through the registry back
+	// to m1 and stamps the wire PRIVMSG.
+	msgid1 := fx.manager.ReplyTargetMsgid("u1", "net1", snow1)
+	if msgid1 != "m1" {
+		t.Fatalf("ReplyTargetMsgid = %q, want m1", msgid1)
+	}
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "own reply", "sf9", ch.ID, msgid1); err != nil {
+		t.Fatal(err)
+	}
+	waitTapExact(t, fx.tap, "@+reply=m1 PRIVMSG #test :own reply", 1)
+}
+
 // TestMultilineSendBatch: with the cap ACKed, a multi-line body leaves as
 // one draft/multiline batch (blank inner line intact), and the echoed
 // batch binds the server msgid to the snowflake.
@@ -226,7 +292,7 @@ func TestMultilineSendBatch(t *testing.T) {
 	fx := newMultilineFixture(t, ln, true, nil)
 	waitTap(t, fx.tap, "JOIN #test", 1)
 
-	if err := fx.manager.SendChannel("u1", "net1", "#test", "alpha\n\nomega", "sf1", "ch1"); err != nil {
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "alpha\n\nomega", "sf1", "ch1", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitTap(t, fx.tap, "BATCH +vb1 draft/multiline #test", 1)
@@ -282,7 +348,7 @@ func TestMultilineSendFallback(t *testing.T) {
 	fx := newMultilineFixture(t, ln, false, nil)
 	waitTap(t, fx.tap, "JOIN #test", 1)
 
-	if err := fx.manager.SendChannel("u1", "net1", "#test", "alpha\n\nomega", "sf1", "ch1"); err != nil {
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "alpha\n\nomega", "sf1", "ch1", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitTapExact(t, fx.tap, "PRIVMSG #test alpha", 1)
@@ -404,7 +470,7 @@ func TestMultilineSendRespectsLimits(t *testing.T) {
 	fx := newMultilineFixture(t, ln, true, nil)
 	waitTap(t, fx.tap, "JOIN #test", 1)
 
-	if err := fx.manager.SendChannel("u1", "net1", "#test", "one\ntwo\nthree", "sf1", "ch1"); err != nil {
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "one\ntwo\nthree", "sf1", "ch1", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Two batches: (one, two) and (three).
@@ -539,3 +605,4 @@ func TestMultilineIncomingHistory(t *testing.T) {
 		t.Fatalf("history rows missing (joined=%v plain=%v): %+v", joined, plain, msgs)
 	}
 }
+

@@ -149,6 +149,7 @@ type conn struct {
 	msgidMu     sync.Mutex
 	snowToMsgid map[string]string // Discord message id -> IRC msgid
 	msgidToRef  map[string]msgRef // IRC msgid -> message identity
+	msgidOrder  []string          // snowToMsgid insertion order, for eviction
 
 	// pendingSends queues the Discord identity of our own outgoing
 	// PRIVMSGs per target (lowercased, FIFO). With echo-message the
@@ -597,6 +598,10 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			// PART/JOIN fallback instead of the RENAME broadcast, which
 			// would tear the channel out of the registry's auto-join.
 			"draft/channel-rename": nil,
+			// draft/reply: +reply=<msgid> client tags on PRIVMSGs in
+			// both directions (Discord message_reference). The tag
+			// itself rides message-tags; the cap is the courtesy knob.
+			"draft/reply": nil,
 			// standard-replies: FAIL/WARN/NOTE machine-readable errors;
 			// the handler lands them in the buffer they belong to.
 			"standard-replies": nil,
@@ -912,7 +917,8 @@ func (m *Manager) registerHandlers(c *conn) {
 		// nick after a collision rename, which silently ate the foreign
 		// user's messages.
 		msgid, _ := e.Tags.Get("msgid")
-		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), model.NowTimestamp(), msgid)
+		reply, _ := e.Tags.Get("+reply")
+		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), model.NowTimestamp(), msgid, reply)
 	})
 
 	// Own-message echo (echo-message cap): girc flags them Echo and only
@@ -1282,12 +1288,12 @@ func (m *Manager) registerHandlers(c *conn) {
 		target, channel := e.Params[0], e.Params[1]
 		if client.LookupChannel(channel) != nil {
 			m.log.Info("invite relayed", "user", c.userID, "network", c.networkID, "by", e.Source.Name, "target", target, "channel", channel)
-			m.dispatchMessage(c, channel, e.Source.Name, "invited "+target+" to the channel", model.NowTimestamp(), "")
+			m.dispatchMessage(c, channel, e.Source.Name, "invited "+target+" to the channel", model.NowTimestamp(), "", "")
 			return
 		}
 		if strings.EqualFold(target, client.GetNick()) {
 			m.log.Info("invite to us relayed", "user", c.userID, "network", c.networkID, "by", e.Source.Name, "channel", channel)
-			m.dispatchQuery(c, e.Source.Name, "invited you to "+channel, model.NowTimestamp(), "")
+			m.dispatchQuery(c, e.Source.Name, "invited you to "+channel, model.NowTimestamp(), "", "")
 		}
 	})
 	// standard-replies (FAIL/WARN/NOTE): "<type> <command> <code>
@@ -1304,7 +1310,7 @@ func (m *Manager) registerHandlers(c *conn) {
 			for _, p := range e.Params[2 : len(e.Params)-1] {
 				if strings.HasPrefix(p, "#") && client.LookupChannel(p) != nil {
 					m.log.Info("standard reply relayed", "user", c.userID, "network", c.networkID, "type", e.Command, "command", e.Params[0], "channel", p)
-					m.dispatchMessage(c, p, "server", e.Command+" "+e.Params[1]+": "+desc, model.NowTimestamp(), "")
+					m.dispatchMessage(c, p, "server", e.Command+" "+e.Params[1]+": "+desc, model.NowTimestamp(), "", "")
 					return
 				}
 			}
@@ -1587,7 +1593,7 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 	_ = m.store.TouchDMChannel(dm.ID)
 }
 
-func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid string) {
+func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, replyMsgid string) {
 	// Ergo's history service replays missed traffic on connect; the
 	// bouncer fetches its own via draft/chathistory, so the automatic
 	// HistServ delivery is a duplicate flood. Service bots are dropped
@@ -1597,7 +1603,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	}
 	if !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
 		// Query (DM): target is our own nick, author is the peer.
-		m.dispatchQuery(c, author, content, ts, msgid)
+		m.dispatchQuery(c, author, content, ts, msgid, replyMsgid)
 		return
 	}
 	channelID := ""
@@ -1614,6 +1620,9 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
 	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author))
+	if ref, ok := c.lookupRef(replyMsgid); ok && ref.Snowflake != "" {
+		attachReplyReference(m, payload, ref, c.networkID)
+	}
 	if len(mentioned) > 0 {
 		// Upserts first (same-session order is preserved): a pill for a
 		// peer the client never saw must not render @invalid-user.
@@ -1663,6 +1672,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 		Timestamp:   ts,
 		Type:        0,
 		MsgID:       msgid,
+		ReplyTo:     replyRefSnowflake(c, replyMsgid),
 		Attachments: linkAtts,
 	}
 	for _, u := range mentioned {
@@ -1688,7 +1698,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid st
 // user's DM channel with the peer. The DM channel is created on first
 // contact, announced via CHANNEL_CREATE (so it pops into the DM list) and
 // feeds the same replay buffer as channels.
-func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
+func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid string) {
 	dm, err := m.store.EnsureDMChannel(c.userID, c.networkID, author, m.sf.New)
 	if err != nil {
 		m.log.Warn("dm channel ensure failed", "err", err, "user", c.userID, "from", author)
@@ -1735,6 +1745,9 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 			return authorObj
 		}(),
 	}
+	if ref, ok := c.lookupRef(replyMsgid); ok && ref.Snowflake != "" {
+		attachReplyReference(m, payload, ref, c.networkID)
+	}
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
 	if msgid != "" {
 		c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: dm.ID}, msgid)
@@ -1756,6 +1769,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid string) {
 		Timestamp:   ts,
 		Type:        0,
 		MsgID:       msgid,
+		ReplyTo:     replyRefSnowflake(c, replyMsgid),
 		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
@@ -2122,7 +2136,7 @@ func (m *Manager) dispatchTyping(c *conn, nick, target string) {
 // SendQuery relays a Discord DM into an IRC query PRIVMSG (bare nick).
 // msgRef identifies the Discord message so the echo (echo-message) can be
 // correlated with the msgid the server stamps on it.
-func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, channelID string) error {
+func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, channelID, replyMsgid string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -2142,7 +2156,7 @@ func (m *Manager) SendQuery(userID, networkID, nick, content string, msgID, chan
 	// The typing-done TAGMSG and the message itself go through the
 	// connection's ordered send queue: rate-limiter pacing must stay off
 	// the caller's path (a big paste is ~1s of girc delay per line).
-	c.enqueueSend(nick, content, true)
+	c.enqueueSend(nick, content, true, replyMsgid)
 	return nil
 }
 
@@ -2202,7 +2216,7 @@ func (m *Manager) PartChannel(userID, networkID, channel string) {
 // and the next successful reconnect this errors (the supervisor swaps
 // c.client under mu, so it is read under the same lock). msgRef identifies
 // the Discord message for echo/msgid correlation.
-func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID, channelID string) error {
+func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID, channelID, replyMsgid string) error {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -2220,7 +2234,7 @@ func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID,
 		c.pushPendingSend(channel, msgRef{Snowflake: msgID, ChannelID: channelID, GuildID: networkID})
 	}
 	// See SendQuery: the ordered queue owns the wire writes.
-	c.enqueueSend(channel, content, false)
+	c.enqueueSend(channel, content, false, replyMsgid)
 	return nil
 }
 
@@ -2515,12 +2529,27 @@ func (m *Manager) RenameChannel(userID, networkID, oldIRC, newIRC string) error 
 	return nil
 }
 
-// registerMsgid records the msgid <-> Discord identity mapping.
+// registerMsgid records the msgid <-> Discord identity mapping. Bounded:
+// a long-lived connection relaying busy channels would otherwise grow the
+// pair of maps without end (the buffer keeps the durable copy anyway).
+const msgidRegistryCap = 4096
+
 func (c *conn) registerMsgid(ref msgRef, msgid string) {
 	c.msgidMu.Lock()
 	defer c.msgidMu.Unlock()
+	if _, exists := c.snowToMsgid[ref.Snowflake]; !exists {
+		c.msgidOrder = append(c.msgidOrder, ref.Snowflake)
+	}
 	c.snowToMsgid[ref.Snowflake] = msgid
 	c.msgidToRef[msgid] = ref
+	for len(c.msgidOrder) > msgidRegistryCap {
+		oldest := c.msgidOrder[0]
+		c.msgidOrder = c.msgidOrder[1:]
+		if mid, ok := c.snowToMsgid[oldest]; ok {
+			delete(c.msgidToRef, mid)
+		}
+		delete(c.snowToMsgid, oldest)
+	}
 }
 
 // lookupMsgid resolves a Discord message id to its IRC msgid.
@@ -2549,6 +2578,60 @@ func (c *conn) refBySnowflake(snowflake string) (msgRef, bool) {
 	}
 	ref, ok := c.msgidToRef[msgid]
 	return ref, ok
+}
+
+// replyRefSnowflake resolves an inbound +reply msgid to the referenced
+// message's Discord id ("" when unknown - the relay degrades to a plain
+// message, like an IRC client without draft/reply support).
+func replyRefSnowflake(c *conn, replyMsgid string) string {
+	if replyMsgid == "" {
+		return ""
+	}
+	if ref, ok := c.lookupRef(replyMsgid); ok {
+		return ref.Snowflake
+	}
+	return ""
+}
+
+// attachReplyReference decorates a MESSAGE payload with the Discord reply
+// shape: message_reference drives the reply bar, referenced_message is
+// the bar's preview. The referenced row comes from the replay buffer; a
+// scrolled-out or pre-restart target keeps just the reference.
+func attachReplyReference(m *Manager, payload map[string]any, ref msgRef, networkID string) {
+	payload["type"] = 19 // REPLY (default 0, DEFAULT)
+	payload["message_reference"] = map[string]any{
+		"type":       0,
+		"message_id": ref.Snowflake,
+		"channel_id": ref.ChannelID,
+	}
+	if ref.GuildID != "" {
+		payload["message_reference"].(map[string]any)["guild_id"] = ref.GuildID
+	}
+	if row, ok := m.store.MessageByID(ref.ChannelID, ref.Snowflake); ok {
+		payload["referenced_message"] = buildReferencedPayload(&row)
+	}
+}
+
+// buildReferencedPayload renders the referenced_message preview body:
+// enough of the message object for the client to draw the bar (author,
+// content, id, timestamp).
+func buildReferencedPayload(row *storage.BufferedMessage) map[string]any {
+	payload := buildMessagePayloadFromRow(row)
+	payload["mention_everyone"] = false
+	return payload
+}
+
+// ReplyTargetMsgid resolves a Discord message id to the upstream IRC
+// msgid, for tagging an outgoing reply PRIVMSG with +reply.
+func (m *Manager) ReplyTargetMsgid(userID, networkID, snowflake string) string {
+	m.mu.Lock()
+	c, ok := m.conns[key(userID, networkID)]
+	m.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	msgid, _ := c.lookupMsgid(snowflake)
+	return msgid
 }
 
 // pushPendingSend queues our outgoing message identity for a target; the
