@@ -115,6 +115,10 @@ func (s *Service) MemberAvatarFor(userID, guildID string) any {
 // every upstream speaking draft/metadata-2 - that is the "global" part:
 // one change, every network where the bouncer account is logged in.
 func (s *Service) SetGlobalAvatar(userID, dataURI string) (*storage.User, error) {
+	prev := ""
+	if u, err := s.store.GetUserByID(userID); err == nil {
+		prev = u.Avatar
+	}
 	hash := ""
 	if dataURI != "" {
 		ct, data, err := decodeAvatarDataURI(dataURI)
@@ -147,9 +151,42 @@ func (s *Service) SetGlobalAvatar(userID, dataURI string) (*storage.User, error)
 		}
 	}
 	if s.manager != nil {
-		s.manager.SetAvatarAll(userID, s.avatarURL(userID, hash))
+		s.manager.SetAvatarAll(userID, s.avatarURL(userID, hash), prev)
 	}
 	return u, nil
+}
+
+// RevertGlobalAvatar restores a previous account-wide avatar hash after
+// an upstream rejected the SET: same dispatch fan-out as the set, but no
+// upstream write (the server never accepted the change anyway).
+func (s *Service) RevertGlobalAvatar(userID, prevHash string) {
+	if err := s.store.SetUserAvatar(userID, prevHash); err != nil {
+		s.log.Warn("avatar revert failed", "err", err, "user", userID)
+		return
+	}
+	if u, err := s.store.GetUserByID(userID); err == nil && s.gw != nil {
+		s.gw.Dispatch(userID, "USER_UPDATE", model.ToUser(u))
+		if memberships, err := s.store.ListMembershipsForUser(userID); err == nil {
+			for _, m := range memberships {
+				if payload := s.MemberPayload(userID, m.NetworkID, s.liveNickFor(userID, m.NetworkID, m.Nick)); payload != nil {
+					s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
+				}
+			}
+		}
+	}
+}
+
+// RevertNetworkAvatar restores a previous per-guild avatar override.
+func (s *Service) RevertNetworkAvatar(userID, networkID, prevHash string) {
+	if err := s.store.SetMembershipAvatar(networkID, userID, prevHash); err != nil {
+		s.log.Warn("network avatar revert failed", "err", err, "user", userID, "network", networkID)
+		return
+	}
+	if s.gw != nil {
+		if payload := s.MemberPayload(userID, networkID, s.liveNickFor(userID, networkID, "")); payload != nil {
+			s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
+		}
+	}
 }
 
 // liveNickFor prefers the nick actually held on the wire right now.
@@ -169,6 +206,7 @@ func (s *Service) SetNetworkAvatar(userID, guildID, dataURI string) error {
 	if err != nil {
 		return err
 	}
+	prev := mem.Avatar
 	hash := ""
 	if dataURI != "" {
 		ct, data, err := decodeAvatarDataURI(dataURI)
@@ -185,7 +223,7 @@ func (s *Service) SetNetworkAvatar(userID, guildID, dataURI string) error {
 	}
 	live := s.liveNickFor(userID, mem.NetworkID, mem.Nick)
 	if s.manager != nil {
-		s.manager.SetAvatar(userID, mem.NetworkID, s.avatarURL(userID, hash))
+		s.manager.SetAvatar(userID, mem.NetworkID, s.avatarURL(userID, hash), prev)
 	}
 	if s.gw != nil {
 		if payload := s.MemberPayload(userID, guildID, live); payload != nil {

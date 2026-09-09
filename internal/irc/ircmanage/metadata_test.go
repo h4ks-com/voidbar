@@ -98,6 +98,10 @@ func TestMetadataAvatarFlow(t *testing.T) {
 				// arrives as a METADATA notification.
 				w(":fake 770 " + nick + " avatar\r\n")
 				w(":bob!u@h METADATA bob avatar * :" + avSrv.URL + "/avatar.png\r\n")
+			case strings.HasPrefix(line, "METADATA * SET avatar"):
+				// Anonymous nick on this fake server: the write is
+				// refused, which must roll the optimistic avatar back.
+				w(":fake FAIL METADATA KEY_NO_PERMISSION * avatar :You are not logged in\r\n")
 			}
 		}
 	}()
@@ -168,9 +172,27 @@ func TestMetadataAvatarFlow(t *testing.T) {
 		t.Fatalf("peer avatar hash = %q, want %q", got, wantHash)
 	}
 
-	// Our own avatar SET reaches the wire.
-	manager.SetAvatar("u1", "net1", "http://example.com/me.png")
+	// Our own avatar SET reaches the wire - and the server's rejection
+	// triggers the revert hook with the previous hash.
+	reverted := make(chan string, 1)
+	manager.SetAvatarFailNotifier(func(userID, networkID, prevHash string, global bool) {
+		if userID == "u1" && networkID == "net1" && !global {
+			select {
+			case reverted <- prevHash:
+			default:
+			}
+		}
+	})
+	manager.SetAvatar("u1", "net1", "http://example.com/me.png", "prevhash1")
 	if l := waitLine("METADATA * SET avatar"); !strings.Contains(l, "http://example.com/me.png") {
 		t.Fatalf("set line: %q", l)
+	}
+	select {
+	case prev := <-reverted:
+		if prev != "prevhash1" {
+			t.Fatalf("revert prev hash = %q, want prevhash1", prev)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("avatar rejection never triggered the revert hook")
 	}
 }

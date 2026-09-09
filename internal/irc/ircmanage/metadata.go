@@ -32,21 +32,21 @@ func (m *Manager) SetPeerAvatarNotifier(fn func(userID, networkID, nick string))
 // SetAvatar pushes the bouncer account's own avatar URL to one network's
 // metadata store (empty url removes the key). Servers where the nick
 // holds no services account answer FAIL METADATA KEY_NO_PERMISSION -
-// that is normal for anonymous upstreams and logged at debug only.
-func (m *Manager) SetAvatar(userID, networkID, url string) {
+// that rejection rolls the local avatar back (see avatarSetRejected).
+func (m *Manager) SetAvatar(userID, networkID, url, prevHash string) {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	m.mu.Unlock()
 	if !ok {
 		return
 	}
-	m.sendMetadataSet(c, url)
+	m.sendMetadataSet(c, url, prevHash, false)
 }
 
 // SetAvatarAll fans an avatar URL out to every network of the user: the
 // account-wide avatar from the Discord side is one change, everywhere the
 // upstream speaks draft/metadata-2 and the bouncer is logged in.
-func (m *Manager) SetAvatarAll(userID, url string) {
+func (m *Manager) SetAvatarAll(userID, url, prevHash string) {
 	m.mu.Lock()
 	var conns []*conn
 	prefix := userID + "\x00"
@@ -57,14 +57,22 @@ func (m *Manager) SetAvatarAll(userID, url string) {
 	}
 	m.mu.Unlock()
 	for _, c := range conns {
-		m.sendMetadataSet(c, url)
+		m.sendMetadataSet(c, url, prevHash, true)
 	}
+}
+
+// SetAvatarFailNotifier installs the revert hook fired when an upstream
+// rejects the own-avatar METADATA SET: the network service restores the
+// previous hash (the Clyde notice is the manager's own).
+func (m *Manager) SetAvatarFailNotifier(fn func(userID, networkID, prevHash string, global bool)) {
+	m.avatarFail = fn
 }
 
 // sendMetadataSet emits `METADATA * SET avatar :<url>` on a connection
 // (no trailing value removes the key). The sticky ACK flag gates it:
-// servers without the extension would just error out.
-func (m *Manager) sendMetadataSet(c *conn, url string) {
+// servers without the extension would just error out. prevHash/global
+// arm the rejection rollback (avatarSetRejected).
+func (m *Manager) sendMetadataSet(c *conn, url, prevHash string, global bool) {
 	if !c.metadataCapUp.Load() {
 		return
 	}
@@ -74,12 +82,46 @@ func (m *Manager) sendMetadataSet(c *conn, url string) {
 	if client == nil {
 		return
 	}
+	c.avatarSetMu.Lock()
+	c.avatarSetPending = true
+	c.avatarSetPrevHash = prevHash
+	c.avatarSetGlobal = global
+	c.avatarSetMu.Unlock()
 	ev := &girc.Event{Command: "METADATA", Params: []string{"*", "SET", metadataAvatarKey}}
 	if url != "" {
 		ev.Params = append(ev.Params, url)
 	}
 	client.Send(ev)
 	m.log.Debug("metadata avatar set", "user", c.userID, "network", c.networkID, "url", url)
+}
+
+// avatarSetRejected rolls back the optimistic own-avatar SET the server
+// just refused: the revert hook restores the previous hash, and Clyde
+// says why (deduped per FAIL code, so flapping reconnects stay quiet).
+func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
+	c.avatarSetMu.Lock()
+	pending, prevHash, global, dup := c.avatarSetPending, c.avatarSetPrevHash, c.avatarSetGlobal, c.avatarFailCode == code
+	if !dup {
+		c.avatarFailCode = code
+	}
+	c.avatarSetPending = false
+	c.avatarSetMu.Unlock()
+	m.log.Info("metadata avatar set rejected", "user", c.userID, "network", c.networkID, "code", code, "desc", desc)
+	if !pending || dup {
+		return
+	}
+	if m.avatarFail != nil {
+		m.avatarFail(c.userID, c.networkID, prevHash, global)
+	}
+	name := c.networkID
+	if net, err := m.store.GetNetwork(c.networkID); err == nil && net.Name != "" {
+		name = net.Name
+	}
+	hint := ""
+	if code == "KEY_NO_PERMISSION" {
+		hint = " The server requires a registered account - reconnect with SASL (?sasl=user:pass in the connection string)."
+	}
+	m.clydeSay(c.userID, c.networkID, fmt.Sprintf("Your avatar was rejected by %s (%s: %s), so I reverted it locally.%s", name, code, desc, hint))
 }
 
 // metadataSubscribe runs once per (re)connect after registration: ask
@@ -163,6 +205,18 @@ func (m *Manager) handleMetadataKeyValue(c *conn, client *girc.Client, e *girc.E
 	// Params: our nick, target, key, visibility, value (last param may
 	// be absent for a removed key).
 	if len(e.Params) < 4 || e.Params[2] != metadataAvatarKey {
+		return
+	}
+	// Own-target echo of a SET we issued: the upstream accepted the
+	// write, the optimistic local avatar stands (and a later rejection
+	// of a different code may notify again).
+	if target := e.Params[1]; target == "*" || strings.EqualFold(target, client.GetNick()) {
+		c.avatarSetMu.Lock()
+		if c.avatarSetPending {
+			c.avatarSetPending = false
+			c.avatarFailCode = ""
+		}
+		c.avatarSetMu.Unlock()
 		return
 	}
 	url := ""

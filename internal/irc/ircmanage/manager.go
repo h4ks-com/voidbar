@@ -50,6 +50,10 @@ type Manager struct {
 	// arrives or changes via draft/metadata-2.
 	peerAvatar func(userID, networkID, nick string)
 
+	// avatarFail (optional) is the revert hook for a rejected own-avatar
+	// METADATA SET; the network service restores the previous hash.
+	avatarFail func(userID, networkID, prevHash string, global bool)
+
 	// iconChange (optional) is notified when the upstream advertises or
 	// changes its draft/ICON network icon in ISUPPORT; returning false
 	// re-arms the announcement so the next reconnect retries the mirror.
@@ -231,6 +235,15 @@ type conn struct {
 	// coincided with the link dying (servers whose selector handling
 	// hangs the connection); anchored pages stop until reconnect.
 	histSelectorBroken atomic.Bool
+
+	// Own-avatar METADATA SET tracking: the optimistic local update is
+	// reverted when the upstream rejects the write (FAIL METADATA),
+	// otherwise the client keeps showing an avatar nobody on IRC sees.
+	avatarSetMu       sync.Mutex
+	avatarSetPending  bool
+	avatarSetPrevHash string
+	avatarSetGlobal   bool
+	avatarFailCode    string // last FAIL code notified, for dedupe
 }
 
 func (c *conn) histCap() bool      { return c.histCapUp.Load() }
@@ -1306,12 +1319,23 @@ func (m *Manager) registerHandlers(c *conn) {
 	// channel we're in surfaces there as a message from the "server"
 	// pseudo-user; everything else (registration-time replies, NickServ
 	// exchanges) is logged - it has no buffer to land in.
-	for _, cmd := range []string{"FAIL", "WARN", "NOTE"} {
-		c.client.Handlers.Add(cmd, func(client *girc.Client, e girc.Event) {
-			if len(e.Params) < 3 {
-				return
-			}
-			desc := e.Last()
+		for _, cmd := range []string{"FAIL", "WARN", "NOTE"} {
+			c.client.Handlers.Add(cmd, func(client *girc.Client, e girc.Event) {
+				if len(e.Params) < 3 {
+					return
+				}
+				// Own-avatar SET rejections: FAIL METADATA <code>
+				// [<target> <key>] :<desc>. Roll the optimistic local
+				// avatar back and say so via Clyde - the alternative is
+				// a client happily rendering an avatar no IRC peer can
+				// see.
+				if e.Command == "FAIL" && len(e.Params) >= 4 && e.Params[0] == "METADATA" && e.Params[3] == "avatar" {
+					if target := e.Params[2]; target == "*" || strings.EqualFold(target, client.GetNick()) {
+						m.avatarSetRejected(c, e.Params[1], e.Last())
+						return
+					}
+				}
+				desc := e.Last()
 			for _, p := range e.Params[2 : len(e.Params)-1] {
 				if strings.HasPrefix(p, "#") && client.LookupChannel(p) != nil {
 					m.log.Info("standard reply relayed", "user", c.userID, "network", c.networkID, "type", e.Command, "command", e.Params[0], "channel", p)
