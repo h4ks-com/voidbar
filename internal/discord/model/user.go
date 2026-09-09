@@ -19,6 +19,10 @@ type User struct {
 	// accounts created after 2021-02-05 hit the un-dismissable
 	// REGISTER_AGE_GATE modal on every boot.
 	NsfwAllowed bool `json:"nsfw_allowed"`
+	// Fake Nitro (premium_type 2): unlocks the client's premium-gated
+	// UI - per-guild avatar picker, profile customization. The bouncer
+	// implements those server-side anyway, so every account "has" it.
+	PremiumType int `json:"premium_type"`
 }
 
 // AvatarPtr lifts a stored avatar hash into the payload's *string (nil
@@ -39,5 +43,7 @@ func ToUser(u *storage.User) *User {
 		Email:         u.Email,
 		Verified:      true,
 		NsfwAllowed:   true,
+		PremiumType:   2,
 	}
 }
+

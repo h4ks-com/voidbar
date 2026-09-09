@@ -67,11 +67,10 @@ func (m *Manager) SetAvatarAll(userID, url, prevHash string) {
 func (m *Manager) SetAvatarFailNotifier(fn func(userID, networkID, prevHash string, global bool)) {
 	m.avatarFail = fn
 }
-
 // sendMetadataSet emits `METADATA * SET avatar :<url>` on a connection
 // (no trailing value removes the key). The sticky ACK flag gates it:
-// servers without the extension would just error out. prevHash/global
-// arm the rejection rollback (avatarSetRejected).
+// servers without the extension would just error out. prevHash arms the
+// rejection rollback (avatarSetRejected).
 func (m *Manager) sendMetadataSet(c *conn, url, prevHash string, global bool) {
 	if !c.metadataCapUp.Load() {
 		return
@@ -95,12 +94,14 @@ func (m *Manager) sendMetadataSet(c *conn, url, prevHash string, global bool) {
 	m.log.Debug("metadata avatar set", "user", c.userID, "network", c.networkID, "url", url)
 }
 
-// avatarSetRejected rolls back the optimistic own-avatar SET the server
-// just refused: the revert hook restores the previous hash, and Clyde
-// says why (deduped per FAIL code, so flapping reconnects stay quiet).
+// avatarSetRejected processes the server's refusal of an own-avatar SET:
+// the optimistic local update rolls back (an avatar no IRC peer can see
+// is a lie worth un-showing), and Clyde says why - deduped per FAIL code
+// so flapping reconnects stay quiet.
 func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
 	c.avatarSetMu.Lock()
-	pending, prevHash, global, dup := c.avatarSetPending, c.avatarSetPrevHash, c.avatarSetGlobal, c.avatarFailCode == code
+	pending, prevHash, global := c.avatarSetPending, c.avatarSetPrevHash, c.avatarSetGlobal
+	dup := c.avatarFailCode == code
 	if !dup {
 		c.avatarFailCode = code
 	}
@@ -110,9 +111,6 @@ func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
 	if !pending || dup {
 		return
 	}
-	if m.avatarFail != nil {
-		m.avatarFail(c.userID, c.networkID, prevHash, global)
-	}
 	name := c.networkID
 	if net, err := m.store.GetNetwork(c.networkID); err == nil && net.Name != "" {
 		name = net.Name
@@ -120,6 +118,9 @@ func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
 	hint := ""
 	if code == "KEY_NO_PERMISSION" {
 		hint = " The server requires a registered account - reconnect with SASL (?sasl=user:pass in the connection string)."
+	}
+	if m.avatarFail != nil {
+		m.avatarFail(c.userID, c.networkID, prevHash, global)
 	}
 	m.clydeSay(c.userID, c.networkID, fmt.Sprintf("Your avatar was rejected by %s (%s: %s), so I reverted it locally.%s", name, code, desc, hint))
 }
@@ -327,3 +328,5 @@ func (m *Manager) peerAvatarForUser(userID, nick string) any {
 	}
 	return nil
 }
+
+
