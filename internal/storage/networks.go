@@ -384,8 +384,12 @@ type Membership struct {
 	Username  string    `json:"username"`
 	Realname  string    `json:"realname"`
 	Avatar    string    `json:"avatar,omitempty"`
-	AutoJoin  []string  `json:"auto_join,omitempty"`
-	JoinedAt  time.Time `json:"joined_at"`
+	// AvatarRejected marks the upstream refusing the account-wide
+	// avatar: guild views in THIS network hide the global fallback,
+	// accepted networks keep showing it.
+	AvatarRejected bool      `json:"avatar_rejected,omitempty"`
+	AutoJoin       []string  `json:"auto_join,omitempty"`
+	JoinedAt       time.Time `json:"joined_at"`
 }
 
 func networkKey(id string) []byte     { return []byte("network/" + id) }

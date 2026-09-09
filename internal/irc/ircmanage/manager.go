@@ -243,7 +243,6 @@ type conn struct {
 	avatarSetPending  bool
 	avatarSetPrevHash string
 	avatarSetGlobal   bool
-	avatarFailCode    string // last FAIL code notified, for dedupe
 }
 
 func (c *conn) histCap() bool      { return c.histCapUp.Load() }
@@ -3007,4 +3006,5 @@ func (m *Manager) SendReaction(userID, networkID, target, messageID, channelID, 
 	}
 	return nil
 }
+
 

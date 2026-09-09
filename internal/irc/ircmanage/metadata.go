@@ -101,14 +101,10 @@ func (m *Manager) sendMetadataSet(c *conn, url, prevHash string, global bool) {
 func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
 	c.avatarSetMu.Lock()
 	pending, prevHash, global := c.avatarSetPending, c.avatarSetPrevHash, c.avatarSetGlobal
-	dup := c.avatarFailCode == code
-	if !dup {
-		c.avatarFailCode = code
-	}
 	c.avatarSetPending = false
 	c.avatarSetMu.Unlock()
 	m.log.Info("metadata avatar set rejected", "user", c.userID, "network", c.networkID, "code", code, "desc", desc)
-	if !pending || dup {
+	if !pending {
 		return
 	}
 	name := c.networkID
@@ -121,6 +117,12 @@ func (m *Manager) avatarSetRejected(c *conn, code, desc string) {
 	}
 	if m.avatarFail != nil {
 		m.avatarFail(c.userID, c.networkID, prevHash, global)
+	}
+	if global {
+		// Per-network visibility: the avatar hides in THIS network's
+		// guild only; networks that accepted it keep showing it.
+		m.clydeSay(c.userID, c.networkID, fmt.Sprintf("%s rejected your avatar (%s: %s), so it's hidden there.%s", name, code, desc, hint))
+		return
 	}
 	m.clydeSay(c.userID, c.networkID, fmt.Sprintf("Your avatar was rejected by %s (%s: %s), so I reverted it locally.%s", name, code, desc, hint))
 }
@@ -209,14 +211,10 @@ func (m *Manager) handleMetadataKeyValue(c *conn, client *girc.Client, e *girc.E
 		return
 	}
 	// Own-target echo of a SET we issued: the upstream accepted the
-	// write, the optimistic local avatar stands (and a later rejection
-	// of a different code may notify again).
+	// write, the optimistic local avatar stands.
 	if target := e.Params[1]; target == "*" || strings.EqualFold(target, client.GetNick()) {
 		c.avatarSetMu.Lock()
-		if c.avatarSetPending {
-			c.avatarSetPending = false
-			c.avatarFailCode = ""
-		}
+		c.avatarSetPending = false
 		c.avatarSetMu.Unlock()
 		return
 	}

@@ -177,3 +177,27 @@ func (s *Storage) SetMembershipAvatar(networkID, userID, hash string) error {
 		})
 	})
 }
+
+// SetMembershipAvatarRejected records (or clears) that this network
+// refused the account-wide avatar: guild views in THAT network hide the
+// global fallback, accepted networks keep showing it.
+func (s *Storage) SetMembershipAvatarRejected(networkID, userID string, rejected bool) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(memberKey(networkID, userID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			var mem Membership
+			if err := json.Unmarshal(v, &mem); err != nil {
+				return err
+			}
+			mem.AvatarRejected = rejected
+			enc, err := json.Marshal(&mem)
+			if err != nil {
+				return err
+			}
+			return txn.Set(memberKey(networkID, userID), enc)
+		})
+	})
+}

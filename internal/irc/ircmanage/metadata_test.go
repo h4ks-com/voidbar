@@ -195,4 +195,23 @@ func TestMetadataAvatarFlow(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("avatar rejection never triggered the revert hook")
 	}
+
+	// Global mode: the hook fires with global=true (the service hides
+	// the avatar in that network's guild only, instead of reverting).
+	globalRejected := make(chan bool, 1)
+	manager.SetAvatarFailNotifier(func(userID, networkID, prevHash string, global bool) {
+		if userID == "u1" && networkID == "net1" && global {
+			select {
+			case globalRejected <- true:
+			default:
+			}
+		}
+	})
+	manager.SetAvatarAll("u1", "http://example.com/me2.png", "prevhash2")
+	waitLine("METADATA * SET avatar http://example.com/me2.png")
+	select {
+	case <-globalRejected:
+	case <-time.After(15 * time.Second):
+		t.Fatal("global avatar rejection never fired the hook")
+	}
 }

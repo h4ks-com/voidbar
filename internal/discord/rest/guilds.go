@@ -1432,7 +1432,7 @@ func (s *Server) clydeReply(dm *storage.DMChannel, text string) {
 // else gets the help text. Returns the echo payload as the HTTP response.
 func (s *Server) clydeCommand(u *storage.User, dm *storage.DMChannel, req *sendMessageRequest) map[string]any {
 	echo := messagePayload(s.net.NewMessageID(), dm.ID, req.Content,
-		model.NowTimestamp(), u.ID, u.Username, req.Nonce, nil, s.net.SelfAvatar(u.ID))
+		model.NowTimestamp(), u.ID, u.Username, req.Nonce, nil, s.net.SelfAvatarFor(u.ID, dm.NetworkID))
 	if s.gw != nil {
 		s.gw.Dispatch(u.ID, "MESSAGE_CREATE", echo)
 	}
@@ -1661,7 +1661,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		if mem, err := s.net.MembershipFor(u.ID, dm.NetworkID); err == nil && mem.Nick != "" {
 			authorName = mem.Nick
 		}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatarFor(u.ID, dm.NetworkID))
 	if len(attachRows) > 0 {
 		msg["attachments"] = attachRows
 	}
@@ -1729,7 +1729,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	if mem, err := s.net.MembershipFor(u.ID, ch.NetworkID); err == nil && mem.Nick != "" {
 		authorName = mem.Nick
 	}
-	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatar(u.ID))
+	msg := messagePayload(msgID, channelID, req.Content, model.NowTimestamp(), u.ID, authorName, req.Nonce, nil, s.net.SelfAvatarFor(u.ID, ch.NetworkID))
 	if len(attachRows) > 0 {
 		msg["attachments"] = attachRows
 	}
@@ -1772,3 +1772,4 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	}
 	writeJSON(w, http.StatusOK, msg)
 }
+

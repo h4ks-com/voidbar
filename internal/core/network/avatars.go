@@ -62,9 +62,13 @@ func (s *Service) SelfAvatar(userID string) any {
 }
 
 // AuthorAvatar resolves a buffered message author's avatar: peers by
-// nick, own rows to the account-wide hash ("" when nothing is known).
+// nick, own rows to the account-wide hash ("" when nothing is known, or
+// when this row's network rejected the account-wide avatar).
 func (s *Service) AuthorAvatar(userID, channelID, rawAuthorID string) any {
 	if !strings.HasPrefix(rawAuthorID, "irc:") {
+		if ch, err := s.ChannelByID(channelID); err == nil {
+			return s.SelfAvatarFor(rawAuthorID, ch.NetworkID)
+		}
 		return s.globalAvatarValue(rawAuthorID)
 	}
 	return s.peerAvatarValue(userID, strings.TrimPrefix(rawAuthorID, "irc:"))
@@ -99,15 +103,42 @@ func (s *Service) globalAvatarValue(userID string) any {
 
 // MemberAvatarFor resolves the avatar a member row should show inside a
 // guild: the per-network override when set, else the account-wide avatar
-// (Discord's member.avatar-over-user.avatar precedence).
+// (Discord's member.avatar-over-user.avatar precedence) - unless THIS
+// network rejected the account-wide avatar (AvatarRejected), in which
+// case nothing shows here while accepted networks keep it.
 func (s *Service) MemberAvatarFor(userID, guildID string) any {
 	if s.store == nil {
 		return nil
 	}
-	if mem, err := s.store.GetMembership(guildID, userID); err == nil && mem.Avatar != "" {
-		return mem.Avatar
+	if mem, err := s.store.GetMembership(guildID, userID); err == nil {
+		if mem.Avatar != "" {
+			return mem.Avatar
+		}
+		if mem.AvatarRejected {
+			return nil
+		}
 	}
 	return s.globalAvatarValue(userID)
+}
+
+// SelfAvatarFor is the account-wide avatar as seen from one network:
+// nil when that network rejected it (the IRC peers there see nothing,
+// so the Discord view there matches).
+func (s *Service) SelfAvatarFor(userID, networkID string) any {
+	if s.avatarRejectedFor(userID, networkID) {
+		return nil
+	}
+	return s.globalAvatarValue(userID)
+}
+
+// avatarRejectedFor reports whether the network refused the account-wide
+// avatar (per-network override rejections revert themselves instead).
+func (s *Service) avatarRejectedFor(userID, networkID string) bool {
+	if s.store == nil {
+		return false
+	}
+	mem, err := s.store.GetMembership(networkID, userID)
+	return err == nil && mem.AvatarRejected
 }
 
 // SetGlobalAvatar stores the account-wide avatar (dataURI "" clears it),
@@ -150,27 +181,33 @@ func (s *Service) SetGlobalAvatar(userID, dataURI string) (*storage.User, error)
 			}
 		}
 	}
+	// A fresh global avatar resets the per-network rejection marks: the
+	// new SET gets its own verdict per network.
+	if memberships, err := s.store.ListMembershipsForUser(userID); err == nil {
+		for _, m := range memberships {
+			if m.AvatarRejected {
+				_ = s.store.SetMembershipAvatarRejected(m.NetworkID, userID, false)
+			}
+		}
+	}
 	if s.manager != nil {
 		s.manager.SetAvatarAll(userID, s.avatarURL(userID, hash), prev)
 	}
 	return u, nil
 }
 
-// RevertGlobalAvatar restores a previous account-wide avatar hash after
-// an upstream rejected the SET: same dispatch fan-out as the set, but no
-// upstream write (the server never accepted the change anyway).
-func (s *Service) RevertGlobalAvatar(userID, prevHash string) {
-	if err := s.store.SetUserAvatar(userID, prevHash); err != nil {
-		s.log.Warn("avatar revert failed", "err", err, "user", userID)
+// MarkAvatarRejected hides the account-wide avatar from THIS network's
+// guild view (the upstream refused the SET; accepted networks keep it),
+// and refreshes the member row so clients drop it immediately.
+func (s *Service) MarkAvatarRejected(userID, networkID string) {
+	if err := s.store.SetMembershipAvatarRejected(networkID, userID, true); err != nil {
+		s.log.Warn("avatar rejection mark failed", "err", err, "user", userID, "network", networkID)
 		return
 	}
-	if u, err := s.store.GetUserByID(userID); err == nil && s.gw != nil {
-		s.gw.Dispatch(userID, "USER_UPDATE", model.ToUser(u))
-		if memberships, err := s.store.ListMembershipsForUser(userID); err == nil {
-			for _, m := range memberships {
-				if payload := s.MemberPayload(userID, m.NetworkID, s.liveNickFor(userID, m.NetworkID, m.Nick)); payload != nil {
-					s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
-				}
+	if s.gw != nil {
+		if mem, err := s.store.GetMembership(networkID, userID); err == nil {
+			if payload := s.MemberPayload(userID, networkID, s.liveNickFor(userID, networkID, mem.Nick)); payload != nil {
+				s.gw.Dispatch(userID, "GUILD_MEMBER_UPDATE", payload)
 			}
 		}
 	}

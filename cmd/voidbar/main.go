@@ -120,11 +120,12 @@ func serveCmd(args []string, log *slog.Logger) error {
 	manager.SetMemberNotifier(netSvc.RefreshMember)
 	manager.SetLinkNotifier(netSvc.OnLinkChange)
 	manager.SetPeerAvatarNotifier(netSvc.RefreshPeerAvatar)
-	// A rejected own-avatar SET rolls the local avatar back (see
-	// Manager.avatarSetRejected): global or per-network, by origin.
+	// A rejected own-avatar SET: global mode hides the avatar in that
+	// network's guild only (accepted networks keep it); a rejected
+	// per-guild override reverts to the previous hash.
 	manager.SetAvatarFailNotifier(func(userID, networkID, prevHash string, global bool) {
 		if global {
-			netSvc.RevertGlobalAvatar(userID, prevHash)
+			netSvc.MarkAvatarRejected(userID, networkID)
 			return
 		}
 		netSvc.RevertNetworkAvatar(userID, networkID, prevHash)
