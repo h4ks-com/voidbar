@@ -18,7 +18,14 @@ func Open(path string) (*Storage, error) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, fmt.Errorf("create storage dir: %w", err)
 	}
-	opts := badger.DefaultOptions(path).WithLoggingLevel(badger.ERROR)
+	// Sized for small hosts (the prod box is 2 cores / 1.9 GiB shared
+	// with several other services): badger's 64 MiB default memtables
+	// showed up as the bulk of RSS at trivial write volumes, and four
+	// compactor goroutines just add wakeups.
+	opts := badger.DefaultOptions(path).
+		WithLoggingLevel(badger.ERROR).
+		WithMemTableSize(16 << 20).
+		WithNumCompactors(2)
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)

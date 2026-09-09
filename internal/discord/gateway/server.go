@@ -124,11 +124,6 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, guildsForUser fu
 const sessionTTL = 5 * time.Minute
 
 func (s *Server) Dispatch(userID, t string, d any) {
-	dd, err := json.Marshal(d)
-	if err != nil {
-		s.log.Error("dispatch marshal failed", "err", err, "user", userID, "t", t)
-		return
-	}
 	s.mu.Lock()
 	s.reapStaleLocked()
 	sessions := make([]*Session, 0, len(s.byUser[userID]))
@@ -136,6 +131,17 @@ func (s *Server) Dispatch(userID, t string, d any) {
 		sessions = append(sessions, sess)
 	}
 	s.mu.Unlock()
+	// Nobody listening (e.g. all clients offline while upstream traffic
+	// keeps flowing): skip the marshal entirely - typing indicators and
+	// presence churn were measurable idle CPU with zero sessions.
+	if len(sessions) == 0 {
+		return
+	}
+	dd, err := json.Marshal(d)
+	if err != nil {
+		s.log.Error("dispatch marshal failed", "err", err, "user", userID, "t", t)
+		return
+	}
 	for _, sess := range sessions {
 		if _, err := sess.dispatchRaw(t, dd, true); err != nil {
 			s.log.Error("dispatch failed", "err", err, "user", userID, "t", t)
