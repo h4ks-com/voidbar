@@ -918,6 +918,11 @@ func (m *Manager) registerHandlers(c *conn) {
 		// user's messages.
 		msgid, _ := e.Tags.Get("msgid")
 		reply, _ := e.Tags.Get("+reply")
+		if reply == "" {
+			// Draft-stage name for the same tag; some clients (Halloy)
+			// send both, others only this form.
+			reply, _ = e.Tags.Get("+draft/reply")
+		}
 		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), model.NowTimestamp(), msgid, reply)
 	})
 
@@ -1388,13 +1393,13 @@ func (m *Manager) registerHandlers(c *conn) {
 		if !hasReply || reply == "" {
 			return
 		}
-		if emoji, ok := e.Tags.Get("+draft/react"); ok && emoji != "" {
-			m.applyReaction(c, e.Source.Name, reply, emoji, false)
-			return
-		}
-		if emoji, ok := e.Tags.Get("+draft/unreact"); ok && emoji != "" {
-			m.applyReaction(c, e.Source.Name, reply, emoji, true)
-		}
+	if emoji, ok := e.Tags.Get("+draft/react"); ok && emoji != "" {
+		m.applyReaction(c, e.Source.Name, reply, emoji, false)
+		return
+	}
+	if emoji, ok := e.Tags.Get("+draft/unreact"); ok && emoji != "" {
+		m.applyReaction(c, e.Source.Name, reply, emoji, true)
+	}
 	})
 	// draft/message-redaction (eris dialect): REDACT <target> <msgid>
 	// [:reason] from another client deletes that message upstream; bridge
@@ -1620,7 +1625,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
 	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author))
-	if ref, ok := c.lookupRef(replyMsgid); ok && ref.Snowflake != "" {
+	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
 		attachReplyReference(m, payload, ref, c.networkID)
 	}
 	if len(mentioned) > 0 {
@@ -1672,7 +1677,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 		Timestamp:   ts,
 		Type:        0,
 		MsgID:       msgid,
-		ReplyTo:     replyRefSnowflake(c, replyMsgid),
+		ReplyTo:     replyRefSnowflake(m, c, replyMsgid),
 		Attachments: linkAtts,
 	}
 	for _, u := range mentioned {
@@ -1745,7 +1750,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 			return authorObj
 		}(),
 	}
-	if ref, ok := c.lookupRef(replyMsgid); ok && ref.Snowflake != "" {
+	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
 		attachReplyReference(m, payload, ref, c.networkID)
 	}
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
@@ -1769,7 +1774,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 		Timestamp:   ts,
 		Type:        0,
 		MsgID:       msgid,
-		ReplyTo:     replyRefSnowflake(c, replyMsgid),
+		ReplyTo:     replyRefSnowflake(m, c, replyMsgid),
 		Attachments: linkAtts,
 	}); err != nil {
 		m.log.Warn("buffer append failed", "err", err, "channel", dm.ID, "msg_id", msgID)
@@ -2583,14 +2588,29 @@ func (c *conn) refBySnowflake(snowflake string) (msgRef, bool) {
 // replyRefSnowflake resolves an inbound +reply msgid to the referenced
 // message's Discord id ("" when unknown - the relay degrades to a plain
 // message, like an IRC client without draft/reply support).
-func replyRefSnowflake(c *conn, replyMsgid string) string {
+func replyRefSnowflake(m *Manager, c *conn, replyMsgid string) string {
 	if replyMsgid == "" {
 		return ""
 	}
-	if ref, ok := c.lookupRef(replyMsgid); ok {
+	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok {
 		return ref.Snowflake
 	}
 	return ""
+}
+
+// resolveReplyRef anchors a +reply msgid to the referenced message's
+// Discord identity. The in-memory registry covers this connection's
+// traffic; messages from before a restart (or fetched while we were
+// offline) live on in the persisted msgid index, which is the fallback
+// - without it, replies to those silently degraded to plain messages.
+func (m *Manager) resolveReplyRef(c *conn, msgid string) (msgRef, bool) {
+	if ref, ok := c.lookupRef(msgid); ok && ref.Snowflake != "" {
+		return ref, true
+	}
+	if chID, snow, ok := m.store.LookupMessageByMsgID(c.networkID, msgid); ok && snow != "" {
+		return msgRef{Snowflake: snow, ChannelID: chID, GuildID: c.networkID}, true
+	}
+	return msgRef{}, false
 }
 
 // attachReplyReference decorates a MESSAGE payload with the Discord reply
@@ -2622,16 +2642,25 @@ func buildReferencedPayload(row *storage.BufferedMessage) map[string]any {
 }
 
 // ReplyTargetMsgid resolves a Discord message id to the upstream IRC
-// msgid, for tagging an outgoing reply PRIVMSG with +reply.
-func (m *Manager) ReplyTargetMsgid(userID, networkID, snowflake string) string {
+// msgid, for tagging an outgoing reply PRIVMSG with +reply. Falls back
+// to the buffered row's persisted msgid: the in-memory registry dies
+// with the connection, but a reply to a pre-restart message must still
+// anchor.
+func (m *Manager) ReplyTargetMsgid(userID, networkID, channelID, snowflake string) string {
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	m.mu.Unlock()
-	if !ok {
-		return ""
+	if ok {
+		if msgid, ok := c.lookupMsgid(snowflake); ok && msgid != "" {
+			return msgid
+		}
 	}
-	msgid, _ := c.lookupMsgid(snowflake)
-	return msgid
+	if channelID != "" {
+		if row, ok := m.store.MessageByID(channelID, snowflake); ok && row.MsgID != "" {
+			return row.MsgID
+		}
+	}
+	return ""
 }
 
 // pushPendingSend queues our outgoing message identity for a target; the
@@ -2954,3 +2983,4 @@ func (m *Manager) SendReaction(userID, networkID, target, messageID, channelID, 
 	}
 	return nil
 }
+

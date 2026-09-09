@@ -1647,7 +1647,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 		replyRefID := ""
 		if req.MessageReference != nil && req.MessageReference.MessageID != "" {
 			replyRefID = req.MessageReference.MessageID
-			replyMsgid = s.irc.ReplyTargetMsgid(u.ID, dm.NetworkID, replyRefID)
+			replyMsgid = s.irc.ReplyTargetMsgid(u.ID, dm.NetworkID, channelID, replyRefID)
 		}
 		// Discord-side content (with <@id> markers) is what the client
 		// sees and what gets buffered; the wire copy carries bare nicks.
@@ -1708,7 +1708,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	replyRefID := ""
 	if req.MessageReference != nil && req.MessageReference.MessageID != "" {
 		replyRefID = req.MessageReference.MessageID
-		replyMsgid = s.irc.ReplyTargetMsgid(u.ID, ch.NetworkID, replyRefID)
+		replyMsgid = s.irc.ReplyTargetMsgid(u.ID, ch.NetworkID, channelID, replyRefID)
 	}
 	// The wire copy carries bare nicks instead of <@id> markers (IRC
 	// convention); the Discord-side copy keeps the markers for pills.

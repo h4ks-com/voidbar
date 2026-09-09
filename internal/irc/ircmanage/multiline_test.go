@@ -270,14 +270,48 @@ func TestReplyBothWays(t *testing.T) {
 
 	// Outbound reply: the reference resolves through the registry back
 	// to m1 and stamps the wire PRIVMSG.
-	msgid1 := fx.manager.ReplyTargetMsgid("u1", "net1", snow1)
+	msgid1 := fx.manager.ReplyTargetMsgid("u1", "net1", ch.ID, snow1)
 	if msgid1 != "m1" {
 		t.Fatalf("ReplyTargetMsgid = %q, want m1", msgid1)
 	}
 	if err := fx.manager.SendChannel("u1", "net1", "#test", "own reply", "sf9", ch.ID, msgid1); err != nil {
 		t.Fatal(err)
 	}
-	waitTapExact(t, fx.tap, "@+reply=m1 PRIVMSG #test :own reply", 1)
+	waitTap(t, fx.tap, "+reply=m1", 1)
+	waitTap(t, fx.tap, "+draft/reply=m1", 1)
+
+	// Restart semantics: the in-memory registry dies with the
+	// connection; the persisted msgid index must carry the replies.
+	fx.manager.mu.Lock()
+	cc := fx.manager.conns[key("u1", "net1")]
+	fx.manager.mu.Unlock()
+	if cc == nil {
+		t.Fatal("no conn")
+	}
+	cc.msgidMu.Lock()
+	cc.snowToMsgid = make(map[string]string)
+	cc.msgidToRef = make(map[string]msgRef)
+	cc.msgidOrder = nil
+	cc.msgidMu.Unlock()
+
+	if got := fx.manager.ReplyTargetMsgid("u1", "net1", ch.ID, snow1); got != "m1" {
+		t.Fatalf("ReplyTargetMsgid after registry loss = %q, want m1 (persisted fallback)", got)
+	}
+	serverWrite("@msgid=m3;+draft/reply=m1 :peer!u@h PRIVMSG #test :late reply\r\n")
+	for time.Now().Before(deadline) {
+		if chID, msgID, ok := fx.store.LookupMessageByMsgID("net1", "m3"); ok {
+			if row, _ := fx.store.MessageByID(chID, msgID); row.ReplyTo != snow1 {
+				t.Fatalf("late reply ReplyTo = %q, want %q", row.ReplyTo, snow1)
+			}
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if chID, msgID, ok := fx.store.LookupMessageByMsgID("net1", "m3"); !ok {
+		t.Fatal("late reply never buffered")
+	} else if row, _ := fx.store.MessageByID(chID, msgID); row.ReplyTo != snow1 {
+		t.Fatalf("late reply buffered without reference: %+v", row)
+	}
 }
 
 // TestMultilineSendBatch: with the cap ACKed, a multi-line body leaves as

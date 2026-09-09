@@ -106,9 +106,15 @@ func (m *Manager) sendLines(c *conn, client *girc.Client, target, content, reply
 	if !strings.Contains(content, "\n") {
 		if replyMsgid != "" {
 			// draft/reply: the +reply client tag rides the PRIVMSG;
-			// message-tags (negotiated) is what actually relays it.
+			// message-tags (negotiated) is what actually relays it. Both
+			// spellings go out - clients recognize either (+reply is the
+			// current name, +draft/reply the older one; Halloy sends
+			// both, goguma historically reads only the draft name).
 			client.Send(&girc.Event{
-				Tags:    girc.Tags{"+reply": replyMsgid},
+				Tags: girc.Tags{
+					"+reply":       replyMsgid,
+					"+draft/reply": replyMsgid,
+				},
 				Command: "PRIVMSG",
 				Params:  []string{target, content},
 			})
@@ -223,6 +229,7 @@ func (m *Manager) sendMultilineBatch(client *girc.Client, target string, frames 
 		}
 		if i == 0 && replyMsgid != "" {
 			tags["+reply"] = replyMsgid
+			tags["+draft/reply"] = replyMsgid
 		}
 		client.Send(&girc.Event{
 			Tags:    tags,
@@ -278,6 +285,9 @@ func (m *Manager) lineBatchFrame(c *conn, e girc.Event, ref string) {
 	}
 	msgid, _ := e.Tags.Get("msgid")
 	reply, _ := e.Tags.Get("+reply")
+	if reply == "" {
+		reply, _ = e.Tags.Get("+draft/reply")
+	}
 	_, concat := e.Tags.Get("draft/multiline-concat")
 	c.appendLineFrame(ref, lineFrame{
 		line:   e.Last(),
