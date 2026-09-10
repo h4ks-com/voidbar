@@ -2138,7 +2138,10 @@ func (s *Service) OnMentionRelayed(userID, channelID string) {
 	_ = s.store.PutReadState(userID, rs)
 }
 
-// ReadStateEntries shapes the READY read_state rows.
+// ReadStateEntries shapes the READY read_state rows. last_message_id is
+// nullable on the wire: a marker for a channel with no buffered message
+// must serialize as null, not "" - Android's Long.parseLong on an empty
+// string crashes the whole client (gateway reconnect loop).
 func (s *Service) ReadStateEntries(userID string) []any {
 	rows, err := s.store.ReadStates(userID)
 	if err != nil {
@@ -2146,9 +2149,13 @@ func (s *Service) ReadStateEntries(userID string) []any {
 	}
 	entries := make([]any, 0, len(rows))
 	for _, rs := range rows {
+		var lastID any
+		if rs.LastMessageID != "" {
+			lastID = rs.LastMessageID
+		}
 		entries = append(entries, map[string]any{
 			"id":              rs.ChannelID,
-			"last_message_id": rs.LastMessageID,
+			"last_message_id": lastID,
 			"mention_count":   rs.MentionCount,
 			"version":         1,
 		})
