@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -293,6 +294,28 @@ func buildMessagePayloadFromRow(row *storage.BufferedMessage) map[string]any {
 	return payload
 }
 
+// reactionsPayload renders the persisted reaction set in the Discord
+// payload shape (count + me per emoji, name-sorted for stable output).
+func reactionsPayload(byEmoji map[string][]string, userID string) []any {
+	emojis := make([]string, 0, len(byEmoji))
+	for emoji := range byEmoji {
+		emojis = append(emojis, emoji)
+	}
+	sort.Strings(emojis)
+	list := make([]any, 0, len(emojis))
+	for _, emoji := range emojis {
+		rc := map[string]any{"count": len(byEmoji[emoji]), "me": false, "emoji": map[string]any{"id": nil, "name": emoji}}
+		for _, uid := range byEmoji[emoji] {
+			if uid == userID {
+				rc["me"] = true
+				break
+			}
+		}
+		list = append(list, rc)
+	}
+	return list
+}
+
 // sendLinkPreview unfurls the first previewable link of a freshly
 // relayed message and delivers it as a Discord-side edit: the message
 // itself is already on its way (obbies architecture - preview follows
@@ -314,24 +337,68 @@ func (m *Manager) sendLinkPreview(userID, channelID, msgID, content string) {
 			m.log.Warn("preview persist failed", "err", err, "channel", channelID, "msg", msgID)
 			return
 		}
-		payload := buildMessagePayloadFromRow(row)
+		payload := m.messageUpdatePayload(userID, row)
 		payload["embeds"] = embeds
-		if len(row.Attachments) > 0 {
-			payload["attachments"] = row.Attachments
-		}
-		// MESSAGE_UPDATE re-emits the author user object: keep the facts
-		// bio on it or the update blanks the sheet's About-me.
-		if strings.HasPrefix(row.AuthorID, "irc:") {
-			nick := strings.TrimPrefix(row.AuthorID, "irc:")
-			if au, ok := payload["author"].(map[string]any); ok {
-				if bio := m.peerBioForUser(userID, nick); bio != "" {
-					au["bio"] = bio
-				}
-				if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
-					au["avatar"] = avatar
-				}
-			}
-		}
 		m.gw.Dispatch(userID, "MESSAGE_UPDATE", payload)
 	}()
+}
+
+// messageUpdatePayload renders a MESSAGE_UPDATE body that re-emits the
+// message's full shape. Clients replace the message record wholesale on
+// updates, so a bare stub here drops the reply bar (its author chip then
+// degrades to @invalid-user), mention pills, reactions and the own
+// avatar. Attachments ride the row; embeds are the caller's business
+// (they are the point of the update).
+func (m *Manager) messageUpdatePayload(userID string, row *storage.BufferedMessage) map[string]any {
+	payload := buildMessagePayloadFromRow(row)
+	if len(row.Attachments) > 0 {
+		payload["attachments"] = row.Attachments
+	}
+	// Reply shape, same as the create carried it.
+	if row.ReplyTo != "" {
+		netID := ""
+		if ch, err := m.store.GetChannel(row.ChannelID); err == nil {
+			netID = ch.NetworkID
+		}
+		attachReplyReference(m, payload, msgRef{Snowflake: row.ReplyTo, ChannelID: row.ChannelID, GuildID: netID}, netID)
+	}
+	if len(row.Mentions) > 0 {
+		mentioned := make([]any, 0, len(row.Mentions))
+		for _, mu := range row.Mentions {
+			mentioned = append(mentioned, map[string]any{
+				"id":            mu.ID,
+				"username":      mu.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			})
+		}
+		payload["mentions"] = mentioned
+	}
+	if len(row.Reactions) > 0 {
+		payload["reactions"] = reactionsPayload(row.Reactions, userID)
+	}
+	// MESSAGE_UPDATE re-emits the author user object: peers keep their
+	// facts bio/avatar or the update blanks the sheet's About-me.
+	if strings.HasPrefix(row.AuthorID, "irc:") {
+		nick := strings.TrimPrefix(row.AuthorID, "irc:")
+		if au, ok := payload["author"].(map[string]any); ok {
+			if bio := m.peerBioForUser(userID, nick); bio != "" {
+				au["bio"] = bio
+			}
+			if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
+				au["avatar"] = avatar
+			}
+		}
+		return payload
+	}
+	// Own rows keep their avatar on the author: an avatar-less stub
+	// would blank the own avatar everywhere it renders.
+	if m.publicURL != "" {
+		if u, err := m.store.GetUserByID(row.AuthorID); err == nil && u.Avatar != "" {
+			if au, ok := payload["author"].(map[string]any); ok {
+				au["avatar"] = strings.TrimSuffix(m.publicURL, "/") + "/avatars/" + row.AuthorID + "/" + u.Avatar + ".png"
+			}
+		}
+	}
+	return payload
 }

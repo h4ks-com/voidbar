@@ -241,11 +241,18 @@ func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool
 		return err
 	}
 	if s.gw != nil {
-		s.gw.Dispatch(userID, "MESSAGE_UPDATE", map[string]any{
-			"id":         messageID,
-			"channel_id": channelID,
-			"pinned":     pinned,
-		})
+		// Full-object MESSAGE_UPDATE: clients replace the message
+		// record wholesale, so a bare {id, pinned} stub would blank
+		// the pinned message's content, reply bar and reactions.
+		if row, ok := s.store.MessageByID(channelID, messageID); ok {
+			s.gw.Dispatch(userID, "MESSAGE_UPDATE", s.messageUpdateFromRow(userID, row, pinned))
+		} else {
+			s.gw.Dispatch(userID, "MESSAGE_UPDATE", map[string]any{
+				"id":         messageID,
+				"channel_id": channelID,
+				"pinned":     pinned,
+			})
+		}
 		pins := s.ChannelPins(channelID)
 		var last *string
 		if len(pins) > 0 {
@@ -262,6 +269,108 @@ func (s *Service) SetChannelPin(userID, channelID, messageID string, pinned bool
 		}
 	}
 	return nil
+}
+
+// messageUpdateFromRow renders a full-object MESSAGE_UPDATE for a
+// buffered row (the wire contract real Discord uses for pin flips):
+// content, author facts, reply shape, mentions, reactions, attachments
+// - everything a wholesale record replace on the client would need.
+func (s *Service) messageUpdateFromRow(userID string, row storage.BufferedMessage, pinned bool) map[string]any {
+	return s.messageUpdateFromRowDepth(userID, row, pinned, 0)
+}
+
+// messageUpdateFromRowDepth is messageUpdateFromRow with a reply-chain
+// depth guard: depth 1 is the bar preview, deeper (or cyclic) chains
+// keep just the reference.
+func (s *Service) messageUpdateFromRowDepth(userID string, row storage.BufferedMessage, pinned bool, depth int) map[string]any {
+	var authorBio any
+	if bio := s.AuthorBio(userID, row.ChannelID, row.AuthorID); bio != "" {
+		authorBio = bio
+	}
+	payload := map[string]any{
+		"id":               row.ID,
+		"channel_id":       row.ChannelID,
+		"content":          row.Content,
+		"timestamp":        row.Timestamp,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            row.Nonce,
+		"pinned":           pinned,
+		"type":             0,
+		"flags":            0,
+		"author": map[string]any{
+			"id":            model.IrcAuthorID(row.AuthorID),
+			"username":      row.AuthorName,
+			"discriminator": "0",
+			"bot":           false,
+			"avatar":        s.AuthorAvatar(userID, row.ChannelID, row.AuthorID),
+		},
+	}
+	if authorBio != nil {
+		payload["author"].(map[string]any)["bio"] = authorBio
+	}
+	if row.ReplyTo != "" {
+		payload["type"] = 19 // REPLY
+		payload["message_reference"] = map[string]any{
+			"type":       0,
+			"message_id": row.ReplyTo,
+			"channel_id": row.ChannelID,
+		}
+		if ref, ok := s.store.MessageByID(row.ChannelID, row.ReplyTo); ok && depth < 1 {
+			inner := s.messageUpdateFromRowDepth(userID, ref, false, depth+1)
+			delete(inner, "message_reference")
+			delete(inner, "referenced_message")
+			payload["referenced_message"] = inner
+		}
+	}
+	if row.Type != 0 {
+		payload["type"] = row.Type
+	}
+	if len(row.Mentions) > 0 {
+		mentioned := make([]any, 0, len(row.Mentions))
+		for _, mu := range row.Mentions {
+			mentioned = append(mentioned, map[string]any{
+				"id":            mu.ID,
+				"username":      mu.Nick,
+				"discriminator": "0",
+				"bot":           false,
+			})
+		}
+		payload["mentions"] = mentioned
+	}
+	if len(row.Reactions) > 0 {
+		emojis := make([]string, 0, len(row.Reactions))
+		for emoji := range row.Reactions {
+			emojis = append(emojis, emoji)
+		}
+		sort.Strings(emojis)
+		list := make([]any, 0, len(emojis))
+		for _, emoji := range emojis {
+			rc := map[string]any{"count": len(row.Reactions[emoji]), "me": false, "emoji": map[string]any{"id": nil, "name": emoji}}
+			for _, uid := range row.Reactions[emoji] {
+				if uid == userID {
+					rc["me"] = true
+					break
+				}
+			}
+			list = append(list, rc)
+		}
+		payload["reactions"] = list
+	}
+	if len(row.Attachments) > 0 {
+		payload["attachments"] = row.Attachments
+	}
+	if len(row.Embeds) > 0 {
+		payload["embeds"] = row.Embeds
+	}
+	return payload
 }
 
 // dispatchPinSystemMessage drops the "{user} pinned a message to this
