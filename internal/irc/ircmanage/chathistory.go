@@ -290,7 +290,7 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 				payload["attachments"] = linkAtts
 			}
 			if ref, ok := m.resolveReplyRef(c, f.reply); ok && ref.Snowflake != "" {
-				attachReplyReference(m, payload, ref, c.networkID)
+				attachReplyReference(m, payload, ref, c.networkID, c.userID)
 			}
 			m.gw.Dispatch(c.userID, "MESSAGE_CREATE", payload)
 		}
@@ -443,4 +443,5 @@ func buildMessagePayload(msgID, channelID, author, content, ts, bio string, avat
 		"author":           authorObj,
 	}
 }
+
 

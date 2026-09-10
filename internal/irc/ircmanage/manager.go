@@ -1649,7 +1649,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
 	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author))
 	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
-		attachReplyReference(m, payload, ref, c.networkID)
+		attachReplyReference(m, payload, ref, c.networkID, c.userID)
 	}
 	if len(mentioned) > 0 {
 		// Upserts first (same-session order is preserved): a pill for a
@@ -1774,7 +1774,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 		}(),
 	}
 	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
-		attachReplyReference(m, payload, ref, c.networkID)
+		attachReplyReference(m, payload, ref, c.networkID, c.userID)
 	}
 	m.log.Info("irc query relayed", "user", c.userID, "network", c.networkID, "from", author, "dm", dm.ID, "msg_id", msgID)
 	if msgid != "" {
@@ -2640,7 +2640,7 @@ func (m *Manager) resolveReplyRef(c *conn, msgid string) (msgRef, bool) {
 // shape: message_reference drives the reply bar, referenced_message is
 // the bar's preview. The referenced row comes from the replay buffer; a
 // scrolled-out or pre-restart target keeps just the reference.
-func attachReplyReference(m *Manager, payload map[string]any, ref msgRef, networkID string) {
+func attachReplyReference(m *Manager, payload map[string]any, ref msgRef, networkID, userID string) {
 	payload["type"] = 19 // REPLY (default 0, DEFAULT)
 	payload["message_reference"] = map[string]any{
 		"type":       0,
@@ -2651,16 +2651,20 @@ func attachReplyReference(m *Manager, payload map[string]any, ref msgRef, networ
 		payload["message_reference"].(map[string]any)["guild_id"] = ref.GuildID
 	}
 	if row, ok := m.store.MessageByID(ref.ChannelID, ref.Snowflake); ok {
-		payload["referenced_message"] = buildReferencedPayload(&row)
+		payload["referenced_message"] = m.buildReferencedPayload(userID, &row)
 	}
 }
 
 // buildReferencedPayload renders the referenced_message preview body:
 // enough of the message object for the client to draw the bar (author,
-// content, id, timestamp).
-func buildReferencedPayload(row *storage.BufferedMessage) map[string]any {
+// content, id, timestamp) - the author carries its facts (peer bio and
+// mirrored avatar, own account avatar), because the bar renders the
+// target's avatar straight from this object: a bare author stub shows
+// a blank chip even when the peer has an avatar.
+func (m *Manager) buildReferencedPayload(userID string, row *storage.BufferedMessage) map[string]any {
 	payload := buildMessagePayloadFromRow(row)
 	payload["mention_everyone"] = false
+	m.enrichAuthor(userID, payload, row)
 	return payload
 }
 
@@ -3006,5 +3010,6 @@ func (m *Manager) SendReaction(userID, networkID, target, messageID, channelID, 
 	}
 	return nil
 }
+
 
 

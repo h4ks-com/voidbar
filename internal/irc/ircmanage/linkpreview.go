@@ -360,7 +360,7 @@ func (m *Manager) messageUpdatePayload(userID string, row *storage.BufferedMessa
 		if ch, err := m.store.GetChannel(row.ChannelID); err == nil {
 			netID = ch.NetworkID
 		}
-		attachReplyReference(m, payload, msgRef{Snowflake: row.ReplyTo, ChannelID: row.ChannelID, GuildID: netID}, netID)
+		attachReplyReference(m, payload, msgRef{Snowflake: row.ReplyTo, ChannelID: row.ChannelID, GuildID: netID}, netID, userID)
 	}
 	if len(row.Mentions) > 0 {
 		mentioned := make([]any, 0, len(row.Mentions))
@@ -377,28 +377,34 @@ func (m *Manager) messageUpdatePayload(userID string, row *storage.BufferedMessa
 	if len(row.Reactions) > 0 {
 		payload["reactions"] = reactionsPayload(row.Reactions, userID)
 	}
-	// MESSAGE_UPDATE re-emits the author user object: peers keep their
-	// facts bio/avatar or the update blanks the sheet's About-me.
-	if strings.HasPrefix(row.AuthorID, "irc:") {
-		nick := strings.TrimPrefix(row.AuthorID, "irc:")
-		if au, ok := payload["author"].(map[string]any); ok {
-			if bio := m.peerBioForUser(userID, nick); bio != "" {
-				au["bio"] = bio
-			}
-			if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
-				au["avatar"] = avatar
-			}
-		}
-		return payload
+	m.enrichAuthor(userID, payload, row)
+	return payload
+}
+
+// enrichAuthor patches a message payload's author object with the facts
+// clients render from it: peers their bio and mirrored avatar hash, own
+// rows the account avatar URL. Every event that re-emits an author
+// (MESSAGE_UPDATE, referenced_message) goes through here - an author
+// stub without these blanks the sheet's About-me and the reply bar's
+// avatar chip.
+func (m *Manager) enrichAuthor(userID string, payload map[string]any, row *storage.BufferedMessage) {
+	au, ok := payload["author"].(map[string]any)
+	if !ok {
+		return
 	}
-	// Own rows keep their avatar on the author: an avatar-less stub
-	// would blank the own avatar everywhere it renders.
-	if m.publicURL != "" {
-		if u, err := m.store.GetUserByID(row.AuthorID); err == nil && u.Avatar != "" {
-			if au, ok := payload["author"].(map[string]any); ok {
+	if !strings.HasPrefix(row.AuthorID, "irc:") {
+		if m.publicURL != "" {
+			if u, err := m.store.GetUserByID(row.AuthorID); err == nil && u.Avatar != "" {
 				au["avatar"] = strings.TrimSuffix(m.publicURL, "/") + "/avatars/" + row.AuthorID + "/" + u.Avatar + ".png"
 			}
 		}
+		return
 	}
-	return payload
+	nick := strings.TrimPrefix(row.AuthorID, "irc:")
+	if bio := m.peerBioForUser(userID, nick); bio != "" {
+		au["bio"] = bio
+	}
+	if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
+		au["avatar"] = avatar
+	}
 }

@@ -105,6 +105,11 @@ func TestMessageUpdatePayloadFidelity(t *testing.T) {
 	if err := store.AppendMessage(row); err != nil {
 		t.Fatal(err)
 	}
+	// The replied-to peer has a mirrored avatar: the bar renders the
+	// target's avatar straight from referenced_message.author.
+	if err := store.PutPeerAvatar("u1", "peer", "peerhash9"); err != nil {
+		t.Fatal(err)
+	}
 	stored, ok := store.MessageByID(ch.ID, "snowB")
 	if !ok {
 		t.Fatal("reply row missing")
@@ -131,6 +136,10 @@ func TestMessageUpdatePayloadFidelity(t *testing.T) {
 	if inner != nil {
 		if _, has := inner["message_reference"]; has {
 			t.Error("referenced_message must be depth-1 (no reference of its own)")
+		}
+		iau, _ := inner["author"].(map[string]any)
+		if iau == nil || iau["avatar"] != "peerhash9" {
+			t.Errorf("referenced author avatar = %v, want the peer's mirrored hash", inner["author"])
 		}
 	}
 	if ms, _ := payload["mentions"].([]any); len(ms) != 1 {
