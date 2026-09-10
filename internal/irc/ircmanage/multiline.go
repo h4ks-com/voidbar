@@ -301,8 +301,12 @@ func (m *Manager) lineBatchFrame(c *conn, e girc.Event, ref string) {
 }
 
 // flushLineBatch resolves one closed batch: history-nested frames join
-// into their chathistory batch, own echoes only bind the msgid, and
-// foreign live traffic relays as a single message.
+// into their chathistory batch, own echoes bind the msgid, and
+// foreign live traffic relays as a single message. The batch's
+// canonical msgid is the LAST frame's - the draft/multiline spec
+// targets replies and reactions at the final frame - and every frame
+// msgid binds to the joined message so peers anchoring elsewhere
+// still resolve.
 func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 	if len(acc.frames) == 0 {
 		return
@@ -313,34 +317,95 @@ func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
+	anchor := batchAnchorMsgid(acc)
+	extras := batchExtraMsgids(acc)
 	if acc.chatRef != "" {
 		c.appendChatFrame(acc.chatRef, chatFrame{
-			target:  acc.target,
-			author:  author,
-			content: strings.Join(accLines(acc), "\n"),
-			at:      at,
-			msgid:   first.msgid,
-			reply:   first.reply,
+			target:      acc.target,
+			author:      author,
+			content:     strings.Join(accLines(acc), "\n"),
+			at:          at,
+			msgid:       anchor,
+			extraMsgids: extras,
+			reply:       first.reply,
 		})
 		return
 	}
 	if first.echo {
 		// Our own multiline send echoed back (echo-message): the Discord
-		// side already has the message; only the msgid binding matters.
-		if first.msgid == "" {
+		// side already has the message; only the msgid binding matters -
+		// one binding per frame, peers anchor to any of them.
+		if anchor == "" {
 			return
 		}
 		ref := c.popPendingSend(acc.target)
 		if ref.Snowflake == "" {
 			return
 		}
-		c.registerMsgid(ref, first.msgid)
-		if err := m.store.SetMessageMsgID(c.networkID, ref.ChannelID, ref.Snowflake, first.msgid); err != nil {
+		c.registerMsgid(ref, anchor)
+		if err := m.store.SetMessageMsgID(c.networkID, ref.ChannelID, ref.Snowflake, anchor); err != nil {
 			m.log.Debug("msgid persist failed", "err", err, "msg", ref.Snowflake)
+		}
+		for _, id := range extras {
+			c.registerMsgidAlias(ref, id)
+			if err := m.store.IndexMessageMsgID(c.networkID, id, ref.ChannelID, ref.Snowflake); err != nil {
+				m.log.Debug("msgid index failed", "err", err, "msg", ref.Snowflake)
+			}
 		}
 		return
 	}
-	m.dispatchMessage(c, acc.target, author, strings.Join(accLines(acc), "\n"), at.Format(time.RFC3339Nano), first.msgid, first.reply)
+	m.dispatchMessage(c, acc.target, author, strings.Join(accLines(acc), "\n"), at.Format(time.RFC3339Nano), anchor, first.reply)
+	// dispatchMessage minted the row under the anchor msgid; bind the
+	// remaining frame msgids to the same row (the anchor resolves it).
+	// Index-only: the row keeps its canonical anchor MsgID.
+	if len(extras) > 0 && anchor != "" {
+		if chID, snow, ok := m.store.LookupMessageByMsgID(c.networkID, anchor); ok {
+			ref := msgRef{Snowflake: snow, ChannelID: chID, GuildID: c.networkID}
+			for _, id := range extras {
+				c.registerMsgidAlias(ref, id)
+				if err := m.store.IndexMessageMsgID(c.networkID, id, chID, snow); err != nil {
+					m.log.Debug("msgid index failed", "err", err, "msg", snow)
+				}
+			}
+		}
+	}
+}
+
+// batchAnchorMsgid returns the batch's canonical msgid: the last
+// non-empty frame msgid (spec: replies/reactions target the final
+// frame).
+func batchAnchorMsgid(acc *lineBatch) string {
+	for i := len(acc.frames) - 1; i >= 0; i-- {
+		if acc.frames[i].msgid != "" {
+			return acc.frames[i].msgid
+		}
+	}
+	return ""
+}
+
+// batchExtraMsgids lists the batch's distinct non-empty frame msgids
+// minus the anchor, in frame order.
+func batchExtraMsgids(acc *lineBatch) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range acc.frames {
+		if f.msgid == "" || seen[f.msgid] {
+			continue
+		}
+		seen[f.msgid] = true
+		out = append(out, f.msgid)
+	}
+	// Drop the anchor (last distinct).
+	if len(out) > 0 {
+		anchor := batchAnchorMsgid(acc)
+		for i := len(out) - 1; i >= 0; i-- {
+			if out[i] == anchor {
+				out = append(out[:i], out[i+1:]...)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // accLines flattens the frames into the joined message's lines,
@@ -368,3 +433,6 @@ type lineFrame struct {
 	source string
 	concat bool // glue to the previous frame without a newline
 }
+
+
+

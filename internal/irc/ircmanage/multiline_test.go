@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrstanley/girc"
+
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
@@ -76,6 +78,26 @@ func waitTap(t *testing.T, tap *wireTap, substr string, want int) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d wire %q; got %d:\n%s", want, substr, tap.count(substr), strings.Join(tap.lines, "\n"))
+}
+
+// waitTapPattern waits for a wire line containing prefix and returns the
+// remainder of that line (e.g. the batch reference of "BATCH +vb...").
+func waitTapPattern(t *testing.T, tap *wireTap, prefix string) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		tap.mu.Lock()
+		for _, l := range tap.lines {
+			if strings.HasPrefix(l, prefix) {
+				defer tap.mu.Unlock()
+				return strings.TrimSpace(strings.TrimPrefix(l, prefix))
+			}
+		}
+		tap.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for wire %q; got:\n%s", prefix, strings.Join(tap.lines, "\n"))
+	return ""
 }
 
 // waitTapExact polls for an exact line (girc's rate limiter delays
@@ -427,6 +449,136 @@ func TestMultilineIncomingLive(t *testing.T) {
 	}
 }
 
+func TestGircMsgidParse(t *testing.T) {
+	for _, id := range []string{"fa", "fb", "fc"} {
+		e := girc.ParseEvent("@msgid=" + id + ";batch=p2 :bob!b@h PRIVMSG #test :x")
+		v, _ := e.Tags.Get("msgid")
+		if v != id {
+			t.Errorf("girc parsed msgid %q, want %q (tags=%v)", v, id, e.Tags)
+		}
+	}
+}
+
+// TestMultilineMsgidAnchor: replies and reactions to a joined multiline
+// message must anchor to the LAST frame's msgid (draft/multiline spec),
+// and every frame msgid resolves back to the joined row - peers anchor
+// wherever their client picked.
+func TestMultilineMsgidAnchor(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	fx := newMultilineFixture(t, ln, true, func(w func(string), nick, ch string) {
+		w("BATCH +p2 draft/multiline " + ch + "\r\n")
+		w("@msgid=fa;batch=p2 :bob!b@h PRIVMSG " + ch + " :one\r\n")
+		w("@msgid=fb;batch=p2 :bob!b@h PRIVMSG " + ch + " :two\r\n")
+		w("@msgid=fc;batch=p2 :bob!b@h PRIVMSG " + ch + " :three\r\n")
+		w("BATCH -p2\r\n")
+	})
+	waitForCount(t, fx.sink, "irc message relayed", 1)
+
+	ch := fx.testChannel(t)
+	var row *storage.BufferedMessage = nil
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range fx.store.ChannelMessages(ch.ID, "", "", 50) {
+			if m.AuthorName == "bob" && m.Content == "one\ntwo\nthree" {
+				r := m
+				row = &r
+			}
+		}
+		if row != nil && row.MsgID == "fc" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if row == nil {
+		t.Fatal("joined multiline message missing")
+	}
+	if row.MsgID != "fc" {
+		for _, m := range fx.store.ChannelMessages(ch.ID, "", "", 50) {
+			t.Logf("row: author=%q content=%q msgid=%q", m.AuthorName, m.Content, m.MsgID)
+		}
+		for _, l := range fx.sink.lines {
+			if strings.Contains(l, "DEBUGFLUSH") {
+				t.Logf("sink: %s", l)
+			}
+		}
+		t.Fatalf("row.MsgID = %q, want fc (last frame)", row.MsgID)
+	}
+	// Every frame msgid resolves to the joined row.
+	for _, id := range []string{"fa", "fb", "fc"} {
+		if chID, snow, ok := fx.store.LookupMessageByMsgID("net1", id); !ok || chID != ch.ID || snow != row.ID {
+			t.Fatalf("msgid %q -> %q/%q, want %q/%q", id, chID, snow, ch.ID, row.ID)
+		}
+	}
+	// The Discord-side reply target is the last frame's msgid.
+	if got := fx.manager.ReplyTargetMsgid("u1", "net1", ch.ID, row.ID); got != "fc" {
+		t.Fatalf("ReplyTargetMsgid = %q, want fc", got)
+	}
+}
+
+// TestMultilineEchoBindsAllFrames: our own multiline send echoed back
+// binds every frame msgid to the snowflake, so peers reacting to any
+// frame resolve.
+func TestMultilineEchoBindsAllFrames(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var sentRef string
+	fx := newMultilineFixture(t, ln, true, func(w func(string), nick, ch string) {
+		// Capture the outgoing batch ref from the client's BATCH line.
+	})
+	_ = sentRef
+	ch := fx.testChannel(t)
+	waitTap(t, fx.tap, "JOIN #test", 1)
+	// The REST path buffers the row before the manager send (the echo's
+	// msgid binding needs it in place) - mirror that ordering.
+	if err := fx.store.AppendMessage(storage.BufferedMessage{
+		ID: "sfx1", ChannelID: ch.ID, AuthorID: "u1", AuthorName: "histguy",
+		Content: "l1\nl2", Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "l1\nl2", "sfx1", ch.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The fake server echoes the batch envelope and each frame back with
+	// its own msgid; find the batch ref from the wire.
+	full := waitTapPattern(t, fx.tap, "BATCH +vb")
+	ref, _, _ := strings.Cut(full, " ")
+	wire := fx.tap
+	wire.mu.Lock()
+	serverWrite := wire.write
+	wire.mu.Unlock()
+	if serverWrite == nil {
+		t.Fatal("no server write hook")
+	}
+	serverWrite("BATCH +" + ref + " draft/multiline #test\r\n")
+	serverWrite("@msgid=ea;batch=" + ref + " :histguy!h@h PRIVMSG #test :l1\r\n")
+	serverWrite("@msgid=eb;batch=" + ref + " :histguy!h@h PRIVMSG #test :l2\r\n")
+	serverWrite("BATCH -" + ref + "\r\n")
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		okA := false
+		okB := false
+		if _, _, ok := fx.store.LookupMessageByMsgID("net1", "ea"); ok {
+			okA = true
+		}
+		if _, _, ok := fx.store.LookupMessageByMsgID("net1", "eb"); ok {
+			okB = true
+		}
+		if okA && okB {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("echo frame msgids not both bound; sink:\n%s\nwire:\n%s", strings.Join(fx.sink.lines, "\n"), strings.Join(fx.tap.lines, "\n"))
+}
+
 // TestPlanMultiline pins the batch packing rules: line limits split into
 // several batches, byte budgets are respected, and long lines are
 // word-split into concat-tagged chunks that re-join without a newline.
@@ -639,4 +791,5 @@ func TestMultilineIncomingHistory(t *testing.T) {
 		t.Fatalf("history rows missing (joined=%v plain=%v): %+v", joined, plain, msgs)
 	}
 }
+
 

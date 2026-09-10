@@ -26,8 +26,9 @@ type chatFrame struct {
 	content       string
 	at            time.Time
 	msgid         string
-	reply         string // +reply tag: resolved to a reference at flush
-	mentions      []any // filled at flush time (Discordize)
+	extraMsgids   []string // nested multiline: the non-anchor frame msgids
+	reply         string   // +reply tag: resolved to a reference at flush
+	mentions      []any    // filled at flush time (Discordize)
 	mentionChans  []any
 }
 
@@ -226,9 +227,11 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			msgID = m.sf.NewBelow(ts, ceiling)
 		}
 		// History gets the same mention treatment as live traffic: bare
-		// nicks become markers so the backlog renders pills too.
+		// nicks become markers so the backlog renders pills too. CTCP
+		// ACTION and mIRC formatting convert first (same reason).
 		var mentionedUsers []mentionUser
 		var mentionedChans []mentionChannel
+		f.content = FormatIRC(f.content)
 		f.content, mentionedUsers, mentionedChans = m.Discordize(c.userID, c.networkID, f.target, f.content)
 		f.mentions = nil
 		f.mentionChans = nil
@@ -268,9 +271,21 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 			continue // no buffer row -> the msgid index below would dangle
 		}
 		if f.msgid != "" {
-			c.registerMsgid(msgRef{Snowflake: msgID, ChannelID: ch.ID, GuildID: c.networkID}, f.msgid)
+			ref := msgRef{Snowflake: msgID, ChannelID: ch.ID, GuildID: c.networkID}
+			c.registerMsgid(ref, f.msgid)
 			if err := m.store.SetMessageMsgID(c.networkID, ch.ID, msgID, f.msgid); err != nil {
 				m.log.Debug("msgid persist failed", "err", err, "msg", msgID)
+			}
+			// A joined multiline row answers to every frame msgid: a
+			// peer's client may anchor its reply/reaction to any of
+			// them (the spec picks the last, non-multiline relays see
+			// each frame separately). Index-only: the row keeps its
+			// canonical anchor MsgID.
+			for _, id := range f.extraMsgids {
+				c.registerMsgidAlias(ref, id)
+				if err := m.store.IndexMessageMsgID(c.networkID, id, ch.ID, msgID); err != nil {
+					m.log.Debug("msgid index failed", "err", err, "msg", msgID)
+				}
 			}
 		}
 		if live {
@@ -443,5 +458,6 @@ func buildMessagePayload(msgID, channelID, author, content, ts, bio string, avat
 		"author":           authorObj,
 	}
 }
+
 
 

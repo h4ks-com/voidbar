@@ -118,7 +118,7 @@ func (s *Storage) SetMessageMsgID(networkID, channelID, id, msgid string) error 
 		}
 		if m.MsgID != msgid {
 			m.MsgID = msgid
-			val, err := json.Marshal(m)
+			val, err := json.Marshal(&m)
 			if err != nil {
 				return err
 			}
@@ -126,6 +126,19 @@ func (s *Storage) SetMessageMsgID(networkID, channelID, id, msgid string) error 
 				return err
 			}
 		}
+		return txn.Set(msgidKey(networkID, msgid), []byte(channelID+"\x00"+id))
+	})
+}
+
+// IndexMessageMsgID writes ONLY the reverse-lookup index (msgid -> row):
+// for alias msgids of a joined multiline message, whose row keeps the
+// canonical anchor msgid - indexing an alias through SetMessageMsgID
+// would overwrite the row's own MsgID.
+func (s *Storage) IndexMessageMsgID(networkID, msgid, channelID, id string) error {
+	if msgid == "" {
+		return nil
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(msgidKey(networkID, msgid), []byte(channelID+"\x00"+id))
 	})
 }

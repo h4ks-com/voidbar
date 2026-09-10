@@ -154,6 +154,7 @@ type conn struct {
 	snowToMsgid map[string]string // Discord message id -> IRC msgid
 	msgidToRef  map[string]msgRef // IRC msgid -> message identity
 	msgidOrder  []string          // snowToMsgid insertion order, for eviction
+	aliasOrder  []string          // alias msgids (non-anchor multiline frames), for eviction
 
 	// pendingSends queues the Discord identity of our own outgoing
 	// PRIVMSGs per target (lowercased, FIFO). With echo-message the
@@ -1644,6 +1645,10 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 	// Snowflake message id is mandatory: the client's message store drops
 	// MESSAGE_CREATE payloads without one.
 	msgID := m.sf.New()
+	// CTCP ACTION and mIRC formatting become the Discord-renderable
+	// form before mention-matching (control bytes around a nick would
+	// break the match).
+	content = FormatIRC(content)
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
@@ -1739,6 +1744,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 	}
 	msgID := m.sf.New()
 	peerID := model.IrcAuthorID("irc:" + author)
+	content = FormatIRC(content)
 	payload := map[string]any{
 		"id":               msgID,
 		"channel_id":       dm.ID,
@@ -2577,6 +2583,29 @@ func (c *conn) registerMsgid(ref msgRef, msgid string) {
 			delete(c.msgidToRef, mid)
 		}
 		delete(c.snowToMsgid, oldest)
+	}
+}
+
+// registerMsgidAlias binds an alias msgid (a non-anchor frame of a
+// multiline batch) to a message identity WITHOUT claiming the
+// snowflake's canonical slot: snowToMsgid keeps the anchor, so
+// lookups that pick THE msgid for the row (replies, reactions) still
+// answer with the spec's anchor.
+func (c *conn) registerMsgidAlias(ref msgRef, msgid string) {
+	if msgid == "" {
+		return
+	}
+	c.msgidMu.Lock()
+	defer c.msgidMu.Unlock()
+	if _, canonical := c.snowToMsgid[ref.Snowflake]; canonical && c.snowToMsgid[ref.Snowflake] == msgid {
+		return
+	}
+	c.msgidToRef[msgid] = ref
+	c.aliasOrder = append(c.aliasOrder, msgid)
+	for len(c.aliasOrder) > msgidRegistryCap {
+		oldest := c.aliasOrder[0]
+		c.aliasOrder = c.aliasOrder[1:]
+		delete(c.msgidToRef, oldest)
 	}
 }
 
