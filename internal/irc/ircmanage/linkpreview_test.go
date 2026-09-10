@@ -21,6 +21,10 @@ func TestPreviewableLink(t *testing.T) {
 		{"img https://example.com/a.png and https://example.com/page", "https://example.com/page"},
 		{"bracketed <https://example.com/x>", "https://example.com/x"},
 		{"ftp://example.com nope", ""},
+		// ACTION/formatted lines wrap links in markdown.
+		{"*waves at https://example.com/act*", "https://example.com/act"},
+		{"**bold https://example.com/b** tail", "https://example.com/b"},
+		{"_https://example.com/u_", "https://example.com/u"},
 	}
 	for _, c := range cases {
 		if got := previewableLink(c.in); got != c.want {
@@ -118,6 +122,8 @@ func TestMessageUpdatePayloadFidelity(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	// Own avatar rides as the hash (the create-path form); publicURL is
+	// armed anyway to prove it does NOT turn into a ready-made URL.
 	manager.SetPublicURL("http://vb.example/")
 
 	payload := manager.messageUpdatePayload("u1", &stored)
@@ -153,8 +159,8 @@ func TestMessageUpdatePayloadFidelity(t *testing.T) {
 		t.Errorf("reaction = %v", rc[0])
 	}
 	au, _ := payload["author"].(map[string]any)
-	if au == nil || au["avatar"] != "http://vb.example/avatars/u1/abc123.png" {
-		t.Errorf("author avatar = %v", payload["author"])
+	if au == nil || au["avatar"] != "abc123" {
+		t.Errorf("author avatar = %v, want the hash form (abc123)", payload["author"])
 	}
 
 	// A peer's plain message degrades to nothing: no reference, no

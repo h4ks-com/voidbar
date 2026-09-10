@@ -60,11 +60,16 @@ func metaTagRe(key string) *regexp.Regexp {
 
 // previewableLink returns the first http(s) URL of the message that is
 // not a direct image (those already arrive as mirrored attachments).
+// Markdown decorations (an ACTION line's italics, mIRC-converted
+// emphasis) wrap pasted links and must be stripped before the scheme
+// check, or the trailing asterisk kills the match.
 func previewableLink(content string) string {
 	for _, tok := range strings.Fields(content) {
-		// Angle-bracketed URLs (some clients paste them that way) need
-		// the delimiters stripped before the scheme check.
-		tok = strings.Trim(tok, "<>")
+		// Angle brackets (some clients paste them that way) and
+		// markdown decorations (ACTION italics, converted mIRC
+		// emphasis) wrap the token and must go before the scheme
+		// check - they can sit on both ends.
+		tok = strings.Trim(tok, "<>*_~`")
 		if !strings.HasPrefix(tok, "http://") && !strings.HasPrefix(tok, "https://") {
 			continue
 		}
@@ -393,10 +398,12 @@ func (m *Manager) enrichAuthor(userID string, payload map[string]any, row *stora
 		return
 	}
 	if !strings.HasPrefix(row.AuthorID, "irc:") {
-		if m.publicURL != "" {
-			if u, err := m.store.GetUserByID(row.AuthorID); err == nil && u.Avatar != "" {
-				au["avatar"] = strings.TrimSuffix(m.publicURL, "/") + "/avatars/" + row.AuthorID + "/" + u.Avatar + ".png"
-			}
+		// Own rows keep their avatar HASH - the same payload form the
+		// create paths use (the client builds /avatars/{uid}/{hash}.png
+		// from id+hash itself; a ready-made URL here would be treated
+		// as a hash and break the image).
+		if u, err := m.store.GetUserByID(row.AuthorID); err == nil && u.Avatar != "" {
+			au["avatar"] = u.Avatar
 		}
 		return
 	}

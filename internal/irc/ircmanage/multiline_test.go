@@ -459,10 +459,10 @@ func TestGircMsgidParse(t *testing.T) {
 	}
 }
 
-// TestMultilineMsgidAnchor: replies and reactions to a joined multiline
-// message must anchor to the LAST frame's msgid (draft/multiline spec),
-// and every frame msgid resolves back to the joined row - peers anchor
-// wherever their client picked.
+// TestMultilineMsgidAnchor: the joined multiline message anchors at the
+// FIRST msgid on the wire (the opening BATCH line's per the spec, else
+// the first frame's), and every msgid resolves back to the joined row -
+// peers anchor wherever their client picked.
 func TestMultilineMsgidAnchor(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -470,7 +470,9 @@ func TestMultilineMsgidAnchor(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	fx := newMultilineFixture(t, ln, true, func(w func(string), nick, ch string) {
-		w("BATCH +p2 draft/multiline " + ch + "\r\n")
+		// Spec form: the msgid rides the opening BATCH command; frames
+		// carry their own too (some servers do both).
+		w("@msgid=fz BATCH +p2 draft/multiline " + ch + "\r\n")
 		w("@msgid=fa;batch=p2 :bob!b@h PRIVMSG " + ch + " :one\r\n")
 		w("@msgid=fb;batch=p2 :bob!b@h PRIVMSG " + ch + " :two\r\n")
 		w("@msgid=fc;batch=p2 :bob!b@h PRIVMSG " + ch + " :three\r\n")
@@ -488,7 +490,7 @@ func TestMultilineMsgidAnchor(t *testing.T) {
 				row = &r
 			}
 		}
-		if row != nil && row.MsgID == "fc" {
+		if row != nil && row.MsgID == "fz" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -496,27 +498,54 @@ func TestMultilineMsgidAnchor(t *testing.T) {
 	if row == nil {
 		t.Fatal("joined multiline message missing")
 	}
-	if row.MsgID != "fc" {
-		for _, m := range fx.store.ChannelMessages(ch.ID, "", "", 50) {
-			t.Logf("row: author=%q content=%q msgid=%q", m.AuthorName, m.Content, m.MsgID)
-		}
-		for _, l := range fx.sink.lines {
-			if strings.Contains(l, "DEBUGFLUSH") {
-				t.Logf("sink: %s", l)
-			}
-		}
-		t.Fatalf("row.MsgID = %q, want fc (last frame)", row.MsgID)
+	if row.MsgID != "fz" {
+		t.Fatalf("row.MsgID = %q, want fz (opening BATCH line msgid)", row.MsgID)
 	}
-	// Every frame msgid resolves to the joined row.
-	for _, id := range []string{"fa", "fb", "fc"} {
+	// Every msgid resolves to the joined row.
+	for _, id := range []string{"fz", "fa", "fb", "fc"} {
 		if chID, snow, ok := fx.store.LookupMessageByMsgID("net1", id); !ok || chID != ch.ID || snow != row.ID {
 			t.Fatalf("msgid %q -> %q/%q, want %q/%q", id, chID, snow, ch.ID, row.ID)
 		}
 	}
-	// The Discord-side reply target is the last frame's msgid.
-	if got := fx.manager.ReplyTargetMsgid("u1", "net1", ch.ID, row.ID); got != "fc" {
-		t.Fatalf("ReplyTargetMsgid = %q, want fc", got)
+	// The Discord-side reply target is the batch's first msgid.
+	if got := fx.manager.ReplyTargetMsgid("u1", "net1", ch.ID, row.ID); got != "fz" {
+		t.Fatalf("ReplyTargetMsgid = %q, want fz", got)
 	}
+}
+
+// TestMultilineReplyTagsOnBatchOpen pins the wire form of an outgoing
+// multiline reply: client-only tags (+reply) ride the OPENING BATCH
+// command - the spec forbids them on the batch's messages.
+func TestMultilineReplyTagsOnBatchOpen(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	fx := newMultilineFixture(t, ln, true, nil)
+	ch := fx.testChannel(t)
+	waitTap(t, fx.tap, "JOIN #test", 1)
+	if err := fx.manager.SendChannel("u1", "net1", "#test", "l1\nl2", "sfr1", ch.ID, "targetmsgid"); err != nil {
+		t.Fatal(err)
+	}
+	// Reply tags on the BATCH open line, none on the frames.
+	waitTap(t, fx.tap, "+reply=targetmsgid BATCH +vb", 1)
+	if tapHasFrameReply(fx.tap) {
+		t.Fatal("+reply tag must not ride batch frames")
+	}
+}
+
+// tapHasFrameReply reports whether any PRIVMSG inside a batch carried a
+// +reply tag.
+func tapHasFrameReply(tap *wireTap) bool {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	for _, l := range tap.lines {
+		if strings.HasPrefix(l, "@") && strings.Contains(l, "PRIVMSG #test") && strings.Contains(l, "+reply=") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestMultilineEchoBindsAllFrames: our own multiline send echoed back

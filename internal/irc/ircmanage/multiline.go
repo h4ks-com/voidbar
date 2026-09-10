@@ -61,11 +61,16 @@ var lineBatchSeq atomic.Int64
 
 // lineBatch accumulates the frames of one in-flight draft/multiline
 // batch: live traffic to join into a single message, or history frames
-// nested inside a chathistory batch (chatRef set).
+// nested inside a chathistory batch (chatRef set). The opening BATCH
+// line can carry the batch's tags (per the spec "any tags that would
+// have been added to the batch, e.g. message IDs ... MUST be included
+// on the first message line"; servers commonly put them on the BATCH
+// command itself).
 type lineBatch struct {
-	target  string
-	chatRef string       // enclosing chathistory batch, when nested
-	frames  []lineFrame
+	target   string
+	chatRef  string // enclosing chathistory batch, when nested
+	openMsgid string // msgid tag of the opening BATCH line, when present
+	frames   []lineFrame
 }
 
 // isMultilineType reports whether a BATCH type is draft/multiline under
@@ -219,17 +224,21 @@ func planMultiline(lines []string, maxLines, maxBytes int) [][]outFrame {
 	return out
 }
 
+// sendMultilineBatch emits one draft/multiline batch. Reply tags ride
+// the OPENING BATCH command: the spec forbids client-only tags on the
+// batch's messages ("all client-only tags associated with the message
+// must be sent attached to the initial BATCH command").
 func (m *Manager) sendMultilineBatch(client *girc.Client, target string, frames []outFrame, replyMsgid string) {
 	ref := "vb" + strconv.FormatInt(lineBatchSeq.Add(1), 36)
-	client.Send(&girc.Event{Command: "BATCH", Params: []string{"+" + ref, "draft/multiline", target}})
-	for i, f := range frames {
+	open := &girc.Event{Command: "BATCH", Params: []string{"+" + ref, "draft/multiline", target}}
+	if replyMsgid != "" {
+		open.Tags = girc.Tags{"+reply": replyMsgid, "+draft/reply": replyMsgid}
+	}
+	client.Send(open)
+	for _, f := range frames {
 		tags := girc.Tags{"batch": ref}
 		if f.concat {
 			tags["draft/multiline-concat"] = ""
-		}
-		if i == 0 && replyMsgid != "" {
-			tags["+reply"] = replyMsgid
-			tags["+draft/reply"] = replyMsgid
 		}
 		client.Send(&girc.Event{
 			Tags:    tags,
@@ -256,6 +265,9 @@ func (m *Manager) multilineBatchControl(c *conn, e girc.Event) bool {
 			return false
 		}
 		acc := &lineBatch{target: e.Params[len(e.Params)-1]}
+		if msgid, ok := e.Tags.Get("msgid"); ok {
+			acc.openMsgid = msgid
+		}
 		if chatRef, ok := c.peekChatStack(); ok {
 			acc.chatRef = chatRef
 		}
@@ -303,10 +315,9 @@ func (m *Manager) lineBatchFrame(c *conn, e girc.Event, ref string) {
 // flushLineBatch resolves one closed batch: history-nested frames join
 // into their chathistory batch, own echoes bind the msgid, and
 // foreign live traffic relays as a single message. The batch's
-// canonical msgid is the LAST frame's - the draft/multiline spec
-// targets replies and reactions at the final frame - and every frame
-// msgid binds to the joined message so peers anchoring elsewhere
-// still resolve.
+// canonical msgid is the first one on the wire (see batchAnchorMsgid)
+// and every other msgid binds to the joined message so peers
+// anchoring elsewhere still resolve.
 func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 	if len(acc.frames) == 0 {
 		return
@@ -371,23 +382,31 @@ func (m *Manager) flushLineBatch(c *conn, acc *lineBatch) {
 	}
 }
 
-// batchAnchorMsgid returns the batch's canonical msgid: the last
-// non-empty frame msgid (spec: replies/reactions target the final
-// frame).
+// batchAnchorMsgid returns the batch's canonical msgid. The spec puts
+// message ids on the FIRST line of the message - the opening BATCH
+// command for multiline-aware delivery, or the first frame in
+// fallbacks - so the anchor scans in that order.
 func batchAnchorMsgid(acc *lineBatch) string {
-	for i := len(acc.frames) - 1; i >= 0; i-- {
-		if acc.frames[i].msgid != "" {
-			return acc.frames[i].msgid
+	if acc.openMsgid != "" {
+		return acc.openMsgid
+	}
+	for _, f := range acc.frames {
+		if f.msgid != "" {
+			return f.msgid
 		}
 	}
 	return ""
 }
 
-// batchExtraMsgids lists the batch's distinct non-empty frame msgids
-// minus the anchor, in frame order.
+// batchExtraMsgids lists the batch's distinct non-empty msgids (opening
+// BATCH line included) minus the anchor, in discovery order.
 func batchExtraMsgids(acc *lineBatch) []string {
 	seen := map[string]bool{}
 	var out []string
+	if acc.openMsgid != "" {
+		seen[acc.openMsgid] = true
+		out = append(out, acc.openMsgid)
+	}
 	for _, f := range acc.frames {
 		if f.msgid == "" || seen[f.msgid] {
 			continue
@@ -395,7 +414,7 @@ func batchExtraMsgids(acc *lineBatch) []string {
 		seen[f.msgid] = true
 		out = append(out, f.msgid)
 	}
-	// Drop the anchor (last distinct).
+	// Drop the anchor.
 	if len(out) > 0 {
 		anchor := batchAnchorMsgid(acc)
 		for i := len(out) - 1; i >= 0; i-- {
