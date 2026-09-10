@@ -1,162 +1,73 @@
 # Voidbar
 
-Discord-compatible IRCv3 bouncer (like [Spacebar](https://www.spacebar.chat/), but for IRC).
+Discord-compatible IRCv3 bouncer — like [Spacebar](https://www.spacebar.chat/), but for IRC.
 
-Voidbar speaks the Discord protocol (REST + Gateway) on one side and connects to
-IRC networks on the other, so a real Discord client can be used to chat on IRC.
+Voidbar speaks the Discord protocol (REST + Gateway) on one side and connects
+to IRC networks on the other, so a real Discord client can be used to chat on
+IRC.
 
-**Backend only.** Voidbar serves no web client and ships no Discord assets —
-bring your own client: repackage the Discord Android build with
-[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher) and
-point it at your instance. This keeps the project on the same safe side of
-the C&D line Spacebar lives on: the server is a clean-room implementation,
-the client is the user's own repackaged build.
+**Backend only.** Voidbar serves no web client of its own and ships no Discord
+assets — bring your own client: repackage the Discord Android build with
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher) and point
+it at your instance (third-party web clients such as Flicker work too, via
+`/.well-known/spacebar` discovery). This keeps the project on the same safe
+side of the C&D line Spacebar lives on: the server is a clean-room
+implementation, the client is the user's own repackaged build.
 
 ## Concept
 
-- **A guild is an IRC connection string.** There are no preconfigured guilds:
-  pasting a connection string as an invite creates (or joins) a network, and each
-  member gets their own upstream IRC connection with their own nick.
-- **Multi-user.** Each user registers, joins networks by connection string, and
-  holds independent connections to the same IRC server.
+- **A guild is an IRC connection string.** No preconfigured guilds: pasting a
+  connection string as an invite creates (or joins) a network; each member
+  gets their own upstream connection with their own nick.
+- **Multi-user.** Users register independently and hold separate connections
+  to the same IRC servers.
 - **Bouncer semantics.** Upstream connections persist independently of client
-  sessions; message history is buffered and replayed on reconnect.
-- **Networks are "owned" by [Clyde](https://discord.com/wiki/clyde)** — the
-  service-bot owner suppresses owner-only UI (notably "Delete server"), so the
-  guild menu always offers "Leave server", which is what a bouncer user does.
+  sessions; history is buffered and replayed on reconnect.
+- **Networks are "owned" by [Clyde](https://discord.com/wiki/clyde)** —
+  owner-only UI is suppressed ("Delete server" becomes "Leave server"), which
+  is what a bouncer user does.
 
 ## Status
 
-Beta. The vertical slice is **working end-to-end against a live IRC
-network** with two client generations at once: the Discord **Android**
-client, 126.21, repackaged with
-[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher),
-and **web clients** (e.g. Flicker), which discover the instance via
-`/.well-known/spacebar`: login → READY → channel history renders →
-send/receive relay in both directions, no crashes.
+Beta. Works **end-to-end against a live IRC network** with the Discord
+**Android** client (126.21, repackaged) and **web clients** (Flicker):
+login → READY → history renders → send/receive relay both ways, no crashes.
 
-**Try it:** register an account, paste an `irc://` connection string as
-an invite, and point your client at the instance —
-[issues](https://github.com/h4ks-com/voidbar/issues) and crash reports
-welcome.
+**Try it:** register, paste an `irc://…` connection string as an invite, point
+your client at the instance — [issues](https://github.com/h4ks-com/voidbar/issues)
+and crash reports welcome.
 
-Covered:
+## Features
 
-- REST v9 + Gateway (HELLO/IDENTIFY/READY/HEARTBEAT/RESUME, zlib-stream,
-  session replay) enough for the client to boot and render
-- Register/login (argon2id, raw bearer tokens), `user add/list` CLI (admin
-  is CLI-only; no web panel). While the server runs, badger's storage lock
-  blocks the CLI's direct path - pass `--server <base-url>` to provision
-  through the master-key admin API (`POST/GET /api/v9/admin/users`,
-  `X-Master-Key: <hex of master.key>`)
-- Connection strings as invites: paste `irc://host:port/#chan?name=X` into
-  the client's "Join a server" field → preview card, join, GUILD_CREATE,
-  the guild appears in the rail, the client navigates into the pasted channel
-- Channel registry: snowflake channel ids (IRC names never hit URLs)
-- **Leave/delete server**: membership removal + upstream disconnect, and the
-  network (channels, replay buffers) is garbage-collected when the last
-  member leaves
-- **Channel management**: create channels from the client (IRC servers
-  don't offer a create API; creates are optimistic JOINs - an upstream
-  refusal: invite-only, banned, account-required, +k, full - rolls the
-  channel back and Clyde DMs the reason) and delete them (PART; history
-  is kept, so re-adding the channel recovers it). Keyed (+k) channels
-  take their key inline in the connection string (`#chan:key`, keys are
-  network-wide metadata, re-pasting rotates them) and join with it.
-  Topics round-trip both
-  ways: client edits relay as `TOPIC`, and every network broadcast
-  (join's RPL_TOPIC, peers, our echo) persists and dispatches
-  `CHANNEL_UPDATE`; a rejection upstream (+t, not op) never corrupts the
-  stored truth. Renames relay as `draft/channel-rename RENAME`; the
-  broadcast rewrites the registry under the same snowflake id and every
-  membership's auto-join, and a rejected rename (not op, name taken)
-  leaves the old truth standing.
-- **Discord → IRC**: typing in the client reaches the IRC channel (own nick,
-  collision-suffixed, is shown as the author)
-- **IRC → Discord**: channel PRIVMSGs are relayed live as MESSAGE_CREATE and
-  render in the client; nick collisions don't eat foreign messages
-- **Multiline**: the composer's shift+enter travels as `draft/multiline`
-  batch(es) upstream (blank inner lines intact, trailing blanks trimmed)
-  and comes back joined - one message, one msgid, one reaction anchor.
-  The advertised `max-bytes`/`max-lines` budget (read off the CAP LS
-  value) splits bigger pastes into several batches, and lines too long
-  for one frame are word-split into `draft/multiline-concat` chunks
-  that re-join without a newline (both directions). Upstreams without
-  the cap degrade to one PRIVMSG per non-empty line (blank lines
-  cannot survive the wire there). Incoming batches - live or nested
-  inside a chathistory page - join into a single message with embedded
-  newlines; `message-tags` is requested so the batch frames carry
-  their `@batch` reference client-to-server. Wire writes go through a
-  per-connection ordered queue: girc's rate limiter (~1s/event) paces
-  batches without ever blocking the REST send path.
-- **Replay buffer**: the last 500 messages per channel are persisted
-  (Badger) and served over `GET /channels/:id/messages` with Discord
-  pagination (`limit`/`before`/`after`); own sends are buffered too, and
-  history survives server restarts
-- **Chathistory prefill and backfill**: on upstreams that offer
-  `draft/chathistory` (eris, ergo, soju), joining a channel asks the
-  network for its most recent 50 messages and merges them into the replay
-  buffer - server-time timestamps, time-anchored snowflakes (id order
-  stays chronological), msgid-anchored so prefilled messages are
-  reactable/deletable, deduped against everything the bouncer ever
-  buffered, and one-shot per channel (a persisted watermark keeps
-  reconnects from re-asking). Scrolling past the buffer floor keeps
-  going: a short `?before=` page transparently asks the network for
-  older history (msgid-anchored `BEFORE`, inserted silently - no gateway
-  dispatch) and re-reads, until the network's own history runs dry.
-  Networks without the cap keep bouncer-only history.
+- **Platform** — REST v9 + Gateway v10 (zlib-stream, resume), register/login
+  (argon2id) + admin CLI, `irc://` connection strings as invites, snowflake
+  channel registry, server/channel lifecycle (optimistic creates with rollback,
+  inline +k keys, topics, `draft/channel-rename` renames), upstream
+  auto-reconnect with backoff.
+- **Messaging** — bidirectional relay, `draft/multiline` batches both ways,
+  500-message replay buffer per channel, `draft/chathistory` prefill/backfill,
+  DMs, search over everything the bouncer has seen.
+- **People** — member sidebar with IRC prefixes (`~&@%+` → hoisted roles),
+  presence ↔ AWAY, peer facts (account, user@host), nick changes, avatars via
+  `draft/metadata-2` (both ways, eris).
+- **Interactions** — mentions, reactions (`+draft/react`, msgid-gated),
+  reaction reactors, typing (`@+typing`), pins, user notes, invite relays,
+  standard replies.
+- **Media** — attachments both ways on bouncer-local storage (cloud-upload
+  flow + legacy multipart; incoming image URLs mirrored and attached).
+- **Settings** — settings sync (legacy + settings-proto), channel categories
+  (local), network rename, identity (server password / SASL PLAIN).
 
-## Android client
+Details and implementation notes: [docs/FEATURES.md](docs/FEATURES.md).
 
-[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher)
-repackages the stock Discord Android build (decode → repoint hosts → rebuild
-→ sign). The server carries a few Android-specific compatibility details
-worth knowing about:
+## Running
 
-- **Gateway frame field order matters**: dispatch frames serialize `op`
-  first, then `t`/`s` before `d` — the client's streaming JSON parser
-  (IncomingParser) reads the header before the body. Go emits struct
-  fields in declaration order, so `internal/discord/gateway/types.go`
-  pins the order.
-- **`nsfw_allowed: true`** on the user object doubles as "this account
-  has a date of birth" for the client (MeUser maps it through
-  NsfwAllowance). Without it, every account with a 2021+ snowflake hits
-  the un-dismissable REGISTER_AGE_GATE modal after login.
-- **IRC authors get deterministic snowflake ids**: the client parses
-  message author ids as 64-bit integers; a literal `"irc:<nick>"` crashes
-  its deserializer and takes down message rendering and the gateway
-  dispatch handler.
-- **Sends are right-trimmed**: the Android compose box appends a trailing
-  newline to every message; real Discord trims it server-side, so the
-  bouncer does too.
-- **Snowflakes arrive as JSON numbers**: although the Discord docs specify
-  snowflake IDs as strings, this client serializes them as bare numbers in
-  outgoing gateway payloads (op 8 `guild_id`/`user_ids` arrive as
-  `[1541479714630139904]`). Never unmarshal client-sent snowflakes into a
-  string field — normalize through `rawIDsToStrings`
-  (`internal/discord/gateway/server.go`), which accepts string, number and
-  arrays of either.
-- Post-login probes are stubbed so they don't 404-loop:
-  `POST /auth/fingerprint`, `GET /users/{id}/profile`,
-  `GET /users/@me/survey`, `POST /users/@me/devices`,
-  `GET /guilds/{id}/preview` ("Delete server" in settings is
-  `POST /guilds/{id}/delete` — also routed).
-  (`GET /sticker-packs` still 404s — harmless.)
-
-`VOIDBAR_READY_MINIMAL=1` on `serve` shrinks the READY payload to the
-minimum known-good set — a bisect switch for future client-compat work.
-
-## Running a WIP instance
-
-Three interchangeable ways — pick one. In all cases: build, run `serve`,
-then point your client at the instance URL and register (or
-`voidbar user add`). Press **Добавить сервер → Присоединиться к серверу**
-in the client and paste a connection string, e.g.
+Build and run `serve`, then point your client at the instance and register
+(or `voidbar user add`). Press **Добавить сервер → Присоединиться к серверу**
+and paste a connection string, e.g.
 `irc://irc.libera.chat:6697/#voidbar?name=Libera`.
 
-### Windows (Go)
-
-Prerequisites: Go 1.22+ (e.g. `C:\Program Files\Go\bin\go.exe`).
+### Windows (Go 1.25+)
 
 ```powershell
 & "C:\Program Files\Go\bin\go.exe" build -o voidbar.exe ./cmd/voidbar
@@ -167,11 +78,10 @@ $env:VOIDBAR_AUTH_REGISTRATION= "open"                        # default is "clos
 .\voidbar.exe serve
 ```
 
-### Linux (Go)
+### Linux (Go 1.25+)
 
 ```bash
-go build -o voidbar ./voidbar
-mkdir -p ~/.local/share/voidbar
+go build -o voidbar ./cmd/voidbar
 export VOIDBAR_SERVER_LISTEN="127.0.0.1:18084"
 export VOIDBAR_SERVER_PUBLIC_URL="http://127.0.0.1:18084"
 export VOIDBAR_STORAGE_PATH="$HOME/.local/share/voidbar/data"
@@ -179,268 +89,63 @@ export VOIDBAR_AUTH_REGISTRATION=open
 ./voidbar serve
 ```
 
-Optional systemd unit (`~/.config/systemd/user/voidbar.service`, then
-`systemctl --user enable --now voidbar`):
-
-```ini
-[Unit]
-Description=Voidbar IRC bouncer
-
-[Service]
-Environment=VOIDBAR_SERVER_LISTEN=127.0.0.1:18084
-Environment=VOIDBAR_SERVER_PUBLIC_URL=http://127.0.0.1:18084
-Environment=VOIDBAR_STORAGE_PATH=%h/.local/share/voidbar/data
-Environment=VOIDBAR_AUTH_REGISTRATION=open
-ExecStart=%h/.local/bin/voidbar serve
-
-[Install]
-WantedBy=default.target
-```
-
 ### Docker
 
-`Dockerfile` and `docker-compose.yml` are in the repo root. The compose file
-bind-mounts `./data` (instance storage) and publishes the server on
-`127.0.0.1:18084`.
+`docker-compose.yml` bind-mounts `./data` and publishes the server on
+`127.0.0.1:18084`:
 
 ```bash
-docker compose build
-docker compose up
+docker compose build && docker compose up
 ```
-
-Plain `docker run` equivalent:
-
-```bash
-docker build -t voidbar .
-docker run --rm -p 127.0.0.1:18084:8080 \
-  -v "$PWD/data:/data" \
-  -e VOIDBAR_SERVER_LISTEN=0.0.0.0:8080 \
-  -e VOIDBAR_SERVER_PUBLIC_URL=http://127.0.0.1:18084 \
-  -e VOIDBAR_AUTH_REGISTRATION=open \
-  voidbar
-```
-
-Note: inside a container the server must listen on `0.0.0.0` (the compose
-file already does); clients talk to `127.0.0.1:18084` via the port mapping.
-`VOIDBAR_STORAGE_PATH=/data` is baked into the image.
 
 ### Configuration
 
 Env vars can also live in a TOML file (`--config path`); keys mirror them
-(`server.listen`, `auth.registration`, ...).
+(`server.listen`, `auth.registration`, ...). See `voidbar.example.toml`.
 
-## What works end-to-end (Android client)
+## Discord client compatibility
 
-- Login/register, guild rail from IRC networks, channel create/delete
-  with upstream rollback, message relay both ways, unread badges.
-- **DMs**: both directions, history replay, client-initiated DMs
-  (`POST /users/@me/channels` — recipient resolved from the member
-  sidebar or fellow bouncer users).
-- **Member sidebar**: per-channel lists from live NAMES state, hoisted
-  role sections for IRC prefixes (`~&@%+` → Founder/Admin/Operator/
-  Half-op/Voice, colored names), live JOIN/PART/QUIT/KICK/MODE updates,
-  away shown as "idle" (away-notify cap, WHO seeding, lazy poller
-  fallback for servers without the cap).
-- **Upstream auto-reconnect** with backoff; nick collisions survive
-  (the live wire nick is what the client shows).
-- **Presence**: the status picker maps onto IRC AWAY on every network of
-  the user — online returns, idle/dnd go away (dnd says so), invisible is
-  a no-op (IRC can't hide a connected client). The persisted status
-  re-asserts on every reconnect (IRC forgets AWAY across connections);
-  others' away renders as "idle" (see member sidebar).
-- **Peer facts** (extended-join, account-notify, chghost, WHO 352):
-  per-nick services account and user@host, seeded at JOIN, updated by
-  ACCOUNT/CHGHOST broadcasts, surviving renames — the profile sheet
-  resolves the hashed author id back to them (nick as display name,
-  "NickServ: ..." and "Host: ..." lines in the bio).
-- **Invite relays** (invite-notify): INVITE broadcasts for channels we're
-  in land as channel messages from the inviter; a direct INVITE aimed at
-  us lands as a DM ("invited you to #chan") instead of vanishing. No
-  ghost channel rows for channels we're not in.
-- **Standard replies** (FAIL/WARN/NOTE, standard-replies cap): a reply
-  whose context names a joined channel surfaces there as a message from
-  the "server" pseudo-user; everything else (registration-time,
-  NickServ) is logged.
-- **User notes** ("Add Note" in the profile sheet): `GET/PUT
-  /users/@me/notes/:id` + the bulk map, the READY `notes` field, and
-  `USER_NOTE_UPDATE` fan-out across sessions. Notes target any
-  user-shaped id (members and IRC peers alike); an empty note clears.
-- **Pins** (bouncer-local): the client's pin button PUTs/DELETEs
-  `/channels/:id/pins/:mid` (204, 50-pin ceiling), `GET /pins` lists
-  pinned replay-buffer messages oldest-first, and pin flips fan
-  `MESSAGE_UPDATE` (partial) + `CHANNEL_PINS_UPDATE`. Pins whose
-  message aged out of the buffer stay stored but drop from the list.
-  Pinning drops the "{user} pinned a message" system row (type 6) into
-  the channel, live and replayed.
-- **Network rename**: the guild settings' Overview `PATCH /guilds/:id`
-  renames the network (1-100 chars); GUILD_UPDATE fans the full guild
-  payload so every session re-renders the rail. @everyone carries
-  MANAGE_GUILD so the client unlocks the rename field.
-- **Reaction reactors**: `GET /channels/:id/messages/:id/reactions/:emoji`
-  — who reacted (tap on a pill): members as their real user rows, IRC
-  peers resolved from live facts.
-- **Typing indicators** both ways: client typing -> `@+typing` TAGMSG
-  (with `done` on send), IRC typing -> `TYPING_START`. Works on any
-  `message-tags` server (no capability advertisement needed; honors
-  `CLIENTTAGDENY`; outbound `pause` is not synthesized - the indicator
-  just expires).
-- **Reactions** both ways on msgid upstreams (eris fork, ergo, soju):
-  pills with count/me, `+draft/react`/`+draft/unreact` TAGMSGs with
-  `+reply`/`+draft/reply`, REST PUT/DELETE bridging, restart-proof
-  (msgid registry + reaction state persisted); the picker is hidden on
-  networks without msgids (`MSGREFTYPES`-gated). Verified live against
-  a locally built eris fork (fastidious/eris) with Halloy as the IRC
-  peer.
-- **Nick change** from the client: Edit Server Profile -> Nickname
-  (`PATCH /guilds/:id/members/@me`) relays IRC `NICK`; the server's
-  own-nick echo — which also catches ghost reclaims and collision
-  renames — persists the membership and pushes `GUILD_MEMBER_UPDATE`,
-  so the display name follows the live wire nick. A rejected change
-  (nick in use) leaves the stored nick standing.
-- **Mentions** both ways: outgoing Discord markers relay as bare nicks
-  (IRC convention — no `@`), incoming bare nicks (`doesnm: look`,
-  `@doesnm` too) become `<@id>` pills with a real `mentions` array, and
-  `#channel` references markerize both ways (`<#id>` <-> `#name`).
-  Own sends carry the mentions arrays too, so pills highlight. Peers are
-  upserted into the clients' user stores via `GUILD_MEMBER_UPDATE` on
-  foreign JOIN, on roster sweeps after every upstream (re)connect, and
-  ahead of incoming mention messages — without that the pills render
-  `@invalid-user` (clients ingest users from neither the mentions array
-  nor the member-list rows). Candidate nicks are the channel's live
-  roster plus every bouncer member of the network; unknown ids/nicks
-  pass through verbatim. Renamed channels keep their roster via a
-  rename alias (girc predates `draft/channel-rename`), and member lists
-  carry bouncer members under their real user ids — one row per person
-  everywhere (autocomplete included).
-- **Search**: the client search box works over the replay buffer — IRC
-  has no server-side search, so results cover everything the bouncer
-  has seen (live traffic plus chathistory pulled during scrolls). Both
-  routes live: `GET /channels/:id/messages/search` and the one the
-  official client calls, `GET /guilds/:id/messages/search` (scoped via
-  repeated `?channel_id=`). Terms arrive as `?content=` (tokenized
-  `?contents=slop|text` too), `?text=`, or `?query=`; ANDed
-  case-insensitively over content and author names. Documented response
-  shape: per-hit context groups with `hit: true`, newest first, 25/page
-  via `?offset=`, `total_results` across pages. Filter syntax beyond
-  free text (`author_id`, `has:`, `from:`...) is not interpreted yet.
-- **Attachments** both ways, on the bouncer's own storage:
-  - Sending: the documented cloud-upload flow (`POST
-    /channels/:id/attachments` mints TTLed slots, `PUT
-    /api/v9/uploads/<token>` takes the bytes — the token is the
-    credential, like the presigned GCS URL it replaces; image
-    dimensions are sniffed) plus the legacy multipart `files[0]`-style
-    inline uploads. The Discord copy carries full attachment rows
-    (persisted in the replay buffer, so history renders them); the IRC
-    wire copy appends the public `/attachments/:id/:filename` URLs —
-    IRC peers fetch them token-free, exactly like a pasted link.
-  - Receiving: direct image URLs in IRC messages are mirrored into
-    local storage and attached as attachment rows (live and in
-    chathistory backfill). Embed-image rendering is broken in the
-    official client on third-party instances (the same build shows a
-    blank box against Oldcord Staging), while attachments render fine —
-    so unfurls ride the upload pipeline. The fetcher tolerates hosts
-    that dribble the body (partial read after a 4s budget, headers live
-    up front). `/attachments/refresh-urls` echoes URLs back — ours
-    never expire.
-
-- **Settings sync**: client settings survive reloads. The legacy store
-  (`PATCH /users/@me/settings`) merges PATCH bodies into persisted
-  settings and answers with the full object (the client deserializes
-  `ModelUserSettings`; a bare 204 crashed it). The proto store
-  (`PATCH /users/@me/settings-proto/{type}`) persists the serialized
-  blob per user and kind, merging by top-level field number straight
-  from the protobuf wire format - no schema linked. Theme, locale and
-  appearance settings stick across restarts.
-- **Identity**: server password (`user:pass@` in the connection string)
-  and SASL PLAIN (`?sasl=user:pass` — replaces the server password,
-  credentials are network-wide metadata, re-pasting rotates them);
-  nick change is covered (see above).
-- **Channel categories**: local grouping only (IRC has none) — type 4
-  channels recorded on the network; create/rename/delete from the
-  client, move channels in and out, sidebar groups by parent. Nothing
-  upstream ever hears about them.
-- **Avatars** (IRC counterpart: `draft/metadata-2`, the avatar key —
-  eris serves it): global avatar upload through `PATCH /users/@me`,
-  per-guild override through `PATCH /guilds/:id/members/@me`. Stored
-  images are served from `/avatars/{uid}/{hash}.png` off the discovered
-  CDN base (the same origin the client already uses for attachments).
-  Global-vs-guild follows Discord semantics — per-guild wins in its
-  guild — with one IRC twist: setting the global avatar fans
-  `METADATA * SET avatar` out to every upstream speaking
-  draft/metadata-2 where the bouncer holds a services account (eris:
-  `REGISTER * * <pass>` then SASL, verified live). Inbound, the bouncer
-  subscribes (`METADATA * SUB avatar`) on connect, mirrors peers' avatar
-  URLs into the local store (hash of the bytes, so a changed picture is
-  a new hash), and refreshes member rows via GUILD_MEMBER_UPDATE.
+[discord-apk-patcher](https://github.com/CyberL1/discord-apk-patcher)
+repackages the stock Android build. The server carries several Android-specific
+workarounds (gateway frame ordering, age-gate suppression, snowflake
+normalization, stubbed probes) — see
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) before touching
+`internal/discord/`.
 
 ## Roadmap
 
-### Client features
+- Network icon (read from `draft/ICON` ISUPPORT; upload is voidbar-local —
+  the spec is read-only server-side).
+- IRCv3 to adopt: `monitor` (nick tracking beyond joined channels), `setname`.
+- Cleanup: prune permission bits the platform can't honor from the role
+  editor.
 
-- **Network icon** (IRC counterpart: the `draft/ICON` ISUPPORT token):
-  guild icon upload → CDN, shown in the guild list; read from ISUPPORT
-  where the upstream advertises one (eris does not). Note the spec is
-  read-only server-side — there is no client command to set an icon
-  upstream, so the upload half would be voidbar-local by definition.
+Out of scope: voice/video, threads/forums, custom emoji, guild discovery.
 
-### IRCv3 extensions to adopt
+## Known issues
 
-Cross-checked against the IRCv3 catalog, girc's negotiated set, and
-what the works section above already covers (away-notify presence,
-echo-message, peer facts, invite relays, standard replies are done):
+- Peer avatars are nick-scoped (eris doesn't re-push values on JOIN).
+- Remote-auth QR is stubbed — periodic WS errors in client logs on http
+  instances; non-fatal.
+- Profile shows per-channel IRC modes as guild-wide roles (wontfix).
+- Flicker re-inserts deleted messages from its scroll cache (client-side,
+  wontfix).
 
-- **monitor** — cap not requested; adopt for nick online/offline
-  tracking (member list beyond joined channels).
-- **setname** — cap not requested (not in girc's known set); adopt for
-  realname changes if the client has a slot.
+Details: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
-### Cleanup
+## Related projects
 
-- **Permission list prune**: drop permission bits the platform can't
-  honor (emoji/sticker management etc.) from the client's role editor —
-  the permission names live in the userdoccers permissions reference.
+- **[matrix2078](https://github.com/h4ks-com/matrix2078)** — the sibling
+  project: an IRC server backed by Matrix (Rust, matrix-sdk, native E2EE).
+  Stack it under voidbar to reach Matrix from a Discord client:
+  `Discord client → voidbar → matrix2078 → homeserver`.
 
-Out of scope: voice/video, threads/forums (local threads rejected —
-channels + categories cover us), custom emoji (nothing to sync them
-with), guild discovery.
+## Stack
 
-## Known issues / troubleshooting
-
-- **Peer avatars are nick-scoped.** IRC metadata attaches to the services
-  account, but every Discord-side identity in voidbar is the nick (the
-  author-id seed). A user switching nicks starts with a blank avatar
-  until they set (or change) one from the new nick — eris does not
-  re-push current values on JOIN (the spec makes it a SHOULD).
-- **Remote-auth QR** (`/remote-auth`) is stubbed; the client hardcodes
-  `wss:` so on an http instance you'll see periodic WS errors in the
-  client logs. Non-fatal, login by email/password works.
-- The client is RU-localized in our test profile; UI labels in this README
-  are the Russian ones ("Добавить сервер" etc.).
-- **Profile shows IRC channel modes as guild-wide roles (wontfix).** IRC
-  membership prefixes are per-channel; Discord roles are guild-global.
-  The channel member list always shows the per-channel truth, but a
-  member profile shows their highest mode across channels. Splitting
-  the user id per channel (one Discord user per channel) would break DMs,
-  mentions and message authorship continuity, so we keep one identity
-  per nick and accept the imprecise profile.
-- **Flicker: a deleted message can reappear after scrolling (client-side,
-  wontfix here).** Flicker keeps a local scroll cache that is appended on
-  every render and never evicted on `MESSAGE_DELETE`: delete the newest
-  message and scroll near the bottom, and the cached copy is re-inserted
-  (white copy; messages sent from Flicker itself can additionally leave a
-  gray `temp-<nonce>` ghost). The server side was verified innocent on the
-  wire and with a Playwright e2e, and the same ghosts reproduce against
-  Oldcord Staging - an independent server - so no server payload can fix
-  it; the client must evict its cache on delete. Self-heals on channel
-  switch, reload, or the next message arriving.
-
-## Planned stack
-
-- Go 1.22+
-- Embedded [BadgerDB](https://github.com/dgraph-io/badger)
-- IRCv3: SASL, server-time, message-tags, away-notify, account-notify, batches,
-  multiline, nick v3, `+typing`, `+react`/`+unreact`, `draft/message-redaction`,
-  `draft/ICON` (network icon)
+- Go 1.25+, embedded [BadgerDB](https://github.com/dgraph-io/badger)
+- IRCv3: SASL, server-time, message-tags, away-notify, account-notify,
+  batches, multiline, `+typing`, `+react`/`+unreact`,
+  `draft/message-redaction`, `draft/ICON`
 - Discord Gateway v10 + REST v9 (scoped to frozen/patched client builds)
 
 ## License
