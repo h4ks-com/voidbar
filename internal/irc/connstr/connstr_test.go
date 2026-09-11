@@ -144,3 +144,42 @@ func TestParseSASLAmpersand(t *testing.T) {
 		t.Fatalf("plus: %q err=%v", c.SASLPass, err)
 	}
 }
+
+// TestParseSASLHash: '#' in a value while a query is open folds into
+// the value - url.Parse would cut the password at the first '#' and
+// read the tail as a channel. The canonical channel forms (list before
+// the query, or a fragment carrying its own '?') keep winning.
+func TestParseSASLHash(t *testing.T) {
+	cases := []struct {
+		raw   string
+		pass  string
+		chans []string
+	}{
+		{"ircs://h?sasl=u:pa#ss", "pa#ss", nil},
+		{"ircs://h?name=N&sasl=u:pa#ss&more", "pa#ss&more", nil},
+		{"ircs://h?sasl=u:p#chan?nick=x", "p", []string{"#chan"}}, // fragment query wins
+		{"ircs://h/#chan?sasl=u:pa#ss", "pa#ss", []string{"#chan"}}, // '#' inside fragment-query
+	}
+	for _, tc := range cases {
+		c, err := Parse(tc.raw)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.raw, err)
+		}
+		if c.SASLPass != tc.pass {
+			t.Fatalf("Parse(%q) pass = %q, want %q", tc.raw, c.SASLPass, tc.pass)
+		}
+		if len(c.Channels) != len(tc.chans) {
+			t.Fatalf("Parse(%q) channels = %v, want %v", tc.raw, c.Channels, tc.chans)
+		}
+		for i, ch := range tc.chans {
+			if c.Channels[i] != ch {
+				t.Fatalf("Parse(%q) channels = %v, want %v", tc.raw, c.Channels, tc.chans)
+			}
+		}
+	}
+	// The folded form leaves no phantom channel.
+	c, err := Parse("ircs://h?sasl=u:pa#ss")
+	if err != nil || len(c.Channels) != 0 {
+		t.Fatalf("phantom channels: %v err=%v", c.Channels, err)
+	}
+}

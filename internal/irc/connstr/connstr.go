@@ -59,6 +59,22 @@ func Parse(raw string) (*Conn, error) {
 		raw = "irc://" + raw
 	}
 
+	// A '#' while a query is already open belongs to the last value:
+	// url.Parse would treat it as the fragment separator, cutting a
+	// pasted password ("?sasl=u:pa#ss") at the first '#'. The canonical
+	// channel form puts the list before the query ("host/#chan?a=b") or
+	// carries its own query ("host?a=b#chan?c=d"); a bare tail after an
+	// open query is a value, so the '#'s fold back (escaped, and the
+	// tolerant parser unescapes them).
+	if q := strings.IndexByte(raw, '?'); q >= 0 {
+		if h := strings.IndexByte(raw[q+1:], '#'); h >= 0 {
+			h += q + 1
+			if !strings.Contains(raw[h+1:], "?") {
+				raw = raw[:h] + strings.ReplaceAll(raw[h:], "#", "%23")
+			}
+		}
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, ErrInvalid
