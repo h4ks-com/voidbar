@@ -110,3 +110,37 @@ func TestParseSASL(t *testing.T) {
 		t.Fatal("sasl without colon accepted")
 	}
 }
+
+// SASL values with ampersands: percent-encoded (%26), raw ('&') and
+// both mixed must all yield the same password - url.ParseQuery would
+// cut the raw forms at the separator.
+func TestParseSASLAmpersand(t *testing.T) {
+	cases := []struct {
+		raw  string
+		pass string
+	}{
+		{"ircs://h/#a?sasl=acct:p%26ss", "p&ss"},
+		{"ircs://h/#a?sasl=acct:p&ss", "p&ss"},
+		{"ircs://h/#a?sasl=acct:p%26ss&more", "p&ss&more"},
+		{"ircs://h/#a?sasl=acct:p&ss&more", "p&ss&more"},
+	}
+	for _, c := range cases {
+		parsed, err := Parse(c.raw)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.raw, err)
+		}
+		if parsed.SASLUser != "acct" || parsed.SASLPass != c.pass {
+			t.Fatalf("Parse(%q) = %q / %q, want pass %q", c.raw, parsed.SASLUser, parsed.SASLPass, c.pass)
+		}
+	}
+	// A raw '&' tail still lets later known params parse.
+	c, err := Parse("ircs://h/#a?sasl=acct:p&ss&name=X")
+	if err != nil || c.SASLPass != "p&ss" || c.Name != "X" {
+		t.Fatalf("mixed params: %+v err=%v", c, err)
+	}
+	// '+' in passwords stays literal (QueryUnescape would space it).
+	c, err = Parse("ircs://h/#a?sasl=acct:p+ss")
+	if err != nil || c.SASLPass != "p+ss" {
+		t.Fatalf("plus: %q err=%v", c.SASLPass, err)
+	}
+}

@@ -1536,6 +1536,26 @@ func (s *Server) handleAckMessage(w http.ResponseWriter, r *http.Request, u *sto
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleAckGuild implements POST /guilds/{guild}/ack - "mark server as
+// read": each channel acks at its newest message and one MESSAGE_ACK
+// fans out per channel. Channels without a marker (nothing buffered)
+// are skipped - an empty message_id would crash strict clients.
+func (s *Server) handleAckGuild(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	if s.gw != nil {
+		for _, rs := range s.net.AckGuild(u.ID, r.PathValue("guild")) {
+			if rs.LastMessageID == "" {
+				continue
+			}
+			s.gw.Dispatch(u.ID, "MESSAGE_ACK", map[string]any{
+				"channel_id":    rs.ChannelID,
+				"message_id":    rs.LastMessageID,
+				"mention_count": rs.MentionCount,
+			})
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleSendMessage relays a Discord message to IRC. The channel id is a
 // snowflake resolved through the channel registry.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {

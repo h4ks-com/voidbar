@@ -2362,3 +2362,58 @@ func TestReadStateAck(t *testing.T) {
 		t.Fatalf("marker regressed: %v", e)
 	}
 }
+
+// TestAckGuild: "mark server as read" acks every channel of the guild
+// at its newest buffered message and clears the mention badges.
+func TestAckGuild(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+
+	net, err := netSvc.Join(user.ID, "ircs://irc.libera.chat:6697/#a,#b?name=Libera")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chans, err := netSvc.ChannelsFor(net.ID, []string{"#a", "#b"})
+	if err != nil || len(chans) != 2 {
+		t.Fatalf("channels: %v %v", err, chans)
+	}
+	// New messages in both channels, plus a pending mention in #a.
+	lastA, lastB := netSvc.NewMessageID(), netSvc.NewMessageID()
+	if len(lastB) != len(lastA) || lastB <= lastA {
+		t.Fatal("snowflake ordering assumption broken")
+	}
+	for _, m := range []struct{ ch, id string }{{chans[0].ID, lastA}, {chans[1].ID, lastB}} {
+		store.AppendMessage(storage.BufferedMessage{ChannelID: m.ch, ID: m.id, AuthorName: "bob", Content: "hi"})
+	}
+	netSvc.OnMentionRelayed(user.ID, chans[0].ID)
+
+	rec, _ := do(t, h, "POST", "/api/v9/guilds/"+net.ID+"/ack", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("ack guild: %d", rec.Code)
+	}
+	for i, want := range []string{lastA, lastB} {
+		e := netSvc.ReadStateEntries(user.ID)[i].(map[string]any)
+		if e["last_message_id"] != want || e["mention_count"] != 0 {
+			t.Fatalf("channel %d after guild ack: %v", i, e)
+		}
+	}
+	// An empty guild acks 204 without dispatching anything malformed.
+	rec, _ = do(t, h, "POST", "/api/v9/guilds/999/ack", token, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("unknown guild ack: %d", rec.Code)
+	}
+}

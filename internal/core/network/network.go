@@ -2129,6 +2129,30 @@ func (s *Service) MarkChannelRead(userID, channelID, messageID string) (storage.
 	return rs, err
 }
 
+// AckGuild is the client's "mark server as read" action: every channel
+// of the guild acks at its newest buffered message (forward-only) and
+// the mention badges clear. Returns the effective states for the
+// MESSAGE_ACK fanout.
+func (s *Service) AckGuild(userID, guildID string) []storage.ReadState {
+	chans, err := s.store.ListChannelsByNetwork(guildID)
+	if err != nil {
+		return nil
+	}
+	out := make([]storage.ReadState, 0, len(chans))
+	for _, ch := range chans {
+		rs, _ := s.store.GetReadState(userID, ch.ID)
+		rs.ChannelID = ch.ID
+		if msgs := s.store.ChannelMessages(ch.ID, "", "", 1); len(msgs) > 0 && !snowflakeGreater(rs.LastMessageID, msgs[0].ID) {
+			rs.LastMessageID = msgs[0].ID
+		}
+		rs.MentionCount = 0
+		if err := s.store.PutReadState(userID, rs); err == nil {
+			out = append(out, rs)
+		}
+	}
+	return out
+}
+
 // OnMentionRelayed bumps the pending-mention badge for a channel - the
 // red dot that must survive client restarts via READY read_state.
 func (s *Service) OnMentionRelayed(userID, channelID string) {

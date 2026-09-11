@@ -133,37 +133,37 @@ func Parse(raw string) (*Conn, error) {
 		}
 	}
 
-	// Query params, plus those split from the fragment tail.
-	q := u.Query()
+	// Query params, plus those split from the fragment tail. The query
+	// is parsed tolerantly: a raw '&' inside a value (SASL passwords
+	// are full of them) must not cut the value short.
+	q := parseQueryTolerant(u.RawQuery)
 	if fragParams != "" {
-		if fq, err := url.ParseQuery(fragParams); err == nil {
-			for k, vals := range fq {
-				if _, exists := q[k]; !exists && len(vals) > 0 {
-					q[k] = vals
-				}
+		for k, v := range parseQueryTolerant(fragParams) {
+			if _, exists := q[k]; !exists {
+				q[k] = v
 			}
 		}
 	}
-	if name := q.Get("name"); name != "" {
+	if name := q["name"]; name != "" {
 		c.Name = name
 	}
-	if nick := q.Get("nick"); nick != "" {
+	if nick := q["nick"]; nick != "" {
 		if !nickRe.MatchString(nick) {
 			return nil, fmt.Errorf("%w: %q", ErrBadNick, nick)
 		}
 		c.Nick = nick
 	}
-	if v := q.Get("tls"); v != "" && (v == "1" || v == "true") {
+	if v := q["tls"]; v != "" && (v == "1" || v == "true") {
 		c.TLS = true
 	}
-	if p := q.Get("port"); p != "" {
+	if p := q["port"]; p != "" {
 		port, err := strconv.Atoi(p)
 		if err != nil || port < 1 || port > 65535 {
 			return nil, ErrBadPort
 		}
 		c.Port = port
 	}
-	if sasl := q.Get("sasl"); sasl != "" {
+	if sasl := q["sasl"]; sasl != "" {
 		// SASL PLAIN credentials: "user:pass", first colon splits
 		// (passwords may contain colons, usernames may not).
 		if i := strings.IndexByte(sasl, ':'); i > 0 {
@@ -173,6 +173,46 @@ func Parse(raw string) (*Conn, error) {
 		}
 	}
 	return c, nil
+}
+
+// knownQueryKeys are the parameters Parse understands; a query segment
+// with one of these keys starts a new pair, anything else belongs to
+// the previous value.
+var knownQueryKeys = map[string]bool{
+	"name": true, "nick": true, "tls": true, "port": true, "sasl": true,
+}
+
+// parseQueryTolerant splits a raw query the way users paste it: a
+// value containing a raw '&' ("?sasl=u:p&ss!x") would lose its tail to
+// url.ParseQuery, so segments that don't start a known pair rejoin the
+// previous value with the literal '&'. Values unescape %XX via
+// PathUnescape - QueryUnescape would silently turn passwords' '+' into
+// spaces - and malformed escapes stay raw rather than failing the
+// whole string.
+func parseQueryTolerant(raw string) map[string]string {
+	out := map[string]string{}
+	lastKey := ""
+	for _, seg := range strings.Split(raw, "&") {
+		k, v, hasEq := strings.Cut(seg, "=")
+		if hasEq && knownQueryKeys[strings.ToLower(k)] {
+			lastKey = strings.ToLower(k)
+			out[lastKey] = unescapeLoose(v)
+			continue
+		}
+		if lastKey != "" {
+			out[lastKey] += "&" + unescapeLoose(seg)
+		}
+	}
+	return out
+}
+
+// unescapeLoose path-unescapes, falling back to the raw text for
+// malformed sequences.
+func unescapeLoose(s string) string {
+	if u, err := url.PathUnescape(s); err == nil {
+		return u
+	}
+	return s
 }
 
 // ID returns the canonical, identity-determining form: host:port + TLS flag.
