@@ -646,6 +646,18 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 		// plaintext - reads as an invalid policy and girc aborts as if
 		// MITM'd. Deterministic TLS, no auto-upgrades.
 		DisableSTS: true,
+		// girc's pingLoop grants a fixed 30s registration grace, then
+		// starts PINGing regardless - and kills the link PingDelay+
+		// PingTimeout (20s+60s by default) after the last PONG.
+		// Bouncer-backed networks like matrix2078 spend tens of seconds
+		// in SASL + matrix login before 001 (observed: 47s), so the
+		// default cadence pings mid-handshake (servers stay silent on
+		// PING from unregistered clients - correctly) and the link dies
+		// 80s in, forever reconnecting. The slower cadence keeps PINGs
+		// inside the registered session; the long timeout additionally
+		// rides out matrix-side fetch stalls.
+		PingDelay:   60 * time.Second,
+		PingTimeout: 180 * time.Second,
 	}
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
