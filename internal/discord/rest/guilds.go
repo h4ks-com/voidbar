@@ -1485,6 +1485,14 @@ func (s *Server) clydeCommand(u *storage.User, dm *storage.DMChannel, req *sendM
 			s.clydeReply(dm, "Failed to leave "+name+": "+err.Error())
 			return echo
 		}
+		// The rail only clears on the dispatch, not the storage delete -
+		// same shape the REST leave endpoint sends.
+		if s.gw != nil {
+			s.gw.Dispatch(u.ID, "GUILD_DELETE", map[string]any{
+				"id":          net.ID,
+				"unavailable": false,
+			})
+		}
 		s.clydeReply(dm, "Left "+name+".")
 	default:
 		if !strings.Contains(line, "://") {
