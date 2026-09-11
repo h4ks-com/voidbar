@@ -762,6 +762,27 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	}()
 }
 
+// RestartConn tears a user's live upstream link down and opens a fresh
+// one. Re-joins rotate network-wide credentials (SASL, server
+// password), and the girc config - credentials included - is built
+// once per link, so EnsureConn alone would keep retrying with the old
+// ones forever.
+func (m *Manager) RestartConn(userID, networkID string) {
+	k := key(userID, networkID)
+	m.mu.Lock()
+	c, ok := m.conns[k]
+	if ok {
+		delete(m.conns, k)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	close(c.cancel)
+	<-c.done
+	m.EnsureConn(userID, networkID)
+}
+
 // EnsureAll opens upstream connections for every recorded membership.
 // Upstream connections do not survive server restarts, so this runs at boot.
 func (m *Manager) EnsureAll() {

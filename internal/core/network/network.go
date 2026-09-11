@@ -563,6 +563,7 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 	}
 
 	connID := conn.ID()
+	credRotation := false
 	net, err := s.store.NetworkByConnID(connID)
 	if errors.Is(err, storage.ErrNotFound) {
 		net = &storage.Network{
@@ -588,6 +589,9 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 		// Metadata re-join of a known network: keys and SASL credentials
 		// are network-wide, so a fresh string can add or rotate them.
 		changed := false
+		// Credential rotation needs the live link rebuilt (its girc
+		// config was built from the old values).
+		credChanged := false
 		if len(conn.ChannelKeys) > 0 {
 			if net.ChannelKeys == nil {
 				net.ChannelKeys = map[string]string{}
@@ -599,15 +603,22 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 				}
 			}
 		}
+		if conn.Password != "" && conn.Password != net.Password {
+			net.Password = conn.Password
+			changed = true
+			credChanged = true
+		}
 		if conn.SASLUser != "" && (conn.SASLUser != net.SASLUser || conn.SASLPass != net.SASLPass) {
 			net.SASLUser, net.SASLPass = conn.SASLUser, conn.SASLPass
 			changed = true
+			credChanged = true
 		}
 		if changed {
 			if err := s.store.UpsertNetwork(net); err != nil {
 				return nil, err
 			}
 		}
+		credRotation = credChanged
 	}
 
 	// Nickname is per-user; the connection string may not carry one, and even
@@ -657,7 +668,12 @@ func (s *Service) Join(userID, raw string) (*storage.Network, error) {
 	}
 
 	if s.manager != nil {
-		s.manager.EnsureConn(userID, net.ID)
+		if credRotation {
+			// The live link's config holds the old credentials.
+			s.manager.RestartConn(userID, net.ID)
+		} else {
+			s.manager.EnsureConn(userID, net.ID)
+		}
 	}
 	return net, nil
 }
