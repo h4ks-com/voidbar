@@ -5,6 +5,7 @@
 package ircmanage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -550,6 +551,22 @@ func (m *Manager) SetPublicURL(u string) {
 
 func key(userID, networkID string) string { return userID + "\x00" + networkID }
 
+// gircDebugWriter serializes girc's verbose debug output (written from
+// several of its goroutines) into slog DEBUG lines.
+type gircDebugWriter struct {
+	mu  sync.Mutex
+	log *slog.Logger
+}
+
+func (w *gircDebugWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if s := strings.TrimRight(string(p), "\r\n"); s != "" {
+		w.log.Debug(s)
+	}
+	return len(p), nil
+}
+
 // EnsureConn opens an upstream connection for (user, network) unless one
 // already exists. The network and membership records must already exist.
 func (m *Manager) EnsureConn(userID, networkID string) {
@@ -632,6 +649,14 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 	}
 	if net.Password != "" {
 		cfg.ServerPass = net.Password
+	}
+	// girc's debug stream is the link-forensics switch: it echoes every
+	// event and, critically, debugLogEvent on each drop when the 25-slot
+	// rx queue stalls because a handler blocks execLoop >30s - the
+	// signature of the "ping timeout on a live socket" reconnect loops.
+	// Routed through slog, so VOIDBAR_LOG_LEVEL=debug turns it on.
+	if m.log.Handler().Enabled(context.Background(), slog.LevelDebug) {
+		cfg.Debug = &gircDebugWriter{log: m.log}
 	}
 	// SASL PLAIN (?sasl=user:pass): girc walks the whole AUTHENTICATE
 	// dance during CAP negotiation; when set it replaces the server
