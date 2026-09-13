@@ -31,7 +31,7 @@ func main() {
 	bouncer := flag.String("bouncer", "https://vb.doesnmlab.xyz", "bouncer base URL")
 	listen := flag.String("listen", "127.0.0.1:8090", "listen address")
 	channel := flag.String("channel", "stable", "discord-scraping release channel branch")
-	at := flag.String("at", "2021-12-01", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head)")
+	at := flag.String("at", "2022-07-15", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head). Scrapes are only complete from 2022-07-09 on: the scraper learned to force-load lazy chunks 2022-04-17 and to survive individual chunk failures 2022-07-09 - earlier captures miss the i18n locale chunks the client cannot boot without")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

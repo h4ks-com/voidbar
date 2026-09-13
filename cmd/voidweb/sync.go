@@ -78,6 +78,18 @@ func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
 	}
+	// A different build was synced before: its content-hashed files
+	// would linger forever, so start the asset tree from scratch, and
+	// drop stale markers so switching back re-downloads instead of
+	// trusting a marker with no files behind it.
+	if err := os.RemoveAll(filepath.Join(cacheDir, "assets")); err != nil {
+		return "", err
+	}
+	if markers, _ := filepath.Glob(filepath.Join(cacheDir, "synced-*")); len(markers) > 0 {
+		for _, m := range markers {
+			_ = os.Remove(m)
+		}
+	}
 
 	logger.Info("downloading client", "commit", sha)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codeload+sha, nil)
@@ -147,9 +159,10 @@ func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at 
 }
 
 // assetHandler serves the cached client bundles. Asset names are
-// content hashes, so hits are immutable; a miss falls back to
-// Discord's live asset host and is cached for next time (scrapes are
-// near-complete but lazy chunks occasionally slip through).
+// content hashes, so hits are immutable. A miss is a plain 404: the
+// scrape set is complete for pinned builds, and fetching from
+// Discord's live asset host is a non-starter where discord.com is
+// blocked (the hanging fetch would stall every miss).
 type assetHandler struct {
 	dir string
 }
@@ -160,38 +173,6 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	dst := filepath.Join(h.dir, filepath.FromSlash(name))
-	if _, err := os.Stat(dst); err == nil {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		http.ServeFile(w, r, dst)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.NotFound(w, r)
-		return
-	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://discord.com"+r.URL.Path, nil)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil || resp.StatusCode != http.StatusOK || len(body) == 0 {
-		http.NotFound(w, r)
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err == nil {
-		_ = os.WriteFile(dst, body, 0o644)
-	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	w.Write(body)
+	http.ServeFile(w, r, filepath.Join(h.dir, filepath.FromSlash(name)))
 }
