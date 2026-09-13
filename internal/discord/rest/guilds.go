@@ -1007,8 +1007,9 @@ func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Reques
 
 // handleRecentMentions serves GET /users/@me/mentions: the "Recent
 // Mentions" tab. The endpoint predates the wrapper convention: the
-// clients that poll it (OpenCord and its forks match this exact query
-// shape) deserialize a FLAT message array - no {id, message, roles}
+// clients that poll it (the official Android client 126.21 - the
+// deployed user agent - and OpenCord, whose query shape matches)
+// deserialize a FLAT message array - no {id, message, roles}
 // wrapping. guild_id="0" (what the client sends) means every network.
 func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	limit := 25
