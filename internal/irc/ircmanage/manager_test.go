@@ -1498,6 +1498,139 @@ func TestAwayNotifyPush(t *testing.T) {
 	}
 }
 
+// TestNoticeRelay: NOTICEs land like PRIVMSGs - channel and query
+// notices in their buffers authored by the sender - with one twist:
+// server-sourced personal notices (bare servername, no user@host) go
+// to the control thread tagged with the server, not a query thread.
+func TestNoticeRelay(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				close(conns)
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+						// Server-sourced personal notice: control thread fodder.
+						_, _ = conn.Write([]byte(":fake NOTICE " + nick + " :net reboot at 03:00\r\n"))
+					case strings.HasPrefix(line, "PING"):
+						_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + ch + "\r\n"))
+						_, _ = conn.Write([]byte(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n"))
+						// A user's channel notice, and a server's one.
+						_, _ = conn.Write([]byte(":admin!a@h NOTICE " + ch + " :meeting in 5\r\n"))
+						_, _ = conn.Write([]byte(":fake NOTICE " + ch + " :scheduled maintenance\r\n"))
+					}
+				}
+			}(conn)
+			conns <- conn
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "joiner", Username: "j", Realname: "j",
+		AutoJoin: []string{"#lounge"}, JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	manager.reconnectBackoff = 150 * time.Millisecond
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+	manager.EnsureConn("u1", "net1")
+
+	// Wait until the channel buffer carries both notices.
+	var lounge []storage.BufferedMessage
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ch, err := store.GetChannelByIRC("net1", "#lounge"); err == nil {
+			lounge = store.ChannelMessages(ch.ID, "", "", 10)
+			if len(lounge) >= 2 {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(lounge) < 2 {
+		t.Fatalf("channel notices missing: %+v", lounge)
+	}
+	byAuthor := map[string]string{}
+	for _, m := range lounge {
+		byAuthor[m.AuthorName] = m.Content
+	}
+	if byAuthor["admin"] != "meeting in 5" {
+		t.Fatalf("user notice: %+v", byAuthor)
+	}
+	if byAuthor["fake"] != "scheduled maintenance" {
+		t.Fatalf("server channel notice: %+v", byAuthor)
+	}
+
+	// The personal server notice went to the control thread, tagged.
+	dm := manager.clydeDM("u1")
+	if dm == nil {
+		t.Fatal("no control thread")
+	}
+	var sawNotice bool
+	for _, m := range store.ChannelMessages(dm.ID, "", "", 20) {
+		if strings.Contains(m.Content, "[fake] net reboot at 03:00") {
+			sawNotice = true
+		}
+	}
+	if !sawNotice {
+		t.Fatalf("personal server notice not in control thread: %+v", store.ChannelMessages(dm.ID, "", "", 20))
+	}
+	// And no query thread was created for the bare servername.
+	dms, err := store.ListDMChannels("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range dms {
+		if d.Nick == "fake" {
+			t.Fatalf("servername got its own DM thread: %+v", d)
+		}
+	}
+}
+
 // serveJoinableAway: like serveJoinable but negotiates away-notify (CAP
 // LS advertises it, CAP REQ gets ACKed) and seeds one occupant.
 func serveJoinableAway(conn net.Conn) {

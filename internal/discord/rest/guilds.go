@@ -1564,6 +1564,31 @@ func (s *Server) handleAckGuild(w http.ResponseWriter, r *http.Request, u *stora
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// dedupByNonce implements send idempotency: flaky-network clients
+// retry the same POST (observed flooding a channel with identical
+// messages), and without this the retry relays a second copy upstream.
+// The replay buffer keeps nonces, so a hit within the recent window
+// returns the original message - same id, same nonce, every session
+// reconciles to one row - and nothing goes to the wire.
+func (s *Server) dedupByNonce(userID, channelID string, nonce any) (map[string]any, bool) {
+	ns, ok := nonce.(string)
+	if !ok || ns == "" {
+		return nil, false
+	}
+	for _, m := range s.net.ChannelMessages(channelID, "", "", 50) {
+		if m.Nonce == ns && m.AuthorID == userID {
+			var authorBio any
+			if bio := s.net.AuthorBio(userID, channelID, m.AuthorID); bio != "" {
+				authorBio = bio
+			}
+			return messagePayload(m.ID, m.ChannelID, m.Content, m.Timestamp,
+				model.IrcAuthorID(m.AuthorID), m.AuthorName, m.Nonce, authorBio,
+				s.net.AuthorAvatar(userID, channelID, m.AuthorID)), true
+		}
+	}
+	return nil, false
+}
+
 // handleSendMessage relays a Discord message to IRC. The channel id is a
 // snowflake resolved through the channel registry.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *storage.User) {
@@ -1667,6 +1692,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 			writeJSON(w, http.StatusOK, s.clydeCommand(u, dm, &req))
 			return
 		}
+		// Retried POSTs reconcile to the original message here, before
+		// anything reaches the wire.
+		if msg, ok := s.dedupByNonce(u.ID, channelID, req.Nonce); ok {
+			writeJSON(w, http.StatusOK, msg)
+			return
+		}
 		// Snowflake minted before the send: the manager queues it so the
 		// echo-message echo can bind the upstream msgid to it (reactions).
 		msgID := s.net.NewMessageID()
@@ -1727,6 +1758,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, u *st
 	ch, err := s.net.ChannelByID(channelID)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "unknown channel")
+		return
+	}
+	// Same idempotency gate as the DM path: a retried POST must not
+	// relay a second copy upstream.
+	if msg, ok := s.dedupByNonce(u.ID, channelID, req.Nonce); ok {
+		writeJSON(w, http.StatusOK, msg)
 		return
 	}
 	// See the DM path: snowflake before the send, for msgid correlation.

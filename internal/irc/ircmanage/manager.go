@@ -997,6 +997,39 @@ func (m *Manager) registerHandlers(c *conn) {
 		m.dispatchMessage(c, e.Params[0], e.Source.Name, e.Last(), model.NowTimestamp(), msgid, reply)
 	})
 
+	// NOTICE shares PRIVMSG's relay path: channel and query notices land
+	// in the same buffers, authored by the sender's nick. One twist -
+	// server-sourced notices (the source is a bare servername, no
+	// user@host: operator walls, connection chatter like "Looking up
+	// your hostname", service broadcasts) don't get a query thread of
+	// their own; personal ones go to the control thread (Clyde DM)
+	// tagged with the network, targeted ones land in the channel buffer.
+	c.client.Handlers.Add(girc.NOTICE, func(client *girc.Client, e girc.Event) {
+		if m.inChatBatch(c, e) {
+			return
+		}
+		if ref, ok := e.Tags.Get("batch"); ok && ref != "" && c.lineBatchActive(ref) {
+			return
+		}
+		if e.Source == nil || len(e.Params) == 0 {
+			return
+		}
+		fromServer := !strings.Contains(e.Source.Name, "!")
+		target := e.Params[0]
+		if fromServer && !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
+			m.clydeSay(c.userID, c.networkID, "["+e.Source.Name+"] "+e.Last())
+			return
+		}
+		msgid, _ := e.Tags.Get("msgid")
+		reply, _ := e.Tags.Get("+reply")
+		if reply == "" {
+			// Draft-stage name for the same tag; some clients (Halloy)
+			// send both, others only this form.
+			reply, _ = e.Tags.Get("+draft/reply")
+		}
+		m.dispatchMessage(c, target, e.Source.Name, e.Last(), model.NowTimestamp(), msgid, reply)
+	})
+
 	// Own-message echo (echo-message cap): girc flags them Echo and only
 	// ALL_EVENTS handlers see them. The echo carries the msgid the server
 	// stamped on our PRIVMSG; popping the pending identity for the target

@@ -979,18 +979,21 @@ func (s *Service) Leave(userID, guildID string) error {
 	return nil
 }
 
-// ValidateChannelName normalizes a client-supplied channel name to IRC form
-// ("#name"). Returns "" when the name can't work as an IRC channel.
+// ValidateChannelName normalizes a client-supplied channel name to IRC
+// form. Bare names (what the client's create-channel dialog sends) get
+// the "#"; an explicit prefix passes through untouched - the upstream
+// owns the real grammar: "##" channels on Libera, "#chan@network"
+// routes, "&" local channels. Only wire-breaking characters (spaces,
+// list commas, control bytes) are fatal client-side.
 func ValidateChannelName(raw string) string {
 	name := strings.TrimSpace(raw)
-	name = strings.TrimPrefix(name, "#")
-	name = strings.TrimPrefix(name, "&")
-	if name == "" || len(name) > 50 {
+	if name == "" || len(name) > 64 {
 		return ""
 	}
-	// RFC 1459 channel-name exclusions, plus the practical ones (spaces
-	// break the wire protocol, commas break lists).
-	if strings.ContainsAny(name, " ,\x07:*!@") {
+	if name[0] != '#' && name[0] != '&' {
+		name = "#" + name
+	}
+	if strings.ContainsAny(name, " ,\x00\r\n\x07") {
 		return ""
 	}
 	for _, r := range name {
@@ -998,7 +1001,7 @@ func ValidateChannelName(raw string) string {
 			return ""
 		}
 	}
-	return "#" + name
+	return name
 }
 
 // CreateChannel is the client's "create channel" action: IRC servers create

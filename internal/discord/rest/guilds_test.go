@@ -340,6 +340,170 @@ func TestCreateDM(t *testing.T) {
 	}
 }
 
+// TestSendNonceDedup: a flaky-network client retries the same POST
+// (same nonce). The retry must reconcile to the original message -
+// same id back, one buffer row, and only one PRIVMSG relayed upstream.
+func TestSendNonceDedup(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	received := []string{}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					mu.Lock()
+					received = append(received, line)
+					mu.Unlock()
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+					case strings.HasPrefix(line, "PING"):
+						_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + ch + "\r\n"))
+						_, _ = conn.Write([]byte(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n"))
+					}
+				}
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	channelID := ""
+	for time.Now().Before(deadline) && channelID == "" {
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			guilds := []map[string]any{}
+			_ = json.Unmarshal(resp, &guilds)
+			if len(guilds) > 0 {
+				gid, _ := guilds[0]["id"].(string)
+				if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+gid, token); err == nil {
+					var detail map[string]any
+					_ = json.Unmarshal(resp, &detail)
+					if chans, ok := detail["channels"].([]any); ok {
+						for _, c := range chans {
+							cm := c.(map[string]any)
+							if cm["name"] == "test" {
+								channelID, _ = cm["id"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("channel never registered")
+	}
+
+	// First send carries the nonce; the retry (same nonce, what a
+	// network-glitch client does) must return the same message id.
+	send := func(nonce, content string) (int, string) {
+		req, _ := http.NewRequest("POST", srv.URL+"/api/v9/channels/"+channelID+"/messages",
+			strings.NewReader(`{"content":"`+content+`","nonce":"`+nonce+`"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&m)
+		id, _ := m["id"].(string)
+		return resp.StatusCode, id
+	}
+	code1, id1 := send("flicker-1", "dup me")
+	if code1 != http.StatusOK {
+		t.Fatalf("first send: %d", code1)
+	}
+	code2, id2 := send("flicker-1", "dup me")
+	if code2 != http.StatusOK {
+		t.Fatalf("retry send: %d", code2)
+	}
+	if id1 == "" || id1 != id2 {
+		t.Fatalf("retry did not reconcile: %q vs %q", id1, id2)
+	}
+	// A different nonce is a different message.
+	if _, id3 := send("flicker-2", "other body"); id3 == "" || id3 == id1 {
+		t.Fatalf("distinct nonce collapsed: %q", id3)
+	}
+
+	// Upstream saw exactly one relay of the duplicated body.
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	count := 0
+	for _, l := range received {
+		if strings.HasPrefix(l, "PRIVMSG #test :dup me") {
+			count++
+		}
+	}
+	mu.Unlock()
+	if count != 1 {
+		t.Fatalf("upstream relays of duplicated body: %d", count)
+	}
+	// And the buffer holds one row per nonce.
+	rows := netSvc.ChannelMessages(channelID, "", "", 50)
+	nonceRows := 0
+	for _, r := range rows {
+		if r.Nonce == "flicker-1" {
+			nonceRows++
+		}
+	}
+	if nonceRows != 1 {
+		t.Fatalf("buffer rows with the nonce: %d", nonceRows)
+	}
+}
+
 // TestTypingBothWays: draft/typing TAGMSGs flow both directions -
 // inbound TAGMSG (+typing=active) becomes a gateway TYPING_START, and
 // POST /channels/{id}/typing relays out as @+typing=active TAGMSG (a

@@ -1,15 +1,45 @@
 package network
 
 import (
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
 	"github.com/h4ks-com/voidbar/internal/irc/ircmanage"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/h4ks-com/voidbar/internal/util"
-	"io"
-	"log/slog"
 )
+
+// TestValidateChannelName: bare names get the "#" (the client's
+// create-channel dialog sends bare names); explicit prefixes pass
+// through untouched because the upstream owns the real grammar -
+// Libera's "##" channels, "#chan@network" routes, "&" local channels.
+// Only wire-breaking characters are fatal client-side.
+func TestValidateChannelName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"rust", "#rust"},
+		{"#elixir", "#elixir"},
+		{"##linux", "##linux"},
+		{"&unix", "&unix"},
+		{"#foo@bar.example", "#foo@bar.example"},
+		{"  padded  ", "#padded"},
+		{"", ""},
+		{"#", "#"},
+		{"&", "&"},
+		{"has space", ""},
+		{"a,b", ""},
+		{"#ok\x07no", ""},
+		{strings.Repeat("x", 65), ""},
+		{strings.Repeat("x", 50), "#" + strings.Repeat("x", 50)},
+	}
+	for _, tc := range cases {
+		if got := ValidateChannelName(tc.in); got != tc.want {
+			t.Fatalf("ValidateChannelName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 
 func TestJoinCreatesMembershipAndGuilds(t *testing.T) {
 	store, err := storage.Open(t.TempDir())
