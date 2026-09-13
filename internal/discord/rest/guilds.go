@@ -1006,9 +1006,10 @@ func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Reques
 }
 
 // handleRecentMentions serves GET /users/@me/mentions: the "Recent
-// Mentions" tab. Discord wraps each hit as {id, message, roles}; IRC
-// has no role mentions, so roles rides along empty. guild_id="0" (what
-// the client sends) means every network.
+// Mentions" tab. The endpoint predates the wrapper convention: the
+// clients that poll it (OpenCord and its forks match this exact query
+// shape) deserialize a FLAT message array - no {id, message, roles}
+// wrapping. guild_id="0" (what the client sends) means every network.
 func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u *storage.User) {
 	limit := 25
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 50 {
@@ -1031,19 +1032,12 @@ func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u 
 			continue
 		}
 		payload := s.historyMessagePayload(u, m, map[string]bool{})
-		// The mentions tab groups rows by guild via message.guild_id -
-		// without it every row is dropped client-side (empty tab).
+		// Grouping and jump-to-message ride on guild_id being stamped
+		// on the row.
 		if guildID != "" {
 			payload["guild_id"] = guildID
 		}
-		out = append(out, map[string]any{
-			"id":      m.ID,
-			"message": payload,
-			"roles":   []any{},
-			// Discord stamps the number of pings in the row; a mention
-			// relay counts as one.
-			"mention_count": 1,
-		})
+		out = append(out, payload)
 		if len(out) >= limit {
 			break
 		}

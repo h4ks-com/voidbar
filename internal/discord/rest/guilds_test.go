@@ -631,25 +631,20 @@ func TestRecentMentions(t *testing.T) {
 		_ = json.Unmarshal(resp, &out)
 		return out
 	}
-	// All-networks poll (guild_id=0, what the client sends).
+	// All-networks poll (guild_id=0, what the client sends). The
+	// response is a FLAT message array - the polling clients
+	// (OpenCord and forks) deserialize List<ApiMessage>, and the
+	// {id, message, roles} wrapper leaves every row unusable.
 	got := mentions("?limit=25&roles=true&everyone=true&guild_id=0")
 	if len(got) != 2 {
 		t.Fatalf("mentions: %+v", got)
 	}
-	msg, _ := got[0]["message"].(map[string]any)
-	if msg == nil || !strings.Contains(msg["content"].(string), "<@"+user.ID+">") {
-		t.Fatalf("mention message: %+v", msg)
+	if !strings.Contains(got[0]["content"].(string), "<@"+user.ID+">") {
+		t.Fatalf("mention message: %+v", got[0])
 	}
-	if got[0]["id"] != msg["id"] {
-		t.Fatalf("wrapper id: %+v", got[0])
-	}
-	// The tab groups rows by guild via message.guild_id and shows the
-	// mention count - both must ride along.
-	if msg["guild_id"] != net.ID {
-		t.Fatalf("message.guild_id: %v", msg["guild_id"])
-	}
-	if got[0]["mention_count"] != float64(1) {
-		t.Fatalf("mention_count: %v", got[0]["mention_count"])
+	// Grouping and jump-to-message ride on guild_id.
+	if got[0]["guild_id"] != net.ID {
+		t.Fatalf("message.guild_id: %v", got[0]["guild_id"])
 	}
 	// Scoped to the right guild it survives, to a foreign one it empties.
 	if n := len(mentions("?guild_id=" + net.ID)); n != 2 {
@@ -672,9 +667,7 @@ func TestRecentMentions(t *testing.T) {
 	if n := len(mentions("?before=" + page2[0]["id"].(string))); n != 0 {
 		t.Fatalf("page3 not empty: %+v", n)
 	}
-}
-
-// TestTypingBothWays: draft/typing TAGMSGs flow both directions -
+}// TestTypingBothWays: draft/typing TAGMSGs flow both directions -
 // inbound TAGMSG (+typing=active) becomes a gateway TYPING_START, and
 // POST /channels/{id}/typing relays out as @+typing=active TAGMSG (a
 // message send follows up with "done"). The fake advertises ONLY
