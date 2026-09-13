@@ -1015,8 +1015,9 @@ func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u 
 		limit = n
 	}
 	onlyGuild := r.URL.Query().Get("guild_id")
+	before := r.URL.Query().Get("before")
 	out := []map[string]any{}
-	for _, m := range s.net.MentionedMessages(u.ID, limit) {
+	for _, m := range s.net.MentionedMessages(u.ID, limit, before) {
 		if onlyGuild != "" && onlyGuild != "0" {
 			ch, err := s.net.ChannelByID(m.ChannelID)
 			if err != nil || ch.NetworkID != onlyGuild {

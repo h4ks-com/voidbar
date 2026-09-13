@@ -2102,7 +2102,9 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 // networks, newest first: the payload behind the client's "Recent
 // Mentions" tab. Channels are scanned newest-first with a per-channel
 // window, so the cost is bounded by network count, not history depth.
-func (s *Service) MentionedMessages(userID string, limit int) []storage.BufferedMessage {
+// before ("" disables) paginates: only mentions strictly older than the
+// cursor count, and an empty page is the client's stop signal.
+func (s *Service) MentionedMessages(userID string, limit int, before string) []storage.BufferedMessage {
 	memberships, err := s.store.ListMembershipsForUser(userID)
 	if err != nil {
 		return nil
@@ -2116,6 +2118,9 @@ func (s *Service) MentionedMessages(userID string, limit int) []storage.Buffered
 		for _, ch := range channels {
 			for _, m := range s.ChannelMessages(ch.ID, "", "", 200) {
 				if m.AuthorID == userID {
+					continue
+				}
+				if before != "" && (snowflakeGreater(m.ID, before) || m.ID == before) {
 					continue
 				}
 				for _, ref := range m.Mentions {

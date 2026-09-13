@@ -545,8 +545,10 @@ func TestRecentMentions(t *testing.T) {
 						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
 						_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + ch + "\r\n"))
 						_, _ = conn.Write([]byte(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n"))
-						// An inbound bare-nick mention of the user.
+						// An inbound bare-nick mention of the user, twice:
+						// pagination fodder.
 						_, _ = conn.Write([]byte(":sleepy!u@h PRIVMSG " + ch + " :" + nick + " ping\r\n"))
+						_, _ = conn.Write([]byte(":sleepy!u@h PRIVMSG " + ch + " :" + nick + " again\r\n"))
 						// And an unmentioned message for contrast.
 						_, _ = conn.Write([]byte(":sleepy!u@h PRIVMSG " + ch + " :just chatting\r\n"))
 					}
@@ -631,7 +633,7 @@ func TestRecentMentions(t *testing.T) {
 	}
 	// All-networks poll (guild_id=0, what the client sends).
 	got := mentions("?limit=25&roles=true&everyone=true&guild_id=0")
-	if len(got) != 1 {
+	if len(got) != 2 {
 		t.Fatalf("mentions: %+v", got)
 	}
 	msg, _ := got[0]["message"].(map[string]any)
@@ -642,11 +644,25 @@ func TestRecentMentions(t *testing.T) {
 		t.Fatalf("wrapper id: %+v", got[0])
 	}
 	// Scoped to the right guild it survives, to a foreign one it empties.
-	if n := len(mentions("?guild_id=" + net.ID)); n != 1 {
+	if n := len(mentions("?guild_id=" + net.ID)); n != 2 {
 		t.Fatalf("scoped mentions: %d", n)
 	}
 	if n := len(mentions("?guild_id=999999")); n != 0 {
 		t.Fatalf("foreign-guild mentions: %d", n)
+	}
+
+	// Pagination: limit=1 pages walk strictly older via before, and the
+	// page past the oldest mention is empty - the client's stop signal.
+	page1 := mentions("?limit=1")
+	if len(page1) != 1 {
+		t.Fatalf("page1: %+v", page1)
+	}
+	page2 := mentions("?limit=1&before=" + page1[0]["id"].(string))
+	if len(page2) != 1 || page2[0]["id"] == page1[0]["id"] {
+		t.Fatalf("page2: %+v", page2)
+	}
+	if n := len(mentions("?before=" + page2[0]["id"].(string))); n != 0 {
+		t.Fatalf("page3 not empty: %+v", n)
 	}
 }
 
