@@ -75,15 +75,53 @@ func resolveCommit(ctx context.Context, channel, at string) ([]string, error) {
 
 // syncAssets materializes the client under cacheDir (assets/,
 // index.html, manifest.json) from a codeload tarball. Scrapes
-// occasionally contain zero-byte captures; an empty bootstrap script
-// wedges webpack mid-boot with no error anywhere, so candidates are
-// walked newest-to-older until one extracts without empty files.
+// occasionally contain zero-byte captures; those are left absent and
+// healable - EXCEPT in boot-critical files (the scripts and styles
+// the index loads eagerly): the runtime chunk embeds the per-build
+// chunk table, so its name is unique to this build and no donor can
+// ever exist for it. Scrapes with empty boot-critical captures are
+// walked back; the client-version pin moves to an older build.
 func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at string) (string, error) {
-	shas, err := resolveCommit(ctx, channel, at)
-	if err != nil {
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	// Marker first: with a synced build on disk, startup can skip the
+	// API entirely - unless the pin moved and this build no longer
+	// matches it (resolveCommit returning the marker outside the
+	// candidate list triggers a fresh sync).
+	if markers, _ := filepath.Glob(filepath.Join(cacheDir, "synced-*")); len(markers) > 0 {
+		sha := strings.TrimPrefix(filepath.Base(markers[0]), "synced-")
+		if _, err := os.Stat(filepath.Join(cacheDir, "index.html")); err == nil {
+			shas, err := resolveCommit(ctx, channel, at)
+			if err == nil {
+				pinned := false
+				for _, s := range shas {
+					if s == sha {
+						pinned = true
+						break
+					}
+				}
+				if pinned {
+					// First boot after this build landed: sweep the
+					// neighbors once to heal gaps (empty captures,
+					// uncaptured chunks). API hiccups just defer the
+					// sweep - the cache serves on.
+					if _, err := os.Stat(filepath.Join(cacheDir, "swept-"+sha)); err != nil {
+						backfillMissing(ctx, logger, cacheDir, shas)
+						_ = os.WriteFile(filepath.Join(cacheDir, "swept-"+sha), nil, 0o644)
+					}
+					return sha, nil
+				}
+			} else {
+				// Cannot verify the pin (rate limit, outage): serve
+				// the cache as-is rather than locking the local app
+				// out.
+				return sha, nil
+			}
+		}
+	}
+	shas, err := resolveCommit(ctx, channel, at)
+	if err != nil {
 		return "", err
 	}
 	var lastErr error
@@ -106,27 +144,45 @@ func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at 
 			}
 		}
 
-		empty, err := extractTarball(ctx, logger, cacheDir, sha)
-		if err != nil {
+		if _, err := extractTarball(ctx, logger, cacheDir, sha); err != nil {
 			lastErr = err
 			logger.Warn("scrape failed to extract, walking back", "commit", sha, "err", err)
 			continue
 		}
-		if empty > 0 {
-			lastErr = fmt.Errorf("scrape %s has %d empty capture(s)", sha[:8], empty)
-			logger.Warn("corrupt scrape, walking back", "commit", sha, "empty_files", empty)
+		if missing := bootCriticalMissing(cacheDir); len(missing) > 0 {
+			lastErr = fmt.Errorf("scrape %s lost boot-critical captures: %v", sha[:8], missing)
+			logger.Warn("unusable scrape (empty boot-critical captures), walking back", "commit", sha, "missing", missing)
 			continue
 		}
 		if err := os.WriteFile(marker, nil, 0o644); err != nil {
 			return "", err
 		}
 		backfillMissing(ctx, logger, cacheDir, shas)
+		_ = os.WriteFile(filepath.Join(cacheDir, "swept-"+sha), nil, 0o644)
 		return sha, nil
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no clean scrape found")
+		lastErr = errors.New("no usable scrape found")
 	}
 	return "", lastErr
+}
+
+// bootCriticalMissing checks that every eagerly-loaded file the index
+// references (scripts, stylesheets, icons) exists on disk: an empty
+// capture of any of them starves the boot with no recovery, since
+// their per-build names have no donors.
+func bootCriticalMissing(cacheDir string) []string {
+	raw, err := os.ReadFile(filepath.Join(cacheDir, "index.html"))
+	if err != nil {
+		return []string{"index.html"}
+	}
+	var missing []string
+	for _, m := range assetRef.FindAllStringSubmatch(string(raw), -1) {
+		if _, err := os.Stat(filepath.Join(cacheDir, "assets", m[1])); err != nil {
+			missing = append(missing, m[1])
+		}
+	}
+	return missing
 }
 
 // backfillMissing heals partial scrapes: even a scrape with no empty
@@ -136,6 +192,8 @@ func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at 
 // webpack runtime carries an id-to-content-hash table - and asset
 // names are content hashes, so a same-named file in a NEIGHBORING
 // scrape (a different build, but an unchanged chunk) is byte-exact.
+// Neighbors are swept as codeload tarballs: no API quota, and one
+// tarball covers every missing name it holds.
 func backfillMissing(ctx context.Context, logger *slog.Logger, cacheDir string, shas []string) {
 	assetsDir := filepath.Join(cacheDir, "assets")
 	referenced := map[string]bool{}
@@ -171,12 +229,12 @@ func backfillMissing(ctx context.Context, logger *slog.Logger, cacheDir string, 
 	if len(missing) == 0 {
 		return
 	}
-	logger.Info("scrape is missing referenced assets, healing from neighbors", "missing", len(missing))
+	logger.Info("scrape is missing referenced assets, sweeping neighbors", "missing", len(missing))
 	for _, sha := range shas {
 		if len(missing) == 0 {
 			break
 		}
-		if healed := fetchAssetsFromCommit(ctx, cacheDir, sha, missing); healed > 0 {
+		if healed := sweepTarball(ctx, logger, cacheDir, sha, missing); healed > 0 {
 			logger.Info("backfill from neighbor", "commit", sha[:8], "healed", healed, "still_missing", len(missing))
 		}
 	}
@@ -186,53 +244,67 @@ func backfillMissing(ctx context.Context, logger *slog.Logger, cacheDir string, 
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		logger.Warn("assets unhealed - client may hit ChunkLoadError on these", "missing", names)
+		logger.Warn("assets unhealed - the lazy healer will retry them per request", "missing_count", len(names))
 	}
 }
 
-// fetchAssetsFromCommit downloads the still-missing assets found in
-// one neighbor commit's tree, deleting each healed name from the
-// missing set. Returns how many files actually landed on disk.
-func fetchAssetsFromCommit(ctx context.Context, cacheDir, sha string, missing map[string]bool) int {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, githubAPI+"/git/trees/"+sha+"?recursive=1", nil)
+// sweepTarball streams one neighbor scrape's tarball and extracts
+// every currently-missing asset it carries (empty captures skipped).
+func sweepTarball(ctx context.Context, logger *slog.Logger, cacheDir, sha string, missing map[string]bool) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codeload+sha, nil)
+	if err != nil {
+		return 0
+	}
 	req.Header.Set("User-Agent", "voidweb")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		logger.Warn("neighbor tarball", "commit", sha[:8], "err", err)
 		return 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		logger.Warn("neighbor tarball", "commit", sha[:8], "status", resp.Status)
 		return 0
 	}
-	var tree struct {
-		Tree []struct {
-			Path string `json:"path"`
-			Size int64  `json:"size"`
-		} `json:"tree"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
 		return 0
 	}
+	defer gz.Close()
+	prefix := "discord-scraping-" + sha + "/"
 	healed := 0
-	for _, e := range tree.Tree {
-		name, ok := strings.CutPrefix(e.Path, "assets/")
-		if !ok || e.Size == 0 || !missing[name] {
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
 			continue
 		}
-		r, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawBase+"/"+sha+"/"+e.Path, nil)
-		r.Header.Set("User-Agent", "voidweb")
-		file, err := http.DefaultClient.Do(r)
+		name, ok := strings.CutPrefix(hdr.Name, prefix)
+		if !ok {
+			continue
+		}
+		asset, ok := strings.CutPrefix(name, "assets/")
+		if !ok || !missing[asset] {
+			continue
+		}
+		dst := filepath.Join(cacheDir, "assets", asset)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			continue
+		}
+		out, err := os.Create(dst)
 		if err != nil {
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(file.Body, 64<<20))
-		file.Body.Close()
-		if err != nil || file.StatusCode != http.StatusOK || len(body) == 0 {
-			continue
-		}
-		dst := filepath.Join(cacheDir, "assets", name)
-		if os.WriteFile(dst, body, 0o644) == nil {
-			delete(missing, name)
+		n, err := io.Copy(out, tr)
+		out.Close()
+		if err == nil && n > 0 {
+			delete(missing, asset)
 			healed++
 		}
 	}
@@ -289,6 +361,12 @@ func extractTarball(ctx context.Context, logger *slog.Logger, cacheDir, sha stri
 			continue
 		}
 		dst := filepath.Join(cacheDir, filepath.FromSlash(name))
+		if hdr.Size == 0 {
+			// Zero-byte capture: leave it absent so the healers can
+			// source a real donor for the name.
+			empty++
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return 0, err
 		}
@@ -303,14 +381,11 @@ func extractTarball(ctx context.Context, logger *slog.Logger, cacheDir, sha stri
 		}
 		files++
 		bytes += int(n)
-		if n == 0 {
-			empty++
-		}
 	}
 	if files == 0 {
 		return 0, errors.New("tarball contained no client files")
 	}
-	logger.Info("client extracted", "commit", sha[:8], "files", files, "mb", bytes/1024/1024, "empty", empty)
+	logger.Info("client extracted", "commit", sha[:8], "files", files, "mb", bytes/1024/1024, "empty_captures", empty)
 	return empty, nil
 }
 
@@ -324,10 +399,11 @@ func extractTarball(ctx context.Context, logger *slog.Logger, cacheDir, sha stri
 // asset host is no alternative - discord.com is blocked at the ISP
 // here, such fetches would just hang.
 type assetHandler struct {
-	dir    string
-	logger *slog.Logger
-	mu     sync.Mutex
-	donors map[string]string // asset name -> donor sha, "-" = nowhere in the archive
+	dir     string
+	channel string
+	logger  *slog.Logger
+	mu      sync.Mutex
+	donors  map[string]string // asset name -> donor sha, "-" = nowhere in the archive
 }
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +442,7 @@ func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 		}
 		return false
 	}
-	sha, err := findDonor(ctx, name)
+	sha, err := findDonor(ctx, h.channel, name)
 	if err != nil {
 		// Lookup failed (rate limit, network): do not memoize - the
 		// next request retries.
@@ -391,9 +467,10 @@ func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 // findDonor asks the archive's history for any commit that captured
 // the asset: commits touching the path appear when a scrape added or
 // removed it, and the newest such scrape is a byte-exact donor (the
-// name is a content hash).
-func findDonor(ctx context.Context, name string) (string, error) {
-	u := githubAPI + "/commits?path=assets/" + name + "&per_page=1"
+// name is a content hash). The lookup MUST scope to the channel
+// branch - scrapes never land on the default branch.
+func findDonor(ctx context.Context, channel, name string) (string, error) {
+	u := githubAPI + "/commits?sha=" + channel + "&path=assets/" + name + "&per_page=1"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", err

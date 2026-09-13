@@ -112,9 +112,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/assets/", &assetHandler{
-		dir:    filepath.Join(cacheDir, "assets"),
-		logger: logger,
-		donors: loadDonors(cacheDir),
+		dir:     filepath.Join(cacheDir, "assets"),
+		channel: *channel,
+		logger:  logger,
+		donors:  loadDonors(cacheDir),
 	})
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The pinned client may speak an older API version (v8) while
