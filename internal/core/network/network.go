@@ -2100,17 +2100,23 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 
 // MentionedMessages returns the user's recent mentions across their
 // networks, newest first: the payload behind the client's "Recent
-// Mentions" tab. Channels are scanned newest-first with a per-channel
-// window, so the cost is bounded by network count, not history depth.
-// before ("" disables) paginates: only mentions strictly older than the
-// cursor count, and an empty page is the client's stop signal.
-func (s *Service) MentionedMessages(userID string, limit int, before string) []storage.BufferedMessage {
+// Mentions" tab. guildID ("" or "0" disables) scopes the scan to one
+// network UP FRONT - filtering after a global newest-first take would
+// starve guilds whose mentions are older than the take window.
+// Channels are scanned newest-first with a per-channel window, so the
+// cost is bounded by network count, not history depth. before (""
+// disables) paginates: only mentions strictly older than the cursor
+// count, and an empty page is the client's stop signal.
+func (s *Service) MentionedMessages(userID string, limit int, before, guildID string) []storage.BufferedMessage {
 	memberships, err := s.store.ListMembershipsForUser(userID)
 	if err != nil {
 		return nil
 	}
 	var hits []storage.BufferedMessage
 	for _, mem := range memberships {
+		if guildID != "" && guildID != "0" && mem.NetworkID != guildID {
+			continue
+		}
 		channels, err := s.store.ListChannelsByNetwork(mem.NetworkID)
 		if err != nil {
 			continue

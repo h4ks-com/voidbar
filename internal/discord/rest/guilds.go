@@ -1017,25 +1017,16 @@ func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u 
 	}
 	onlyGuild := r.URL.Query().Get("guild_id")
 	before := r.URL.Query().Get("before")
-	guildOf := map[string]string{}
 	out := []map[string]any{}
-	for _, m := range s.net.MentionedMessages(u.ID, limit, before) {
-		guildID, cached := guildOf[m.ChannelID]
-		if !cached {
-			guildID = ""
-			if ch, err := s.net.ChannelByID(m.ChannelID); err == nil {
-				guildID = ch.NetworkID
-			}
-			guildOf[m.ChannelID] = guildID
-		}
-		if onlyGuild != "" && onlyGuild != "0" && guildID != onlyGuild {
-			continue
-		}
+	// The guild scope goes into the scan itself: a post-filter on the
+	// global newest-first take would starve guilds whose mentions are
+	// older than the window.
+	for _, m := range s.net.MentionedMessages(u.ID, limit, before, onlyGuild) {
 		payload := s.historyMessagePayload(u, m, map[string]bool{})
 		// Grouping and jump-to-message ride on guild_id being stamped
 		// on the row.
-		if guildID != "" {
-			payload["guild_id"] = guildID
+		if ch, err := s.net.ChannelByID(m.ChannelID); err == nil {
+			payload["guild_id"] = ch.NetworkID
 		}
 		out = append(out, payload)
 		if len(out) >= limit {
