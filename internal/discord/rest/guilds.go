@@ -1005,6 +1005,36 @@ func (s *Server) handleSearchGuildMessages(w http.ResponseWriter, r *http.Reques
 	writeSearchResults(w, hits, offset)
 }
 
+// handleRecentMentions serves GET /users/@me/mentions: the "Recent
+// Mentions" tab. Discord wraps each hit as {id, message, roles}; IRC
+// has no role mentions, so roles rides along empty. guild_id="0" (what
+// the client sends) means every network.
+func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u *storage.User) {
+	limit := 25
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 50 {
+		limit = n
+	}
+	onlyGuild := r.URL.Query().Get("guild_id")
+	out := []map[string]any{}
+	for _, m := range s.net.MentionedMessages(u.ID, limit) {
+		if onlyGuild != "" && onlyGuild != "0" {
+			ch, err := s.net.ChannelByID(m.ChannelID)
+			if err != nil || ch.NetworkID != onlyGuild {
+				continue
+			}
+		}
+		out = append(out, map[string]any{
+			"id":      m.ID,
+			"message": s.historyMessagePayload(u, m, map[string]bool{}),
+			"roles":   []any{},
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // decodeEmoji unescapes the emoji path segment if it still carries
 // percent-encoding (ServeMux wildcards match escaped paths; non-ASCII
 // emoji arrive encoded) and reduces a custom emoji "name:id" to its name.

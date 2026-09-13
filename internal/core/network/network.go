@@ -2098,6 +2098,44 @@ func (s *Service) GuildsForUser(userID string) ([]any, error) {
 	return guilds, nil
 }
 
+// MentionedMessages returns the user's recent mentions across their
+// networks, newest first: the payload behind the client's "Recent
+// Mentions" tab. Channels are scanned newest-first with a per-channel
+// window, so the cost is bounded by network count, not history depth.
+func (s *Service) MentionedMessages(userID string, limit int) []storage.BufferedMessage {
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil
+	}
+	var hits []storage.BufferedMessage
+	for _, mem := range memberships {
+		channels, err := s.store.ListChannelsByNetwork(mem.NetworkID)
+		if err != nil {
+			continue
+		}
+		for _, ch := range channels {
+			for _, m := range s.ChannelMessages(ch.ID, "", "", 200) {
+				if m.AuthorID == userID {
+					continue
+				}
+				for _, ref := range m.Mentions {
+					if ref.ID == userID {
+						hits = append(hits, m)
+						break
+					}
+				}
+			}
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		return snowflakeGreater(hits[i].ID, hits[j].ID)
+	})
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits
+}
+
 // UserNetworkSummary is one row of the control bot's network listing.
 type UserNetworkSummary struct {
 	Host string

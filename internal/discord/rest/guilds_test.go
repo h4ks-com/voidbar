@@ -504,6 +504,152 @@ func TestSendNonceDedup(t *testing.T) {
 	}
 }
 
+// TestRecentMentions: GET /users/@me/mentions (the "Recent Mentions"
+// tab, polled with ?limit&roles&everyone&guild_id=0) answers from the
+// replay buffers: every buffered message mentioning the caller, wrapped
+// as {id, message, roles}, newest first, guild_id-scoped when given.
+func TestRecentMentions(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				nick := ""
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					switch {
+					case strings.HasPrefix(line, "CAP LS"):
+						_, _ = conn.Write([]byte("CAP * LS :\r\n"))
+					case strings.HasPrefix(line, "CAP REQ"):
+						req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+						_, _ = conn.Write([]byte("CAP * ACK :" + req + "\r\n"))
+					case strings.HasPrefix(line, "NICK") && nick == "":
+						nick = strings.TrimPrefix(line, "NICK ")
+						_, _ = conn.Write([]byte(":fake 001 " + nick + " :Welcome\r\n"))
+					case strings.HasPrefix(line, "PING"):
+						_, _ = conn.Write([]byte("PONG" + line[4:] + "\r\n"))
+					case strings.HasPrefix(line, "JOIN"):
+						ch := strings.TrimSpace(strings.TrimPrefix(line, "JOIN "))
+						_, _ = conn.Write([]byte(":" + nick + "!u@h JOIN " + ch + "\r\n"))
+						_, _ = conn.Write([]byte(":fake 366 " + nick + " " + ch + " :End of NAMES\r\n"))
+						// An inbound bare-nick mention of the user.
+						_, _ = conn.Write([]byte(":sleepy!u@h PRIVMSG " + ch + " :" + nick + " ping\r\n"))
+						// And an unmentioned message for contrast.
+						_, _ = conn.Write([]byte(":sleepy!u@h PRIVMSG " + ch + " :just chatting\r\n"))
+					}
+				}
+			}(conn)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := auth.New(store, util.NewSnowflake(0, 0), "open")
+	user, token, err := svc.Register("doesnm", "doesnm@0ut0f.space", "hunter2hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(svc, cfg, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	netSvc := network.NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+	h := New(svc, cfg, logger, gw, netSvc, manager)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	net, err := netSvc.Join(user.ID, "irc://127.0.0.1:"+fmt.Sprint(port)+"/#test?name=Fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { manager.Drop(user.ID, net.ID) })
+
+	// The mention reaches the buffer with the user marked.
+	deadline := time.Now().Add(5 * time.Second)
+	channelID := ""
+	for time.Now().Before(deadline) {
+		if resp, err := httpGet(srv.URL+"/api/v9/users/@me/guilds", token); err == nil {
+			guilds := []map[string]any{}
+			_ = json.Unmarshal(resp, &guilds)
+			if len(guilds) > 0 {
+				gid, _ := guilds[0]["id"].(string)
+				if resp, err := httpGet(srv.URL+"/api/v9/guilds/"+gid, token); err == nil {
+					var detail map[string]any
+					_ = json.Unmarshal(resp, &detail)
+					if chans, ok := detail["channels"].([]any); ok {
+						for _, c := range chans {
+							if cm := c.(map[string]any); cm["name"] == "test" {
+								channelID, _ = cm["id"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+		if channelID != "" {
+			hit := false
+			for _, m := range netSvc.ChannelMessages(channelID, "", "", 10) {
+				if strings.Contains(m.Content, "<@"+user.ID+">") {
+					hit = true
+				}
+			}
+			if hit {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if channelID == "" {
+		t.Fatal("channel never registered")
+	}
+
+	mentions := func(q string) []map[string]any {
+		resp, err := httpGet(srv.URL+"/api/v9/users/@me/mentions"+q, token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []map[string]any{}
+		_ = json.Unmarshal(resp, &out)
+		return out
+	}
+	// All-networks poll (guild_id=0, what the client sends).
+	got := mentions("?limit=25&roles=true&everyone=true&guild_id=0")
+	if len(got) != 1 {
+		t.Fatalf("mentions: %+v", got)
+	}
+	msg, _ := got[0]["message"].(map[string]any)
+	if msg == nil || !strings.Contains(msg["content"].(string), "<@"+user.ID+">") {
+		t.Fatalf("mention message: %+v", msg)
+	}
+	if got[0]["id"] != msg["id"] {
+		t.Fatalf("wrapper id: %+v", got[0])
+	}
+	// Scoped to the right guild it survives, to a foreign one it empties.
+	if n := len(mentions("?guild_id=" + net.ID)); n != 1 {
+		t.Fatalf("scoped mentions: %d", n)
+	}
+	if n := len(mentions("?guild_id=999999")); n != 0 {
+		t.Fatalf("foreign-guild mentions: %d", n)
+	}
+}
+
 // TestTypingBothWays: draft/typing TAGMSGs flow both directions -
 // inbound TAGMSG (+typing=active) becomes a gateway TYPING_START, and
 // POST /channels/{id}/typing relays out as @+typing=active TAGMSG (a
