@@ -100,7 +100,10 @@ func main() {
 	}
 }
 
-var apiVersion = regexp.MustCompile(`^/api/v[0-9]+/`)
+var (
+	apiVersion    = regexp.MustCompile(`^/api/v[0-9]+/`)
+	integrityAttr = regexp.MustCompile(`\s+integrity="[^"]*"`)
+)
 
 // logRequests mirrors the bouncer's http access log format so client
 // debugging flows the same way on both sides.
@@ -154,6 +157,11 @@ func rewriteIndex(cacheDir, bouncerHost string) []byte {
 		{"NETWORKING_ENDPOINT", ""},
 	}
 	page := string(raw)
+	// The scraping archive stores beautified js/css (js-beautify for
+	// readability), so bytes never match the build-time SRI hashes in
+	// the integrity attributes - strip them, or the browser blocks
+	// every script and stylesheet.
+	page = integrityAttr.ReplaceAllString(page, "")
 	for _, rep := range replacements {
 		pattern := regexp.MustCompile(`(` + rep.key + `:\s*)('[^']*'|"[^"]*")`)
 		if !pattern.MatchString(page) {
