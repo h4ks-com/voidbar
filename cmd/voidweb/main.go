@@ -79,8 +79,12 @@ func main() {
 		proxy.ServeHTTP(w, r)
 	}))
 	mux.HandleFunc("/cdn-cgi/", func(w http.ResponseWriter, r *http.Request) {
-		// The scraped index still carries Discord's Cloudflare probe.
-		http.NotFound(w, r)
+		// The scraped page still carries Cloudflare's injected beacon
+		// (bot-management api.js). It cannot run here; answer with an
+		// empty script so the console stays clean instead of a
+		// MIME-refused 404.
+		w.Header().Set("Content-Type", "application/javascript")
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
