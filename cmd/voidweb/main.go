@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -24,6 +25,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +34,7 @@ func main() {
 	bouncer := flag.String("bouncer", "https://vb.doesnmlab.xyz", "bouncer base URL")
 	listen := flag.String("listen", "127.0.0.1:8090", "listen address")
 	channel := flag.String("channel", "stable", "discord-scraping release channel branch")
+	auth := flag.String("auth", os.Getenv("VOIDWEB_AUTH"), "bouncer credentials login:password (or set VOIDWEB_AUTH). Seeds the session token into the served page so the client boots straight into the logged-in path - the archive never captured the anonymous login screens, and their chunks exist nowhere in it")
 	at := flag.String("at", "2022-07-15", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head). Scrapes are only complete from 2022-07-09 on: the scraper learned to force-load lazy chunks 2022-04-17 and to survive individual chunk failures 2022-07-09 - earlier captures miss the i18n locale chunks the client cannot boot without")
 	flag.Parse()
 
@@ -70,8 +74,48 @@ func main() {
 		},
 	}
 
+	// The session token, fetched from the bouncer with -auth
+	// credentials and seeded into every served page (see serveIndex).
+	var session atomic.Value
+	tryLogin := func() {
+		if session.Load() != nil {
+			return
+		}
+		login, pass, ok := strings.Cut(*auth, ":")
+		if !ok || login == "" || pass == "" {
+			logger.Error("bad -auth", "want", "login:password")
+			return
+		}
+		body, err := json.Marshal(map[string]string{"login": login, "password": pass})
+		if err != nil {
+			return
+		}
+		resp, err := http.Post(base.String()+"/api/v9/auth/login", "application/json", bytes.NewReader(body))
+		if err != nil {
+			logger.Error("bouncer login", "err", err)
+			return
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Token string `json:"token"`
+		}
+		if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&out) == nil && out.Token != "" {
+			session.Store(out.Token)
+			logger.Info("bouncer login ok - token seeded into served pages")
+			return
+		}
+		logger.Error("bouncer login failed", "status", resp.StatusCode)
+	}
+	if *auth != "" {
+		tryLogin()
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("/assets/", &assetHandler{dir: filepath.Join(cacheDir, "assets")})
+	mux.Handle("/assets/", &assetHandler{
+		dir:    filepath.Join(cacheDir, "assets"),
+		logger: logger,
+		donors: loadDonors(cacheDir),
+	})
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The pinned client may speak an older API version (v8) while
 		// the bouncer only routes v9; the shapes it needs are the same.
@@ -87,9 +131,19 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if *auth != "" {
+			tryLogin()
+		}
+		page := index
+		if tok, _ := session.Load().(string); tok != "" {
+			// Before any client script: the archived client was
+			// captured logged-in, so only that boot path is complete.
+			seed := []byte(`<script>try{localStorage.setItem("token",` + strconv.Quote(tok) + `)}catch(e){}</script>`)
+			page = bytes.Replace(page, []byte("<body>"), append([]byte("<body>"), seed...), 1)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(index)
+		w.Write(page)
 	})
 
 	srv := &http.Server{
@@ -107,6 +161,8 @@ func main() {
 var (
 	apiVersion    = regexp.MustCompile(`^/api/v[0-9]+/`)
 	integrityAttr = regexp.MustCompile(`\s+integrity="[^"]*"`)
+
+	errorSink = `<script>(function(){function v(t){var d=document.getElementById("__voidweb_errs");if(!d){d=document.createElement("div");d.id="__voidweb_errs";d.style.display="none";(document.body||document.documentElement).appendChild(d)}if(d.textContent.length>16000)return;d.textContent+=t+"\n"}window.__verr=v;["log","info","warn","error","debug"].forEach(function(k){var o=console[k]?console[k].bind(console):function(){};console[k]=function(){try{v(k+": "+[].map.call(arguments,function(a){return typeof a==="object"?JSON.stringify(a).slice(0,300):String(a)}).join(" ").slice(0,300))}catch(e){}o.apply(null,arguments)}});var of=window.fetch;window.fetch=function(u,o){var us=(u&&u.url!==undefined)?u.url:String(u);v("fetch "+us);return of.apply(this,arguments).then(function(r){v("fetch "+us+" -> "+r.status);return r},function(e){v("fetch "+us+" ERR "+e);throw e})};var oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){var x=this;x.addEventListener("loadend",function(){v("xhr "+x.__u+" -> "+x.status)});return os.apply(this,arguments)};var OW=window.WebSocket;window.WebSocket=function(u,p){v("ws dial "+u);var w=p!==undefined?new OW(u,p):new OW(u);w.addEventListener("open",function(){v("ws OPEN "+u)});w.addEventListener("close",function(e){v("ws close "+u+" code="+e.code)});w.addEventListener("error",function(){v("ws ERR "+u)});return w};window.WebSocket.prototype=OW.prototype;Object.assign(window.WebSocket,OW);window.onerror=function(m,s,l,c){v("onerror: "+m+" @"+(s||"")+":"+l+":"+c);return false};window.addEventListener("unhandledrejection",function(e){v("rejection: "+e.reason)});v("sink alive")})();</script>`
 )
 
 // logRequests mirrors the bouncer's http access log format so client
@@ -166,6 +222,11 @@ func rewriteIndex(cacheDir, bouncerHost string) []byte {
 	// the integrity attributes - strip them, or the browser blocks
 	// every script and stylesheet.
 	page = integrityAttr.ReplaceAllString(page, "")
+	// A hidden in-DOM error sink: with the app failing silently (white
+	// screen, empty console) this keeps a trace reachable from a plain
+	// view-source/DOM dump, including in headless runs.
+	page = strings.Replace(page, "<body>", "<body>"+errorSink, 1)
+	page = strings.Replace(page, "</body>", `<script>window.__verr("tail: chunks="+((window.webpackChunkdiscord_app||[]).length)+" defined="+String(Object.keys(window).length))</script></body>`, 1)
 	for _, rep := range replacements {
 		pattern := regexp.MustCompile(`(` + rep.key + `:\s*)('[^']*'|"[^"]*")`)
 		if !pattern.MatchString(page) {
