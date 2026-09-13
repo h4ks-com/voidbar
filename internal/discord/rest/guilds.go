@@ -1016,18 +1016,33 @@ func (s *Server) handleRecentMentions(w http.ResponseWriter, r *http.Request, u 
 	}
 	onlyGuild := r.URL.Query().Get("guild_id")
 	before := r.URL.Query().Get("before")
+	guildOf := map[string]string{}
 	out := []map[string]any{}
 	for _, m := range s.net.MentionedMessages(u.ID, limit, before) {
-		if onlyGuild != "" && onlyGuild != "0" {
-			ch, err := s.net.ChannelByID(m.ChannelID)
-			if err != nil || ch.NetworkID != onlyGuild {
-				continue
+		guildID, cached := guildOf[m.ChannelID]
+		if !cached {
+			guildID = ""
+			if ch, err := s.net.ChannelByID(m.ChannelID); err == nil {
+				guildID = ch.NetworkID
 			}
+			guildOf[m.ChannelID] = guildID
+		}
+		if onlyGuild != "" && onlyGuild != "0" && guildID != onlyGuild {
+			continue
+		}
+		payload := s.historyMessagePayload(u, m, map[string]bool{})
+		// The mentions tab groups rows by guild via message.guild_id -
+		// without it every row is dropped client-side (empty tab).
+		if guildID != "" {
+			payload["guild_id"] = guildID
 		}
 		out = append(out, map[string]any{
 			"id":      m.ID,
-			"message": s.historyMessagePayload(u, m, map[string]bool{}),
+			"message": payload,
 			"roles":   []any{},
+			// Discord stamps the number of pings in the row; a mention
+			// relay counts as one.
+			"mention_count": 1,
 		})
 		if len(out) >= limit {
 			break

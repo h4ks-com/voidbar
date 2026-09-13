@@ -643,6 +643,14 @@ func TestRecentMentions(t *testing.T) {
 	if got[0]["id"] != msg["id"] {
 		t.Fatalf("wrapper id: %+v", got[0])
 	}
+	// The tab groups rows by guild via message.guild_id and shows the
+	// mention count - both must ride along.
+	if msg["guild_id"] != net.ID {
+		t.Fatalf("message.guild_id: %v", msg["guild_id"])
+	}
+	if got[0]["mention_count"] != float64(1) {
+		t.Fatalf("mention_count: %v", got[0]["mention_count"])
+	}
 	// Scoped to the right guild it survives, to a foreign one it empties.
 	if n := len(mentions("?guild_id=" + net.ID)); n != 2 {
 		t.Fatalf("scoped mentions: %d", n)
