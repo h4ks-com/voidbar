@@ -779,7 +779,7 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 			// on change only.
 			if msg := cErr.Error(); msg != c.lastLinkErr {
 				c.lastLinkErr = msg
-				m.clydeSay(userID, networkID, linkFailureNotice(net, cErr))
+				m.systemSay(userID, networkID, linkFailureNotice(net, cErr))
 			}
 			m.log.Warn("irc link down, retrying", "user", userID, "network", networkID, "err", cErr, "backoff", backoff.String(), "lived", lived.Round(time.Millisecond).String())
 			} else {
@@ -790,7 +790,12 @@ func (m *Manager) EnsureConn(userID, networkID string) {
 				return
 			case <-time.After(backoff):
 			}
-			if lived >= reconnectHealthyAfter {
+			// Reset only after a link that was actually ESTABLISHED and
+			// stayed up: `lived` includes the duration of a failed
+			// Connect() too, and a host that hangs for >=30s before
+			// failing would otherwise reset the backoff to base and
+			// loop the rejoin storm without pause.
+			if cErr == nil && lived >= reconnectHealthyAfter {
 				backoff = m.reconnectBackoff
 			} else if backoff *= 2; backoff > reconnectBackoffMax {
 				backoff = reconnectBackoffMax
@@ -887,7 +892,7 @@ func (m *Manager) pollAwayOnce(c *conn, client *girc.Client, next *int) {
 			channels = append(channels, mem.AutoJoin...)
 			continue
 		}
-		if ch, err := m.store.GetChannel(spec.ChannelID); err == nil {
+		if ch, err := m.store.GetChannel(spec.ChannelID); err == nil && ch.IRCName != storage.SystemIRCName {
 			channels = append(channels, ch.IRCName)
 		}
 	}
@@ -1017,7 +1022,7 @@ func (m *Manager) registerHandlers(c *conn) {
 		fromServer := !strings.Contains(e.Source.Name, "!")
 		target := e.Params[0]
 		if fromServer && !strings.HasPrefix(target, "#") && !strings.HasPrefix(target, "&") {
-			m.clydeSay(c.userID, c.networkID, "["+e.Source.Name+"] "+e.Last())
+			m.systemSay(c.userID, c.networkID, "["+e.Source.Name+"] "+e.Last())
 			return
 		}
 		msgid, _ := e.Tags.Get("msgid")
@@ -1713,6 +1718,51 @@ func (m *Manager) clydeSay(userID, networkID, text string) {
 	_ = m.store.TouchDMChannel(dm.ID)
 }
 
+// systemSay delivers a system notice into the network's server-notices
+// channel (storage.SystemIRCName). Link failures and server NOTICEs are
+// per-network chatter, not control commands - they must not flood the
+// Clyde control DM.
+func (m *Manager) systemSay(userID, networkID, text string) {
+	ch, err := m.store.EnsureSystemChannel(networkID, m.sf.New)
+	if err != nil {
+		m.log.Warn("system channel ensure failed", "err", err, "user", userID, "network", networkID)
+		return
+	}
+	ts := model.NowTimestamp()
+	msgID := m.sf.New()
+	m.gw.Dispatch(userID, "MESSAGE_CREATE", map[string]any{
+		"id":               msgID,
+		"channel_id":       ch.ID,
+		"content":          text,
+		"timestamp":        ts,
+		"edited_timestamp": nil,
+		"tts":              false,
+		"mention_everyone": false,
+		"mentions":         []any{},
+		"mention_roles":    []any{},
+		"mention_channels": []any{},
+		"attachments":      []any{},
+		"embeds":           []any{},
+		"reactions":        []any{},
+		"nonce":            nil,
+		"pinned":           false,
+		"type":             0,
+		"flags":            0,
+		"author":           model.DMPeer("Clyde"),
+	})
+	if err := m.store.AppendMessage(storage.BufferedMessage{
+		ID:         msgID,
+		ChannelID:  ch.ID,
+		AuthorID:   "irc:Clyde",
+		AuthorName: "Clyde",
+		Content:    text,
+		Timestamp:  ts,
+		Type:       0,
+	}); err != nil {
+		m.log.Warn("buffer append failed", "err", err, "channel", ch.ID, "msg_id", msgID)
+	}
+}
+
 func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, replyMsgid string) {
 	// Ergo's history service replays missed traffic on connect; the
 	// bouncer fetches its own via draft/chathistory, so the automatic
@@ -2165,6 +2215,9 @@ func (m *Manager) LiveNick(userID, networkID string) string {
 // and mostly advisory), so the gate is message-tags plus CLIENTTAGDENY.
 // Where denied or unsupported, typing is a silent no-op.
 func (m *Manager) SendTyping(userID, networkID, target string) error {
+	if target == storage.SystemIRCName {
+		return nil
+	}
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -2342,6 +2395,11 @@ func (m *Manager) PartChannel(userID, networkID, channel string) {
 // c.client under mu, so it is read under the same lock). msgRef identifies
 // the Discord message for echo/msgid correlation.
 func (m *Manager) SendChannel(userID, networkID, channel, content string, msgID, channelID, replyMsgid string) error {
+	// The server-notices channel has no IRC counterpart; a message typed
+	// there must not leak upstream as a NUL-named PRIVMSG.
+	if channel == storage.SystemIRCName {
+		return fmt.Errorf("server-notices is a read-only bouncer channel")
+	}
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client
@@ -3084,6 +3142,9 @@ func (m *Manager) DeleteMessage(userID, networkID, target, messageID, channelID 
 // without msgid) still update locally so the reacting client is not left
 // with a dead pill.
 func (m *Manager) SendReaction(userID, networkID, target, messageID, channelID, emoji string, remove bool) error {
+	if target == storage.SystemIRCName {
+		return fmt.Errorf("server-notices is a read-only bouncer channel")
+	}
 	m.mu.Lock()
 	c, ok := m.conns[key(userID, networkID)]
 	var client *girc.Client

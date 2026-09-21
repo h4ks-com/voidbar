@@ -1605,19 +1605,20 @@ func TestNoticeRelay(t *testing.T) {
 		t.Fatalf("server channel notice: %+v", byAuthor)
 	}
 
-	// The personal server notice went to the control thread, tagged.
-	dm := manager.clydeDM("u1")
-	if dm == nil {
-		t.Fatal("no control thread")
+	// The personal server notice went to the network's server-notices
+	// channel, tagged with the servername - not the Clyde control DM.
+	sys, err := store.EnsureSystemChannel("net1", func() string { return "sysid" })
+	if err != nil {
+		t.Fatal(err)
 	}
 	var sawNotice bool
-	for _, m := range store.ChannelMessages(dm.ID, "", "", 20) {
+	for _, m := range store.ChannelMessages(sys.ID, "", "", 20) {
 		if strings.Contains(m.Content, "[fake] net reboot at 03:00") {
 			sawNotice = true
 		}
 	}
 	if !sawNotice {
-		t.Fatalf("personal server notice not in control thread: %+v", store.ChannelMessages(dm.ID, "", "", 20))
+		t.Fatalf("personal server notice not in the system channel: %+v", store.ChannelMessages(sys.ID, "", "", 20))
 	}
 	// And no query thread was created for the bare servername.
 	dms, err := store.ListDMChannels("u1")

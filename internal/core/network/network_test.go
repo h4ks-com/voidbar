@@ -276,3 +276,80 @@ func TestLeaveKeepsNetworkWhileOtherMembersRemain(t *testing.T) {
 		t.Fatalf("user2 membership must survive: %v", err)
 	}
 }
+
+// TestReadStateEntriesCoverUnreadChannels: entries must exist for every
+// live channel, not only acked/mentioned ones - a missing entry reads as
+// "fully read" and unread DM badges never survive a gateway reconnect.
+func TestReadStateEntriesCoverUnreadChannels(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	u := &storage.User{ID: "user1", Username: "doesnm"}
+	if err := store.CreateUser(u); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := ircmanage.New(store, gw, logger, util.NewSnowflake(0, 0))
+	svc := NewService(store, gw, util.NewSnowflake(0, 0), manager, nil)
+
+	net, err := svc.Join("user1", "ircs://irc.libera.chat:6697/#go?name=Libera")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A DM with a buffered message, never acked, never mentioning.
+	dm, err := store.EnsureDMChannel("user1", net.ID, "pal", func() string { return "dm1" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendMessage(storage.BufferedMessage{
+		ID: "m1", ChannelID: dm.ID, AuthorID: "irc:pal", AuthorName: "pal",
+		Content: "hi", Timestamp: "2026-09-21T00:00:00+00:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A guild channel with a mention badge (stored row) for contrast.
+	ch, err := store.EnsureChannel(net.ID, "#go", func() string { return "ch1" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutReadState("user1", storage.ReadState{ChannelID: ch.ID, LastMessageID: "m0", MentionCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The system channel must carry an entry too (exists first - in
+	// production buildGuild creates it during GUILD_CREATE assembly).
+	sys, err := store.EnsureSystemChannel(net.ID, func() string { return "sys1" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := svc.ReadStateEntries("user1")
+	byID := map[string]map[string]any{}
+	for _, e := range entries {
+		m := e.(map[string]any)
+		byID[m["id"].(string)] = m
+	}
+	dmEntry, ok := byID[dm.ID]
+	if !ok {
+		t.Fatalf("unread DM has no read_state entry: %v", entries)
+	}
+	if dmEntry["last_message_id"] != nil {
+		t.Fatalf("never-acked DM entry must carry null last_message_id: %v", dmEntry)
+	}
+	if dmEntry["mention_count"] != 0 {
+		t.Fatalf("plain DM entry mention_count: %v", dmEntry)
+	}
+	chEntry, ok := byID[ch.ID]
+	if !ok {
+		t.Fatalf("guild channel entry missing: %v", entries)
+	}
+	if chEntry["last_message_id"] != "m0" || chEntry["mention_count"] != 2 {
+		t.Fatalf("stored row must pass through: %v", chEntry)
+	}
+	// The system channel must carry an entry too.
+	if _, ok := byID[sys.ID]; !ok {
+		t.Fatalf("system channel has no read_state entry: %v", entries)
+	}
+}

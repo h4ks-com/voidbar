@@ -190,8 +190,12 @@ func TestGatewayGuildCreateFlow(t *testing.T) {
 		t.Fatalf("guild name: %v", d["name"])
 	}
 	chans := d["channels"].([]any)
-	if len(chans) != 2 {
+	// server-notices rides at position 0, then the joined IRC channels.
+	if len(chans) != 3 {
 		t.Fatalf("channels: %v", chans)
+	}
+	if chans[0].(map[string]any)["name"] != storage.SystemChanName {
+		t.Fatalf("first channel must be the system channel: %v", chans[0])
 	}
 	members := d["members"].([]any)
 	if len(members) != 2 {

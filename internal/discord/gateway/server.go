@@ -283,6 +283,21 @@ func (s *Server) writePump(conn *websocket.Conn, ch <-chan writeRequest, done <-
 	}
 }
 
+// trySend queues one write without ever blocking. A dead writePump
+// leaves nobody to drain ch; a blocking send here would wedge the read
+// loop forever (the deferred cleanup never runs, leaking the goroutine
+// and the socket). Dropping is correct - if the pump is gone or 256
+// frames behind, the connection is dead either way.
+func trySend(ch chan writeRequest, req writeRequest) {
+	select {
+	case ch <- req:
+	default:
+		if req.done != nil {
+			close(req.done)
+		}
+	}
+}
+
 func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 	var sess *Session
 
@@ -293,7 +308,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 	if err != nil {
 		return
 	}
-	ch <- writeRequest{frame: hello}
+	trySend(ch, writeRequest{frame: hello})
 
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
@@ -365,7 +380,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 			old := s.findSession(d.SessionID)
 			if old == nil || old.UserID != user.ID {
 				frame, _ := json.Marshal(opFrame{Op: OpInvalidSession, D: json.RawMessage("false")})
-				ch <- writeRequest{frame: frame}
+				trySend(ch, writeRequest{frame: frame})
 				continue
 			}
 			if old.attach(ch) {
@@ -381,7 +396,7 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 			sess = old
 		case OpHeartbeat:
 			ack, _ := json.Marshal(opFrame{Op: OpHeartbeatACK})
-			ch <- writeRequest{frame: ack}
+			trySend(ch, writeRequest{frame: ack})
 		case OpPresenceUpdate, OpVoiceStateUpdate:
 			if sess == nil {
 				s.closeWS(conn, CloseNotAuthenticated, "not authenticated")

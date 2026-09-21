@@ -87,6 +87,56 @@ func dmOwnerKey(owner, netID, nick string) []byte {
 }
 func dmOwnerPrefix(owner string) []byte { return []byte("dmown/" + owner + "/") }
 
+// The reserved IRC name of a network's system channel. NUL can never
+// appear in a wire IRC channel name, so the registry entry can never
+// collide with a real joined channel; server notices land there instead
+// of flooding the control DM.
+const (
+	SystemIRCName  = "\x00system"
+	SystemChanName = "server-notices"
+)
+
+// EnsureSystemChannel returns (creating if needed) the network's
+// server-notices channel: an ordinary buffered text channel that no IRC
+// traffic ever reaches - only bouncer-authored notices.
+func (s *Storage) EnsureSystemChannel(netID string, newID func() string) (*Channel, error) {
+	var ch Channel
+	err := s.db.Update(func(txn *badger.Txn) error {
+		idx, err := txn.Get(chanNetKey(netID, SystemIRCName))
+		if err == nil {
+			return idx.Value(func(id []byte) error {
+				item, err := txn.Get(chanKey(string(id)))
+				if err != nil {
+					return err
+				}
+				return item.Value(func(val []byte) error { return json.Unmarshal(val, &ch) })
+			})
+		}
+		if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		ch = Channel{
+			ID:        newID(),
+			NetworkID: netID,
+			IRCName:   SystemIRCName,
+			Name:      SystemChanName,
+			CreatedAt: time.Now().UTC(),
+		}
+		b, err := json.Marshal(ch)
+		if err != nil {
+			return err
+		}
+		if err := txn.Set(chanKey(ch.ID), b); err != nil {
+			return err
+		}
+		return txn.Set(chanNetKey(netID, SystemIRCName), []byte(ch.ID))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
+
 // EnsureChannel registers the network's IRC channel and returns its stable,
 // URL-safe snowflake id. Idempotent by (network, irc name).
 func (s *Storage) EnsureChannel(netID, ircName string, newID func() string) (*Channel, error) {

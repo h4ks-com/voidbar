@@ -1910,11 +1910,16 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	if err != nil {
 		chans = nil
 	}
-	channels := make([]any, 0, len(chans)+len(net.Categories))
-	for i, ch := range chans {
-		channels = append(channels, s.channelPayload(net.ID, ch, i))
+	// The server-notices channel rides at the top: bouncer notices
+	// (link failures, server NOTICEs) land there instead of the control
+	// DM, and it must exist before the first notice, not on demand.
+	channels := make([]any, 0, len(chans)+len(net.Categories)+1)
+	if sys, err := s.store.EnsureSystemChannel(net.ID, s.sf.New); err == nil {
+		channels = append(channels, s.channelPayload(net.ID, sys, 0))
 	}
-	_ = channels
+	for i, ch := range chans {
+		channels = append(channels, s.channelPayload(net.ID, ch, i+1))
+	}
 	// Local grouping categories ride along as type 4 channels; the client
 	// groups the sidebar by parent_id.
 	for i := range net.Categories {
@@ -2235,22 +2240,54 @@ func (s *Service) OnMentionRelayed(userID, channelID string) {
 // must serialize as null, not "" - Android's Long.parseLong on an empty
 // string crashes the whole client (gateway reconnect loop).
 func (s *Service) ReadStateEntries(userID string) []any {
+	// Stored rows exist only where an ack or a self-mention happened.
+	// Discord clients treat a channel with NO read_state entry as fully
+	// read, so unread DMs and channels that went unread while the client
+	// was offline would lose their badges on every gateway reconnect.
+	// Emit an entry for EVERY live channel instead, stored position or
+	// not: last_message_id is the ack marker (null = never acked).
 	rows, err := s.store.ReadStates(userID)
 	if err != nil {
-		return nil
+		rows = nil
 	}
-	entries := make([]any, 0, len(rows))
+	byChannel := make(map[string]storage.ReadState, len(rows))
 	for _, rs := range rows {
+		byChannel[rs.ChannelID] = rs
+	}
+	entries := make([]any, 0, len(rows)+8)
+	seen := make(map[string]bool, cap(entries))
+	emit := func(channelID string) {
+		if channelID == "" || seen[channelID] {
+			return
+		}
+		seen[channelID] = true
+		rs := byChannel[channelID]
 		var lastID any
 		if rs.LastMessageID != "" {
 			lastID = rs.LastMessageID
 		}
 		entries = append(entries, map[string]any{
-			"id":              rs.ChannelID,
+			"id":              channelID,
 			"last_message_id": lastID,
 			"mention_count":   rs.MentionCount,
 			"version":         1,
 		})
+	}
+	if dms, err := s.store.ListDMChannels(userID); err == nil {
+		for _, dm := range dms {
+			emit(dm.ID)
+		}
+	}
+	if memberships, err := s.store.ListMembershipsForUser(userID); err == nil {
+		for _, mem := range memberships {
+			chans, err := s.store.ListChannelsByNetwork(mem.NetworkID)
+			if err != nil {
+				continue
+			}
+			for _, ch := range chans {
+				emit(ch.ID)
+			}
+		}
 	}
 	return entries
 }

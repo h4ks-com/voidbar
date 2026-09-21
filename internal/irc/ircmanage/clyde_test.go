@@ -70,9 +70,10 @@ func TestClydeDMForksMigrate(t *testing.T) {
 	}
 }
 
-// TestLinkFailureClydeNotice verifies upstream failures surface as a Clyde
-// system DM: dial-refused on a dead port yields exactly one notice for a
-// run of identical retries (dedupe), re-armed only by a later change.
+// TestLinkFailureClydeNotice verifies upstream failures surface in the
+// network's server-notices channel: dial-refused on a dead port yields
+// exactly one notice for a run of identical retries (dedupe), re-armed
+// only by a later change.
 func TestLinkFailureClydeNotice(t *testing.T) {
 	// Grab a port then close the listener: dial-refused, immediately.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -107,18 +108,13 @@ func TestLinkFailureClydeNotice(t *testing.T) {
 
 	notices := func() []string {
 		var out []string
-		dms, err := store.ListDMChannels("u1")
+		sys, err := store.EnsureSystemChannel("net1", func() string { return "sysid" })
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, dm := range dms {
-			if dm.Nick != "Clyde" {
-				continue
-			}
-			for _, m := range store.ChannelMessages(dm.ID, "", "", 50) {
-				if strings.Contains(m.Content, "Connection to ") {
-					out = append(out, m.Content)
-				}
+		for _, m := range store.ChannelMessages(sys.ID, "", "", 50) {
+			if strings.Contains(m.Content, "Connection to ") {
+				out = append(out, m.Content)
 			}
 		}
 		return out
@@ -131,7 +127,7 @@ func TestLinkFailureClydeNotice(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no clyde notice for link failure")
+			t.Fatal("no system-channel notice for link failure")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
