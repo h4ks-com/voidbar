@@ -483,6 +483,51 @@ func (s *Service) guildUpdatePayload(m *storage.Membership, net *storage.Network
 			"guild_id": net.ID,
 		},
 		"unavailable": !s.linkUp(m.UserID, net.ID),
+		// See buildGuild: 2023+ web clients read updates through the
+		// properties nest too (GUILD_UPDATE falls back to the cached
+		// record when it is missing, silently dropping our changes).
+		"properties": s.guildProperties(net),
+	}
+}
+
+// guildProperties is the 2023+ "guild data modes" properties nest: web
+// clients read every scalar through it, older clients ignore it. Values
+// mirror the flat fields of buildGuild / guildUpdatePayload.
+func (s *Service) guildProperties(net *storage.Network) map[string]any {
+	return map[string]any{
+		"id":                            net.ID,
+		"name":                          net.Name,
+		"description":                   nil,
+		"icon":                          GuildIconValue(net),
+		"splash":                        nil,
+		"banner":                        nil,
+		"home_header":                   nil,
+		"features":                      []any{},
+		"preferred_locale":              "en-US",
+		"owner_id":                      model.ClydeID,
+		"application_id":                nil,
+		"afk_channel_id":                nil,
+		"afk_timeout":                   300,
+		"system_channel_id":             nil,
+		"rules_channel_id":              nil,
+		"safety_alerts_channel_id":      nil,
+		"public_updates_channel_id":     nil,
+		"verification_level":            0,
+		"explicit_content_filter":       0,
+		"default_message_notifications": 0,
+		"mfa_level":                     0,
+		"vanity_url_code":               nil,
+		"premium_tier":                  0,
+		"premium_progress_bar_enabled":  false,
+		"system_channel_flags":          0,
+		"discovery_splash":              nil,
+		"max_stage_video_channel_users": -1,
+		"max_video_channel_users":       -1,
+		"max_members":                   -1,
+		"nsfw_level":                    0,
+		"hub_type":                      nil,
+		"latest_onboarding_question_id": nil,
+		"inventory_settings":            nil,
 	}
 }
 
@@ -2027,6 +2072,13 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// only where the upstream can anchor them (MSGREFTYPES msgid).
 	roles := append([]any{model.EveryoneRolePayload(net.ID, s.manager != nil && s.manager.ReactionsSupported(m.UserID, net.ID))}, model.IrcRolePayloads()...)
 
+	// 2023+ web clients (guild data modes) read guild fields through a
+	// `properties` sub-object with NO null guard (e.properties.name throws
+	// on the flat shape, resetting the socket from CONNECTION_OPEN); older
+	// and Android clients read the flat fields and ignore the nest. Both
+	// shapes carry the same values so every reader stays on its own path.
+	properties := s.guildProperties(net)
+
 	return map[string]any{
 		"id":                            net.ID,
 		"name":                          net.Name,
@@ -2065,6 +2117,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 			"guild_id": net.ID,
 		},
 		"unavailable": !s.linkUp(m.UserID, net.ID),
+		"properties":                    properties,
 	}
 }
 
