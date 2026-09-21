@@ -490,6 +490,18 @@ func (s *Service) guildUpdatePayload(m *storage.Membership, net *storage.Network
 	}
 }
 
+// presencePayload shapes one presence entry. activities/client_status are
+// REQUIRED by 2023+ web clients: the GUILD_CREATE handler reads
+// presence.activities.length unguarded and resets the socket otherwise.
+func presencePayload(userID, status string) map[string]any {
+	return map[string]any{
+		"user":          map[string]any{"id": userID},
+		"status":        status,
+		"activities":    []any{},
+		"client_status": map[string]any{},
+	}
+}
+
 // guildProperties is the 2023+ "guild data modes" properties nest: web
 // clients read every scalar through it, older clients ignore it. Values
 // mirror the flat fields of buildGuild / guildUpdatePayload.
@@ -2032,10 +2044,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	if s.manager != nil {
 		for _, mem := range all {
 			if st, ok := s.manager.SelfPresence(mem.UserID, net.ID); ok {
-				presences = append(presences, map[string]any{
-					"user":   map[string]any{"id": mem.UserID},
-					"status": st,
-				})
+				presences = append(presences, presencePayload(mem.UserID, st))
 			}
 		}
 	}
@@ -2059,10 +2068,7 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 			"roles":     ircRoleIDsFor(cm.Mode),
 			"joined_at": m.JoinedAt.Format(time.RFC3339),
 		})
-		presences = append(presences, map[string]any{
-			"user":   map[string]any{"id": uid},
-			"status": presenceStatus(cm.Away),
-		})
+		presences = append(presences, presencePayload(uid, presenceStatus(cm.Away)))
 	}
 
 	// Every Discord guild has an @everyone role whose id equals the guild id;
