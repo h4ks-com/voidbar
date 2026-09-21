@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -537,8 +538,12 @@ func (h *assetHandler) buildChunkIDs() {
 
 // heal finds a donor commit for one missing asset and materializes
 // the file. Donor answers are memoized: a hit avoids the API lookup
-// forever after, a miss ("-") avoids re-probing names the archive
-// never captured anywhere.
+// heal sources a missing asset from the archive. The configured channel
+// branch is probed first, then the sibling release branches: a captured
+// file is byte-exact anywhere (the name is a content hash), and plenty
+// of assets (the default-avatar sprite among them) were only ever
+// scraped on ptb or canary. donors.json memoizes the verdict so probes
+// cost one API round per name, ever; "-" means nowhere on ANY branch.
 func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -549,31 +554,56 @@ func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 		if sha == "-" {
 			return false
 		}
+		if strings.HasPrefix(sha, "!") {
+			// A previously failed lookup (rate limit, network):
+			// skip probing until its TTL expires instead of burning
+			// the API budget on every page load.
+			if ts, err := strconv.ParseInt(sha[1:], 10, 64); err == nil && time.Now().Unix() < ts {
+				return false
+			}
+			delete(h.donors, name)
+		} else {
+			return fetchRaw(ctx, sha, name, dst)
+		}
+	}
+	for _, branch := range h.branches(h.channel) {
+		sha, err := findDonor(ctx, branch, name)
+		if err != nil {
+			// Lookup failed (rate limit, network): memoize a
+			// short-lived miss so bursts of requests do not spiral
+			// the quota, then retry after the TTL.
+			h.donors[name] = "!" + strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
+			h.persistDonors()
+			h.logger.Warn("donor lookup failed", "asset", name, "branch", branch, "err", err)
+			return false
+		}
+		if sha == "" {
+			continue
+		}
+		h.donors[name] = sha
+		h.persistDonors()
 		if fetchRaw(ctx, sha, name, dst) {
+			h.logger.Info("healed asset from archive", "asset", name, "branch", branch, "donor", sha[:8])
 			return true
 		}
 		return false
 	}
-	sha, err := findDonor(ctx, h.channel, name)
-	if err != nil {
-		// Lookup failed (rate limit, network): do not memoize - the
-		// next request retries.
-		h.logger.Warn("donor lookup failed", "asset", name, "err", err)
-		return false
-	}
-	if sha == "" {
-		h.donors[name] = "-"
-		h.logger.Warn("asset nowhere in the archive", "asset", name)
-		h.persistDonors()
-		return false
-	}
-	h.donors[name] = sha
+	h.donors[name] = "-"
+	h.logger.Warn("asset nowhere in the archive", "asset", name)
 	h.persistDonors()
-	if fetchRaw(ctx, sha, name, dst) {
-		h.logger.Info("healed asset from archive", "asset", name, "donor", sha[:8])
-		return true
-	}
 	return false
+}
+
+// branches lists the probe order for donor lookups: the configured
+// channel first, then the sibling release branches.
+func (h *assetHandler) branches(channel string) []string {
+	all := []string{channel}
+	for _, b := range []string{"stable", "ptb", "canary"} {
+		if b != channel {
+			all = append(all, b)
+		}
+	}
+	return all
 }
 
 // findDonor asks the archive's history for any commit that captured
@@ -639,12 +669,24 @@ func (h *assetHandler) persistDonors() {
 	_ = os.WriteFile(filepath.Join(filepath.Dir(h.dir), "donors.json"), raw, 0o644)
 }
 
-// loadDonors reads the memo written by earlier runs.
+// loadDonors reads the memo written by earlier runs. A v2 marker tracks
+// the switch to cross-branch probing: "-" verdicts written by the
+// stable-only era are dropped once so the sibling branches get their
+// one probe too.
 func loadDonors(cacheDir string) map[string]string {
 	donors := map[string]string{}
 	raw, err := os.ReadFile(filepath.Join(cacheDir, "donors.json"))
 	if err == nil {
 		_ = json.Unmarshal(raw, &donors)
+	}
+	marker := filepath.Join(cacheDir, "donors-v2")
+	if _, err := os.Stat(marker); err != nil {
+		for k, v := range donors {
+			if v == "-" {
+				delete(donors, k)
+			}
+		}
+		_ = os.WriteFile(marker, []byte("cross-branch\n"), 0o644)
 	}
 	return donors
 }

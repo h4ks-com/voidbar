@@ -115,7 +115,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 	gw.SetSettingsProvider(netSvc.UserSettings)
 	gw.SetNotesProvider(netSvc.UserNotes)
 	gw.SetReadStateProvider(netSvc.ReadStateEntries)
-	gw.SetMemberListProvider(netSvc.MemberListPayload)
+	gw.SetMemberListProvider(netSvc.MemberListPayload, netSvc.GuildChannelsFor)
 	gw.SetMemberChunkProvider(netSvc.MemberChunkPayload)
 	manager.SetOccupancyNotifier(netSvc.RefreshOccupancy)
 	manager.SetMemberNotifier(netSvc.RefreshMember)

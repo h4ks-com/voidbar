@@ -32,6 +32,7 @@ type Server struct {
 	dmChannelsForUser  func(userID string) []any
 	usersForUser       func(userID string) []any
 	memberListForUser  func(userID, guildID, channelID string) any
+	guildChannelsFor   func(userID, guildID string) []string
 	memberChunkForUser func(userID, guildID, nonce string, userIDs []string) any
 
 	mu       sync.RWMutex
@@ -102,9 +103,13 @@ func (s *Server) userNotes(userID string) map[string]string {
 }
 
 // SetMemberListProvider installs the GUILD_MEMBER_LIST_UPDATE hook serving
-// op 14 (lazy request) — the client's channel member list ask.
-func (s *Server) SetMemberListProvider(memberListForUser func(userID, guildID, channelID string) any) {
+// op 14 (lazy request) - the client's channel member list ask - plus the
+// guild's channel id list: 2023+ web clients key the sidebar by the open
+// channel's member_list_id without asking for it, so the guild-wide
+// answer also fans per-channel SYNCs.
+func (s *Server) SetMemberListProvider(memberListForUser func(userID, guildID, channelID string) any, guildChannelsFor func(userID, guildID string) []string) {
 	s.memberListForUser = memberListForUser
+	s.guildChannelsFor = guildChannelsFor
 }
 
 // SetMemberChunkProvider installs the GUILD_MEMBERS_CHUNK hook serving
@@ -515,6 +520,22 @@ func (s *Server) handleConn(conn *websocket.Conn, ch chan writeRequest) {
 				if payload := s.memberListForUser(sess.UserID, guildID, ""); payload != nil {
 					if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
 						s.log.Error("member list dispatch failed", "err", err)
+					}
+				}
+				// 2023+ web clients key the sidebar by the OPEN
+				// CHANNEL's member_list_id and never ask for it
+				// explicitly - fan per-channel SYNCs for every channel
+				// so whichever id the client holds gets data (the
+				// client keeps only its active list).
+				if s.guildChannelsFor != nil {
+					for _, chID := range s.guildChannelsFor(sess.UserID, guildID) {
+						payload := s.memberListForUser(sess.UserID, guildID, chID)
+						if payload == nil {
+							continue
+						}
+						if _, err := sess.dispatch("GUILD_MEMBER_LIST_UPDATE", payload, true); err != nil {
+							s.log.Error("member list dispatch failed", "err", err, "channel", chID)
+						}
 					}
 				}
 				continue

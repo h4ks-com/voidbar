@@ -36,6 +36,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8090", "listen address")
 	channel := flag.String("channel", "stable", "discord-scraping release channel branch")
 	auth := flag.String("auth", os.Getenv("VOIDWEB_AUTH"), "bouncer credentials login:password (or set VOIDWEB_AUTH). Seeds the session token into the served page so the client boots straight into the logged-in path - the archive never captured the anonymous login screens, and their chunks exist nowhere in it")
+	autologin := flag.String("autologin", os.Getenv("VOIDWEB_AUTOLOGIN"), "login:password to auto-fill the rendered login form with (React-native value setters + submit); this build keeps its session in its own storage, so filling the form is the reliable login path")
 	at := flag.String("at", "", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head - the most complete scrapes). Scrapes are only trustworthy from 2022-07-09 on: the scraper learned to force-load lazy chunks 2022-04-17 and to survive individual chunk failures 2022-07-09 - earlier captures miss chunks the client cannot boot without")
 	flag.Parse()
 
@@ -79,7 +80,7 @@ func main() {
 	for i, id := range ghosts {
 		ids[i] = strconv.Quote(id)
 	}
-	seed := `<script>(function(){var f=function(e){e.exports=new Proxy(function(){return null},{get:function(t,k){if(k==="__esModule")return!0;if(k===Symbol.toPrimitive)return function(){return 0};return function(){return null}}})};var m={950001:function(e){e.exports="data:,"}};[` + strings.Join(ids, ",") + `].forEach(function(i){m[i]=f});(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[999999001],m])})();</script>`
+	seed := `<script>(function(){var f=function(e){e.exports=new Proxy(function(){return null},{get:function(t,k){if(k==="__esModule")return!0;if(k===Symbol.toPrimitive)return function(h){return h==="string"?"data:,":0};if(k==="toString")return function(){return "data:,"};if(k==="valueOf")return function(){return 0};return function(){return null}}})};var m={950001:function(e){e.exports="data:,"}};[` + strings.Join(ids, ",") + `].forEach(function(i){m[i]=f});(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[999999001],m])})();</script>`
 	index = bytes.Replace(index, []byte("<body>"), append([]byte("<body>"), []byte(seed)...), 1)
 	if len(ghosts) > 0 {
 		logger.Info("ghost modules stubbed", "count", len(ghosts))
@@ -162,6 +163,14 @@ func main() {
 			// captured logged-in, so only that boot path is complete.
 			seed := []byte(`<script>try{localStorage.setItem("token",` + strconv.Quote(tok) + `)}catch(e){}</script>`)
 			page = bytes.Replace(page, []byte("<body>"), append([]byte("<body>"), seed...), 1)
+		}
+		if login, pass, ok := strings.Cut(*autologin, ":"); ok && login != "" && pass != "" {
+			// Auto-login: fill the rendered login form once it mounts.
+			// React controlled inputs need the native value setter plus
+			// an input event; the submit button is found by position
+			// (last button of the auth box) as labels are localized.
+			seed := []byte(`<script>(function(){var L=` + strconv.Quote(login) + `,P=` + strconv.Quote(pass) + `;function sv(el,v){var d=Object.getOwnPropertyDescriptor(el.__proto__,"value").set;d.call(el,v);el.dispatchEvent(new Event("input",{bubbles:true}))}var n=0,t=setInterval(function(){try{var em=document.querySelector('input[name="email"]'),pw=document.querySelector('input[type="password"]');if(!em||!pw||!pw.offsetParent){if(++n>250)clearInterval(t);return}sv(em,L);sv(pw,P);var btn=document.querySelector('button[type="submit"]');if(!btn){var bs=Array.prototype.slice.call(document.querySelectorAll("button"));btn=bs[bs.length-1]}if(btn){btn.click();clearInterval(t);window.__verr&&window.__verr("autologin: submitted")}}catch(e){if(window.__verr)window.__verr("autologin ERR: "+e.message);clearInterval(t)}},200)})()</script>`)
+			page = bytes.Replace(page, []byte("</body>"), append(seed, []byte("</body>")...), 1)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

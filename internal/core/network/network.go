@@ -1433,6 +1433,23 @@ func (s *Service) lastMessageIDOf(channelID string) any {
 	return msgs[0].ID
 }
 
+// GuildChannelsFor lists the guild's channel ids (the gateway's op 14
+// guild-wide answer fans per-channel member-list SYNCs with them).
+func (s *Service) GuildChannelsFor(userID, guildID string) []string {
+	chans, err := s.store.ListChannelsByNetwork(guildID)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(chans))
+	for _, ch := range chans {
+		if ch.IRCName == storage.SystemIRCName {
+			continue
+		}
+		out = append(out, ch.ID)
+	}
+	return out
+}
+
 // MemberListPayload answers op 14 (lazy request) with a
 // GUILD_MEMBER_LIST_UPDATE SYNC for one channel (or the guild-wide
 // everyone-list when channelID is empty). Members come from the upstream
