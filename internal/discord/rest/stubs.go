@@ -61,6 +61,10 @@ func (s *Server) registerStubs(mux *http.ServeMux) {
 	// (and the profile screen spins). All are "nothing to show" shapes.
 	mux.HandleFunc("GET /api/v9/users/{id}/profile", s.requireAuth(s.handleUserProfile))
 	mux.HandleFunc("GET /api/v9/users/@me/survey", s.requireAuth(s.handleNull))
+	// The web client renders a promotions popover from this probe; a 404
+	// leaves it half-initialized - it cannot be dismissed and its close
+	// handler crashes the app into a full remount (boot screen loop).
+	mux.HandleFunc("GET /api/v9/outbound-promotions", s.requireAuth(s.handleEmptyArray))
 	mux.HandleFunc("POST /api/v9/users/@me/devices", s.requireAuth(s.handleNoContentAuthed))
 	// The sticker picker probes this on open; 404 read as a network
 	// error. The documented shape is an object with a sticker_packs

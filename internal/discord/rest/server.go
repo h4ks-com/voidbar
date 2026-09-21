@@ -61,6 +61,10 @@ func New(a *auth.Service, cfg *config.Config, log *slog.Logger, gatewayWS *gatew
 	mux.HandleFunc("GET /api/v9/admin/users", s.handleAdminListUsers)
 	mux.HandleFunc("GET /avatars/{user}/{hash}", s.handleAvatarFile)
 	mux.HandleFunc("HEAD /avatars/{user}/{hash}", s.handleAvatarFile)
+	// Default avatar discs (users without an avatar hash) - the client
+	// fetches them from the CDN host, which resolves to this bouncer.
+	mux.HandleFunc("GET /embed/avatars/{n}", s.handleDefaultAvatar)
+	mux.HandleFunc("HEAD /embed/avatars/{n}", s.handleDefaultAvatar)
 	// The client's IconUtils also emits the API-style avatar form
 	// /users/{id}/avatars/{hash}.jpg (its empty-cdn-prefix branch);
 	// serve it from the same store so every URL shape it can build
