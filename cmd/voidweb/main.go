@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -35,7 +36,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8090", "listen address")
 	channel := flag.String("channel", "stable", "discord-scraping release channel branch")
 	auth := flag.String("auth", os.Getenv("VOIDWEB_AUTH"), "bouncer credentials login:password (or set VOIDWEB_AUTH). Seeds the session token into the served page so the client boots straight into the logged-in path - the archive never captured the anonymous login screens, and their chunks exist nowhere in it")
-	at := flag.String("at", "2022-07-15", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head). Scrapes are only complete from 2022-07-09 on: the scraper learned to force-load lazy chunks 2022-04-17 and to survive individual chunk failures 2022-07-09 - earlier captures miss the i18n locale chunks the client cannot boot without")
+	at := flag.String("at", "", "pin the client build to the last scrape commit on or before this date (YYYY-MM-DD; empty tracks the branch head - the most complete scrapes). Scrapes are only trustworthy from 2022-07-09 on: the scraper learned to force-load lazy chunks 2022-04-17 and to survive individual chunk failures 2022-07-09 - earlier captures miss chunks the client cannot boot without")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -65,6 +66,24 @@ func main() {
 	logger.Info("client synced", "commit", sha, "build", build, "version_hash", hash)
 
 	index := rewriteIndex(cacheDir, base.Host)
+	// Modules referenced by the captured bundles but defined nowhere
+	// in them live in chunks no scrape ever captured. Their absent
+	// factories crash the first synchronous require of the boot path;
+	// pre-registering proxy modules (every export is a component that
+	// renders nothing) keeps the app alive with those features
+	// blanked out instead. 950001 is the asset-miss stub (see
+	// assetLoaderMiss in sync.go): a data-URL string in place of any
+	// asset module the archive's tables never mapped.
+	ghosts := ghostModules(filepath.Join(cacheDir, "assets"))
+	ids := make([]string, len(ghosts))
+	for i, id := range ghosts {
+		ids[i] = strconv.Quote(id)
+	}
+	seed := `<script>(function(){var f=function(e){e.exports=new Proxy(function(){return null},{get:function(t,k){if(k==="__esModule")return!0;if(k===Symbol.toPrimitive)return function(){return 0};return function(){return null}}})};var m={950001:function(e){e.exports="data:,"}};[` + strings.Join(ids, ",") + `].forEach(function(i){m[i]=f});(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[999999001],m])})();</script>`
+	index = bytes.Replace(index, []byte("<body>"), append([]byte("<body>"), []byte(seed)...), 1)
+	if len(ghosts) > 0 {
+		logger.Info("ghost modules stubbed", "count", len(ghosts))
+	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -110,13 +129,15 @@ func main() {
 		tryLogin()
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/assets/", &assetHandler{
+	assets := &assetHandler{
 		dir:     filepath.Join(cacheDir, "assets"),
 		channel: *channel,
 		logger:  logger,
 		donors:  loadDonors(cacheDir),
-	})
+	}
+	assets.buildChunkIDs()
+	mux := http.NewServeMux()
+	mux.Handle("/assets/", assets)
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The pinned client may speak an older API version (v8) while
 		// the bouncer only routes v9; the shapes it needs are the same.
@@ -163,7 +184,7 @@ var (
 	apiVersion    = regexp.MustCompile(`^/api/v[0-9]+/`)
 	integrityAttr = regexp.MustCompile(`\s+integrity="[^"]*"`)
 
-	errorSink = `<script>(function(){function v(t){var d=document.getElementById("__voidweb_errs");if(!d){d=document.createElement("div");d.id="__voidweb_errs";d.style.display="none";(document.body||document.documentElement).appendChild(d)}if(d.textContent.length>16000)return;d.textContent+=t+"\n"}window.__verr=v;["log","info","warn","error","debug"].forEach(function(k){var o=console[k]?console[k].bind(console):function(){};console[k]=function(){try{v(k+": "+[].map.call(arguments,function(a){return typeof a==="object"?JSON.stringify(a).slice(0,300):String(a)}).join(" ").slice(0,300))}catch(e){}o.apply(null,arguments)}});var of=window.fetch;window.fetch=function(u,o){var us=(u&&u.url!==undefined)?u.url:String(u);v("fetch "+us);return of.apply(this,arguments).then(function(r){v("fetch "+us+" -> "+r.status);return r},function(e){v("fetch "+us+" ERR "+e);throw e})};var oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){var x=this;x.addEventListener("loadend",function(){v("xhr "+x.__u+" -> "+x.status)});return os.apply(this,arguments)};var OW=window.WebSocket;window.WebSocket=function(u,p){v("ws dial "+u);var w=p!==undefined?new OW(u,p):new OW(u);w.addEventListener("open",function(){v("ws OPEN "+u)});w.addEventListener("close",function(e){v("ws close "+u+" code="+e.code)});w.addEventListener("error",function(){v("ws ERR "+u)});return w};window.WebSocket.prototype=OW.prototype;Object.assign(window.WebSocket,OW);window.onerror=function(m,s,l,c){v("onerror: "+m+" @"+(s||"")+":"+l+":"+c);return false};window.addEventListener("unhandledrejection",function(e){v("rejection: "+e.reason)});v("sink alive")})();</script>`
+	errorSink = `<script>(function(){function v(t){var d=document.getElementById("__voidweb_errs");if(!d){d=document.createElement("div");d.id="__voidweb_errs";d.style.display="none";(document.body||document.documentElement).appendChild(d)}if(d.textContent.length>16000)return;d.textContent+=t+"\n"}window.__verr=v;["log","info","warn","error","debug"].forEach(function(k){var o=console[k]?console[k].bind(console):function(){};console[k]=function(){try{v(k+": "+[].map.call(arguments,function(a){if(a instanceof Error)return a.name+": "+a.message+"\n"+String(a.stack).slice(0,900);if(typeof a==="object")return JSON.stringify(a).slice(0,300);return String(a)}).join(" ").slice(0,1000))}catch(e){}o.apply(null,arguments)}});var of=window.fetch;window.fetch=function(u,o){var us=(u&&u.url!==undefined)?u.url:String(u);v("fetch "+us);return of.apply(this,arguments).then(function(r){v("fetch "+us+" -> "+r.status);return r},function(e){v("fetch "+us+" ERR "+e);throw e})};var oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments)};var os=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){var x=this;x.addEventListener("loadend",function(){v("xhr "+x.__u+" -> "+x.status)});return os.apply(this,arguments)};var OW=window.WebSocket;window.WebSocket=function(u,p){v("ws dial "+u);var w=p!==undefined?new OW(u,p):new OW(u);w.addEventListener("open",function(){v("ws OPEN "+u)});w.addEventListener("close",function(e){v("ws close "+u+" code="+e.code)});w.addEventListener("error",function(){v("ws ERR "+u)});return w};window.WebSocket.prototype=OW.prototype;Object.assign(window.WebSocket,OW);window.onerror=function(m,s,l,c){v("onerror: "+m+" @"+(s||"")+":"+l+":"+c);return false};window.addEventListener("unhandledrejection",function(e){var r=e.reason;v("rejection: "+(r instanceof Error?r.name+": "+r.message+"\n"+String(r.stack).slice(0,900):r))});v("sink alive")})();</script>`
 )
 
 // logRequests mirrors the bouncer's http access log format so client
@@ -214,7 +235,11 @@ func rewriteIndex(cacheDir, bouncerHost string) []byte {
 		{"WIDGET_ENDPOINT", ""},
 		{"DEVELOPERS_ENDPOINT", ""},
 		{"MARKETING_ENDPOINT", ""},
-		{"REMOTE_AUTH_ENDPOINT", ""},
+		// The QR-login client concat's "wss:" onto this value at boot;
+		// empty made the WebSocket URL invalid and rejected. The
+		// bouncer has no remote-auth endpoint - the dial fails - but
+		// it fails gracefully after a valid handshake attempt.
+		{"REMOTE_AUTH_ENDPOINT", "//" + bouncerHost + "/remote-auth"},
 		{"NETWORKING_ENDPOINT", ""},
 	}
 	page := string(raw)
@@ -227,7 +252,7 @@ func rewriteIndex(cacheDir, bouncerHost string) []byte {
 	// screen, empty console) this keeps a trace reachable from a plain
 	// view-source/DOM dump, including in headless runs.
 	page = strings.Replace(page, "<body>", "<body>"+errorSink, 1)
-	page = strings.Replace(page, "</body>", `<script>window.__verr("tail: chunks="+((window.webpackChunkdiscord_app||[]).length)+" defined="+String(Object.keys(window).length))</script></body>`, 1)
+	page = strings.Replace(page, "</body>", `<script>window.__verr("tail: chunks="+((window.webpackChunkdiscord_app||[]).length)+" defined="+String(Object.keys(window).length)+" ls-token="+function(){try{var t=localStorage.getItem("token");return t===null?"NULL":t.slice(0,12)}catch(e){return"ERR:"+e.message}}()+" ws="+String(window._ws!==undefined));(async function(){try{var dbs=await indexedDB.databases();var out=[];for(var d of dbs.slice(0,5)){await new Promise(function(res){var rq=indexedDB.open(d.name);rq.onsuccess=function(){var db=rq.result;var names=Array.from(db.objectStoreNames);db.close();out.push(d.name+"["+names.join(",")+"]");res()};rq.onerror=function(){out.push(d.name+"[?]");res()}})}window.__verr("idb: "+out.join(" | "))}catch(e){window.__verr("idb ERR: "+e.message)}})()</script></body>`, 1)
 	for _, rep := range replacements {
 		pattern := regexp.MustCompile(`(` + rep.key + `:\s*)('[^']*'|"[^"]*")`)
 		if !pattern.MatchString(page) {
@@ -236,6 +261,46 @@ func rewriteIndex(cacheDir, bouncerHost string) []byte {
 		page = pattern.ReplaceAllString(page, `${1}'`+rep.value+`'`)
 	}
 	return []byte(page)
+}
+
+// ghostModules returns module ids the cached bundles reference but
+// no cached chunk defines. Ids only ever appear in this build as 5-7
+// digit numbers inside short-name require calls (webpack's minified
+// n(...)/r(...)), .bind(_, id) entry references and .e(id) chunk
+// loads; defined ids sit at module positions in each bundle.
+func ghostModules(assetsDir string) []string {
+	defined := map[string]bool{}
+	referenced := map[string]bool{}
+	entries, err := os.ReadDir(assetsDir)
+	if err != nil {
+		return nil
+	}
+	defRe := regexp.MustCompile(`(?m)^\s*(\d{5,7}): (?:\(|function|\w+ =>)`)
+	refRe := regexp.MustCompile(`(?:[a-zA-Z_$]{1,2}\.e|[a-zA-Z_$]{1,2}\.bind\(this,|[a-zA-Z_$]{1,2}|\w\.bind\(\w+,)\(\s*(\d{4,7})\s*\)`)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(assetsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		page := string(body)
+		for _, m := range defRe.FindAllStringSubmatch(page, -1) {
+			defined[m[1]] = true
+		}
+		for _, m := range refRe.FindAllStringSubmatch(page, -1) {
+			referenced[m[1]] = true
+		}
+	}
+	var ghosts []string
+	for id := range referenced {
+		if !defined[id] {
+			ghosts = append(ghosts, id)
+		}
+	}
+	sort.Strings(ghosts)
+	return ghosts
 }
 
 // readManifest pulls the build number and version hash out of the

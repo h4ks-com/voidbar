@@ -167,23 +167,34 @@ func syncAssets(ctx context.Context, logger *slog.Logger, cacheDir, channel, at 
 	return "", lastErr
 }
 
-// bootCriticalMissing checks that every eagerly-loaded file the index
-// references (scripts, stylesheets, icons) exists on disk: an empty
-// capture of any of them starves the boot with no recovery, since
-// their per-build names have no donors.
+// bootCriticalMissing checks that the files the index loads EAGERLY
+// (bootstrap scripts, the stylesheet, the icon) exist on disk: an
+// empty capture of any of them starves the boot with no recovery,
+// since their per-build names have no donors. Social-preview meta
+// images and prefetch hints are deliberately ignored - the client
+// boots without them.
 func bootCriticalMissing(cacheDir string) []string {
 	raw, err := os.ReadFile(filepath.Join(cacheDir, "index.html"))
 	if err != nil {
 		return []string{"index.html"}
 	}
-	var missing []string
-	for _, m := range assetRef.FindAllStringSubmatch(string(raw), -1) {
-		if _, err := os.Stat(filepath.Join(cacheDir, "assets", m[1])); err != nil {
-			missing = append(missing, m[1])
+	page := string(raw)
+	var names []string
+	for _, re := range []*regexp.Regexp{scriptSrc, sheetHref, iconHref} {
+		for _, m := range re.FindAllStringSubmatch(page, -1) {
+			if _, err := os.Stat(filepath.Join(cacheDir, "assets", m[1])); err != nil {
+				names = append(names, m[1])
+			}
 		}
 	}
-	return missing
+	return names
 }
+
+var (
+	scriptSrc = regexp.MustCompile(`<script[^>]+src="/assets/([0-9A-Za-z._-]+)"`)
+	sheetHref = regexp.MustCompile(`<link[^>]*rel="stylesheet"[^>]*href="/assets/([0-9A-Za-z._-]+)"`)
+	iconHref  = regexp.MustCompile(`<link[^>]*rel="icon"[^>]*href="/assets/([0-9A-Za-z._-]+)"`)
+)
 
 // backfillMissing heals partial scrapes: even a scrape with no empty
 // files can miss chunks the scraper's session never loaded (the
@@ -391,19 +402,24 @@ func extractTarball(ctx context.Context, logger *slog.Logger, cacheDir, sha stri
 
 // assetHandler serves the cached client bundles. Asset names are
 // content hashes, so hits are immutable. A miss triggers lazy
-// healing: the scraping archive's git history is searched (one
-// path-filtered commit lookup) for any scrape that captured the same
-// content-hashed file, and the bytes are pulled from that commit.
-// Chunks the client loads conditionally exist only in some scrapes,
-// so the pinned one alone is never quite complete. Discord's live
-// asset host is no alternative - discord.com is blocked at the ISP
-// here, such fetches would just hang.
+// healing: the archive's git history is searched (path-filtered
+// commit lookup on the channel branch) for any scrape that captured
+// the same content-hashed file, and the bytes are pulled from that
+// commit. Chunks the client loads conditionally exist only in some
+// scrapes; a few - one-time modals the scraping account had already
+// dismissed - exist nowhere and are answered with a synthetic empty
+// webpack chunk keyed by the id from the runtime's chunk table: the
+// loader resolves, its chunk group completes, and the no-op modal
+// costs an unhandled rejection instead of the whole boot. Discord's
+// live asset host is no alternative - discord.com is blocked at the
+// ISP here, such fetches would just hang.
 type assetHandler struct {
 	dir     string
 	channel string
 	logger  *slog.Logger
 	mu      sync.Mutex
 	donors  map[string]string // asset name -> donor sha, "-" = nowhere in the archive
+	ids     map[string]string // asset base name -> chunk id (from the runtime chunk table)
 }
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -415,12 +431,105 @@ func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dst := filepath.Join(h.dir, filepath.FromSlash(name))
 	if _, err := os.Stat(dst); err != nil {
 		if !h.heal(r.Context(), name, dst) {
-			http.NotFound(w, r)
+			h.serveStub(w, name)
 			return
 		}
 	}
+	if strings.HasSuffix(name, ".js") {
+		h.servePatchedJS(w, r, name, dst)
+		return
+	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, dst)
+}
+
+// assetLoaderMiss matches webpack's async require.context miss path. The
+// archive's asset tables lack entries whose request strings the client
+// builds by concatenation (font weight/style variants), and the
+// MODULE_NOT_FOUND throw rejects the boot Promise.all into errorPage.
+// The replacement resolves to stub module 950001 (a data-URL string,
+// seeded with the ghost modules) instead of throwing.
+var assetLoaderMiss = regexp.MustCompile(`if \(!n\.o\(r, e\)\) return Promise\.resolve\(\)\.then\(\(\(\) => \{\s*var t = new Error\("Cannot find module '" \+ e \+ "'"\);\s*t\.code = "MODULE_NOT_FOUND";\s*throw t\s*\}\)\);`)
+
+const assetLoaderMissFix = `if (!n.o(r, e)) return Promise.resolve().then((() => n.t(950001, 23)));`
+
+// patchedJS memoizes rewritten bundle bytes (they are tens of MB; the
+// rewrite is byte-stable so it pays to do it once).
+var patchedJS sync.Map
+
+func (h *assetHandler) servePatchedJS(w http.ResponseWriter, r *http.Request, name, dst string) {
+	if v, ok := patchedJS.Load(name); ok {
+		h.writeJS(w, v.([]byte))
+		return
+	}
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	body = assetLoaderMiss.ReplaceAll(body, []byte(assetLoaderMissFix))
+	patchedJS.Store(name, body)
+	h.writeJS(w, body)
+}
+
+func (h *assetHandler) writeJS(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(body)
+}
+
+// serveStub answers an unhealable asset: CSS and images as empty
+// bytes, JS chunks as a push of their chunk id with no modules - the
+// webpack loader treats the chunk as loaded and moves on. The id is
+// looked up in the runtime's chunk table (id -> content-hash pairs
+// scanned out of the cached bundles).
+func (h *assetHandler) serveStub(w http.ResponseWriter, name string) {
+	body := []byte{}
+	ct := "application/octet-stream"
+	if strings.HasSuffix(name, ".js") {
+		base := strings.TrimSuffix(name, ".js")
+		id, ok := h.ids[base]
+		if !ok {
+			http.Error(w, "404 page not found", http.StatusNotFound)
+			return
+		}
+		body = []byte("(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[" + id + "],{}])")
+		ct = "application/javascript"
+	} else if strings.HasSuffix(name, ".css") {
+		ct = "text/css"
+	} else if strings.HasSuffix(name, ".png") {
+		ct = "image/png"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(body)
+}
+
+// buildChunkIDs scans the cached bundles for the runtime's chunk
+// table entries (id: "hash") so stub chunks can push under the id
+// the loader expects.
+func (h *assetHandler) buildChunkIDs() {
+	h.ids = map[string]string{}
+	entries, err := os.ReadDir(h.dir)
+	if err != nil {
+		return
+	}
+	pair := regexp.MustCompile(`(\d{1,7}):\s*"([0-9a-f]{20})"`)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(h.dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, m := range pair.FindAllStringSubmatch(string(body), -1) {
+			if _, exists := h.ids[m[2]]; !exists {
+				h.ids[m[2]] = m[1]
+			}
+		}
+	}
+	h.logger.Info("chunk table mapped", "ids", len(h.ids))
 }
 
 // heal finds a donor commit for one missing asset and materializes
