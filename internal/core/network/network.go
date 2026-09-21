@@ -1692,14 +1692,19 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 			// The member-level bio is the sheet's PRIMARY About-me source
 			// in a guild context (WidgetUserSheetViewModel reads it before
 			// the user bio) - the facts live here too.
-			"bio":       peerBioValue(cm.BioText()),
-			"roles":     ircRoleIDsFor(mode),
-			"joined_at": joinedAt,
-			"presence": map[string]any{
-				"user":   map[string]any{"id": uid},
-				"status": status,
-			},
+		"bio":       peerBioValue(cm.BioText()),
+		"roles":     ircRoleIDsFor(mode),
+		"joined_at": joinedAt,
+		// The lazy-list handler fans these presences into
+		// PRESENCE_UPDATES, whose store reads activities.length
+		// unguarded (same crash class as the GUILD_CREATE presences).
+		"presence": map[string]any{
+			"user":          map[string]any{"id": uid},
+			"status":        status,
+			"activities":    []any{},
+			"client_status": map[string]any{},
 		},
+	},
 	}
 }
 
@@ -1938,9 +1943,10 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 		})
 		status := presenceStatus(r.cm.Away)
 		presences = append(presences, map[string]any{
-			"user":       map[string]any{"id": uid},
-			"status":     status,
-			"activities": []any{},
+			"user":          map[string]any{"id": uid},
+			"status":        status,
+			"activities":    []any{},
+			"client_status": map[string]any{},
 		})
 	}
 	if len(members) == 0 && len(want) > 0 {
