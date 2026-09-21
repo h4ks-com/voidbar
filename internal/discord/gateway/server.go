@@ -30,6 +30,7 @@ type Server struct {
 	guildsForUser      func(userID string) ([]any, error)
 	guildCreateForUser func(userID string) []any
 	dmChannelsForUser  func(userID string) []any
+	usersForUser       func(userID string) []any
 	memberListForUser  func(userID, guildID, channelID string) any
 	memberChunkForUser func(userID, guildID, nonce string, userIDs []string) any
 
@@ -54,6 +55,14 @@ func (s *Server) SetGuildProviders(guildsForUser func(userID string) ([]any, err
 // late-wiring rationale as SetGuildProviders.
 func (s *Server) SetDMChannelsProvider(dmChannelsForUser func(userID string) []any) {
 	s.dmChannelsForUser = dmChannelsForUser
+}
+
+// SetUsersProvider installs the READY users hook: the user objects DM
+// recipients resolve through. 2023+ web clients read private channels'
+// recipient_ids and look the users up in READY.users - an unresolvable
+// recipient crashes the DM list render.
+func (s *Server) SetUsersProvider(usersForUser func(userID string) []any) {
+	s.usersForUser = usersForUser
 }
 
 // SetSettingsProvider installs the READY user_settings hook. Web clients
@@ -703,6 +712,15 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 			readStateEntries = rows
 		}
 	}
+	// READY.users: Clyde plus every DM peer (2023+ clients resolve
+	// private channels' recipient_ids against this array; an unresolvable
+	// recipient kills the DM list render with a React invariant).
+	readyUsers := []any{clydeFriend["user"]}
+	if s.usersForUser != nil {
+		if extra := s.usersForUser(user.ID); extra != nil {
+			readyUsers = append(readyUsers, extra...)
+		}
+	}
 	return &ReadyData{
 		V:                    9,
 		User:                 model.ToUser(user),
@@ -711,7 +729,7 @@ func (s *Server) buildReady(sess *Session, user *storage.User) *ReadyData {
 		ResumeURL:            s.cfg.GatewayWSURL(),
 		ResumeGatewayURL:     s.cfg.GatewayWSURL(),
 		PrivateChannels:      privateChannels,
-		Users:                []any{clydeFriend["user"]},
+		Users:                readyUsers,
 		Presences:            []any{clydePresence},
 		Relationships:        []any{clydeFriend},
 		Sessions:             []any{},

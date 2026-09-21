@@ -111,6 +111,7 @@ func serveCmd(args []string, log *slog.Logger) error {
 		netSvc.GuildCreateForUser,
 	)
 	gw.SetDMChannelsProvider(netSvc.DMChannelPayloads)
+	gw.SetUsersProvider(netSvc.UsersFor)
 	gw.SetSettingsProvider(netSvc.UserSettings)
 	gw.SetNotesProvider(netSvc.UserNotes)
 	gw.SetReadStateProvider(netSvc.ReadStateEntries)

@@ -1975,12 +1975,14 @@ func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[
 	if avatar := m.peerAvatarForUser(userID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
 	}
+	peerID, _ := peer["id"].(string)
 	return map[string]any{
 		"id":                 dm.ID,
 		"type":               1,
 		"flags":              0,
 		"last_message_id":    m.dmLastMessageID(dm.ID),
 		"recipients":         []any{peer},
+		"recipient_ids":      []any{peerID},
 		"is_message_request": false,
 		"is_spam":            false,
 	}
@@ -1996,12 +1998,14 @@ func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]an
 	if avatar := m.peerAvatarForUser(c.userID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
 	}
+	peerID, _ := peer["id"].(string)
 	return map[string]any{
 		"id":                 dm.ID,
 		"type":               1,
 		"flags":              0,
 		"last_message_id":    m.dmLastMessageID(dm.ID),
 		"recipients":         []any{peer},
+		"recipient_ids":      []any{peerID},
 		"is_message_request": false,
 		"is_spam":            false,
 	}

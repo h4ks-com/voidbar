@@ -489,11 +489,14 @@ func (h *assetHandler) serveStub(w http.ResponseWriter, name string) {
 	if strings.HasSuffix(name, ".js") {
 		base := strings.TrimSuffix(name, ".js")
 		id, ok := h.ids[base]
-		if !ok {
-			http.Error(w, "404 page not found", http.StatusNotFound)
-			return
+		if ok {
+			// A known chunk id: push it empty so the webpack loader
+			// treats the chunk as loaded and moves on.
+			body = []byte("(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[" + id + "],{}])")
 		}
-		body = []byte("(self.webpackChunkdiscord_app=self.webpackChunkdiscord_app||[]).push([[" + id + "],{}])")
+		// Unknown .js (workers, late assets): an empty script beats a
+		// 404 - importScripts throws NetworkError on 404, which the
+		// client surfaces as an uncaught error.
 		ct = "application/javascript"
 	} else if strings.HasSuffix(name, ".css") {
 		ct = "text/css"

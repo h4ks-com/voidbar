@@ -856,6 +856,7 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 				peer["bio"] = bio
 			}
 		}
+		peerID, _ := peer["id"].(string)
 		out = append(out, map[string]any{
 			"id":                           dm.ID,
 			"type":                         1,
@@ -863,10 +864,31 @@ func (s *Service) DMChannelPayloads(userID string) []any {
 			"last_message_id":              s.lastMessageIDOf(dm.ID),
 			"last_message_timestamp":       nil,
 			"recipients":                   []any{peer},
+			"recipient_ids":                []any{peerID},
 			"is_message_request":           false,
 			"is_message_request_timestamp": nil,
 			"is_spam":                      false,
 		})
+	}
+	return out
+}
+
+// UsersFor returns the DM peer user objects for READY.users: 2023+ web
+// clients resolve private channels through recipient_ids and this array
+// (the embedded recipients array alone leaves the lookup empty and the
+// DM list crashes on a React invariant). Deduped by id.
+func (s *Service) UsersFor(userID string) []any {
+	dms := s.DMChannelsFor(userID)
+	seen := make(map[string]bool, len(dms)+1)
+	out := make([]any, 0, len(dms))
+	for _, dm := range dms {
+		peer := s.dmPeerFor(userID, dm.NetworkID, dm.Nick)
+		id, _ := peer["id"].(string)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, peer)
 	}
 	return out
 }
@@ -931,13 +953,16 @@ func (s *Service) dmPayloadFor(userID, netID, nick string) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
+	peer := s.dmPeerFor(userID, netID, dm.Nick)
+	peerID, _ := peer["id"].(string)
 	return map[string]any{
 		"id":                           dm.ID,
 		"type":                         1,
 		"flags":                        0,
 		"last_message_id":              s.lastMessageIDOf(dm.ID),
 		"last_message_timestamp":       nil,
-		"recipients":                   []any{s.dmPeerFor(userID, netID, dm.Nick)},
+		"recipients":                   []any{peer},
+		"recipient_ids":                []any{peerID},
 		"is_message_request":           false,
 		"is_message_request_timestamp": nil,
 		"is_spam":                      false,
