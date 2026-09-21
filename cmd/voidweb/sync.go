@@ -504,8 +504,11 @@ func (h *assetHandler) serveStub(w http.ResponseWriter, name string) {
 	} else if strings.HasSuffix(name, ".png") {
 		ct = "image/png"
 	}
+	// Stubs are placeholders that a later heal may replace with the
+	// real bytes - never let the browser pin them (the empty sprite
+	// stuck around for a year otherwise).
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Write(body)
 }
 
@@ -562,12 +565,15 @@ func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 				return false
 			}
 			delete(h.donors, name)
-		} else {
-			return fetchRaw(ctx, sha, name, dst)
+		} else if fetchRaw(ctx, sha, name, dst) {
+			return true
 		}
+		// A memoized donor whose raw fetch fails (the path history can
+		// hand back the commit that REMOVED the file): fall through
+		// and re-probe instead of caching the bad verdict forever.
 	}
 	for _, branch := range h.branches(h.channel) {
-		sha, err := findDonor(ctx, branch, name)
+		shas, err := findDonors(ctx, branch, name)
 		if err != nil {
 			// Lookup failed (rate limit, network): memoize a
 			// short-lived miss so bursts of requests do not spiral
@@ -577,16 +583,14 @@ func (h *assetHandler) heal(ctx context.Context, name, dst string) bool {
 			h.logger.Warn("donor lookup failed", "asset", name, "branch", branch, "err", err)
 			return false
 		}
-		if sha == "" {
-			continue
+		for _, sha := range shas {
+			if fetchRaw(ctx, sha, name, dst) {
+				h.donors[name] = sha
+				h.persistDonors()
+				h.logger.Info("healed asset from archive", "asset", name, "branch", branch, "donor", sha[:8])
+				return true
+			}
 		}
-		h.donors[name] = sha
-		h.persistDonors()
-		if fetchRaw(ctx, sha, name, dst) {
-			h.logger.Info("healed asset from archive", "asset", name, "branch", branch, "donor", sha[:8])
-			return true
-		}
-		return false
 	}
 	h.donors[name] = "-"
 	h.logger.Warn("asset nowhere in the archive", "asset", name)
@@ -606,36 +610,41 @@ func (h *assetHandler) branches(channel string) []string {
 	return all
 }
 
-// findDonor asks the archive's history for any commit that captured
-// the asset: commits touching the path appear when a scrape added or
-// removed it, and the newest such scrape is a byte-exact donor (the
-// name is a content hash). The lookup MUST scope to the channel
-// branch - scrapes never land on the default branch.
-func findDonor(ctx context.Context, channel, name string) (string, error) {
-	u := githubAPI + "/commits?sha=" + channel + "&path=assets/" + name + "&per_page=1"
+// findDonors asks the archive's history for commits that captured the
+// asset: commits touching the path appear when a scrape added or removed
+// it, and any commit whose tree still carries the file is a byte-exact
+// donor (the name is a content hash). The newest committer may be the
+// one that REMOVED the file, so several recent candidates come back and
+// the caller tries each. The lookup MUST scope to the channel branch -
+// scrapes never land on the default branch.
+func findDonors(ctx context.Context, channel, name string) ([]string, error) {
+	u := githubAPI + "/commits?sha=" + channel + "&path=assets/" + name + "&per_page=4"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "voidweb")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github commits: %s", resp.Status)
+		return nil, fmt.Errorf("github commits: %s", resp.Status)
 	}
 	var commits []struct {
 		SHA string `json:"sha"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&commits); err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(commits) == 0 {
-		return "", nil
+	out := make([]string, 0, len(commits))
+	for _, c := range commits {
+		if c.SHA != "" {
+			out = append(out, c.SHA)
+		}
 	}
-	return commits[0].SHA, nil
+	return out, nil
 }
 
 func fetchRaw(ctx context.Context, sha, name, dst string) bool {
