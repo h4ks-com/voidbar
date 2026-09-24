@@ -2,6 +2,7 @@ package ircmanage
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -92,17 +93,11 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 	// Longest first: overlapping candidates must resolve to the longest
 	// nick ("doesnm2" mentioned must not half-match "doesnm" - the
 	// boundary check alone does not help when the longer nick is also
-	// a candidate).
-	sortMentionUsers(out)
+	// a candidate). sort.Slice, not an insertion sort: this runs per
+	// relayed message over every channel occupant, and big channels made
+	// the quadratic sweep measurable.
+	sort.Slice(out, func(i, j int) bool { return len(out[i].nick) > len(out[j].nick) })
 	return out
-}
-
-func sortMentionUsers(us []mentionUser) {
-	for i := 1; i < len(us); i++ {
-		for j := i; j > 0 && len(us[j].nick) > len(us[j-1].nick); j-- {
-			us[j], us[j-1] = us[j-1], us[j]
-		}
-	}
 }
 
 // mentionChannels collects the member's auto-join channels, longest
@@ -124,11 +119,7 @@ func (m *Manager) mentionChannels(userID, networkID string) []mentionChannel {
 			name:    ch.Name,
 		})
 	}
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && len(out[j].ircName) > len(out[j-1].ircName); j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i].ircName) > len(out[j].ircName) })
 	return out
 }
 

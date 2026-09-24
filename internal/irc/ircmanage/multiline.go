@@ -34,19 +34,35 @@ func (c *conn) enqueueSend(target, content string, query bool, replyMsgid string
 // runSendWorker drains sendJobs until the connection is dropped. One
 // worker per conn for the conn's whole life: jobs pick up the CURRENT
 // girc client, so a supervisor reconnect mid-queue just continues on
-// the fresh socket.
+// the fresh socket. Exit paths: c.cancel (Drop AND RestartConn close
+// it - RestartConn used to leave the worker parked on the channel
+// forever, leaking a goroutine plus the whole conn struct per
+// credential rotation) and queue close (legacy Drop path).
 func (m *Manager) runSendWorker(c *conn) {
-	for job := range c.sendJobs {
-		m.mu.Lock()
-		client := c.client
-		m.mu.Unlock()
-		if client == nil {
-			continue
+	for {
+		select {
+		case <-c.cancel:
+			return
+		default:
 		}
-		if typingAllowed(client) {
-			sendTypingTag(client, job.target, "done")
+		select {
+		case <-c.cancel:
+			return
+		case job, ok := <-c.sendJobs:
+			if !ok {
+				return
+			}
+			m.mu.Lock()
+			client := c.client
+			m.mu.Unlock()
+			if client == nil {
+				continue
+			}
+			if typingAllowed(client) {
+				sendTypingTag(client, job.target, "done")
+			}
+			m.sendLines(c, client, job.target, job.content, job.replyMsgid)
 		}
-		m.sendLines(c, client, job.target, job.content, job.replyMsgid)
 	}
 }
 

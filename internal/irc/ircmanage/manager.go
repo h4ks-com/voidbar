@@ -847,7 +847,10 @@ func (m *Manager) EnsureAll() {
 // Drop closes a connection; it will be re-created on the next EnsureConn.
 // Waiting on the supervisor is capped: if the current attempt is stuck in
 // a hung dial (client.Close can't interrupt net.Dialer), the goroutine
-// exits on its own once Connect returns and sees the cancel.
+// exits on its own once Connect returns and sees the cancel. sendJobs is
+// NOT closed: a REST sender holding the conn past the map delete would
+// panic sending on a closed channel - the worker exits via c.cancel and
+// the buffered channel (cap 64) is garbage with the conn.
 func (m *Manager) Drop(userID, networkID string) {
 	k := key(userID, networkID)
 	m.mu.Lock()
@@ -855,7 +858,6 @@ func (m *Manager) Drop(userID, networkID string) {
 	if ok {
 		delete(m.conns, k)
 		close(c.cancel)
-		close(c.sendJobs)
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -970,7 +972,10 @@ func (m *Manager) notifyOccupancy(c *conn, ircChannel string) {
 	if m.occupancy == nil {
 		return
 	}
-	m.log.Info("occupancy change", "user", c.userID, "network", c.networkID, "channel", ircChannel)
+	// Debug, not Info: this fires for every upstream membership event
+	// (JOIN/PART/QUIT/MODE/NICK/end-of-WHO), which on a churning channel
+	// is the single noisiest log stream the container produces.
+	m.log.Debug("occupancy change", "user", c.userID, "network", c.networkID, "channel", ircChannel)
 	m.occupancy(c.userID, c.networkID, ircChannel)
 }
 
@@ -2872,6 +2877,15 @@ func (m *Manager) ReplyTargetMsgid(userID, networkID, channelID, snowflake strin
 	return ""
 }
 
+// pendingSendCap bounds the per-target pending-identity queue. With
+// echo-message negotiated the echo pops the head within a write or two;
+// without it (or after a link drop mid-send - the conn struct survives
+// reconnects), nothing ever pops and the queue would grow one entry per
+// sent message for the membership's lifetime. Dropping the OLDEST entry
+// keeps the newest mappings, which are the only ones an eventual echo
+// can still pop in order anyway.
+const pendingSendCap = 64
+
 // pushPendingSend queues our outgoing message identity for a target; the
 // echo-message echo pops it (FIFO: IRC writes on one connection are
 // ordered, and so are their echoes).
@@ -2879,7 +2893,11 @@ func (c *conn) pushPendingSend(target string, ref msgRef) {
 	c.pendSendMu.Lock()
 	defer c.pendSendMu.Unlock()
 	k := strings.ToLower(target)
-	c.pendingSend[k] = append(c.pendingSend[k], ref)
+	q := c.pendingSend[k]
+	if len(q) >= pendingSendCap {
+		q = q[1:]
+	}
+	c.pendingSend[k] = append(q, ref)
 }
 
 // popPendingSend takes the oldest queued identity for a target.

@@ -30,6 +30,7 @@ type linkPreview struct {
 
 const (
 	previewCacheTTL   = 30 * time.Minute
+	previewCacheCap   = 256   // hard entry cap; expired entries sweep on insert
 	maxPreviewPage    = 1 << 20 // pages bigger than this lose their tail
 	previewReadBudget = 4 * time.Second
 	titleMax          = 500
@@ -165,6 +166,17 @@ func (m *Manager) previewFor(u string) *linkPreview {
 
 	previewMu.Lock()
 	previewCache[u] = p
+	// Evict: expired entries whenever the cache has grown past its cap,
+	// so a long-lived process relaying busy channels does not accumulate
+	// every URL it ever saw (entries were only ever overwritten, never
+	// removed).
+	if len(previewCache) > previewCacheCap {
+		for k, v := range previewCache {
+			if time.Since(v.at) >= previewCacheTTL {
+				delete(previewCache, k)
+			}
+		}
+	}
 	previewMu.Unlock()
 	return p
 }

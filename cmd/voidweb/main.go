@@ -181,6 +181,10 @@ func main() {
 		Addr:              *listen,
 		Handler:           logRequests(logger, mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Idle keep-alives from vanished clients used to sit forever;
+		// websockets are hijacked out from under the server on upgrade,
+		// so this cannot touch them.
+		IdleTimeout: 2 * time.Minute,
 	}
 	logger.Info("voidweb listening", "addr", *listen, "bouncer", base.Host)
 	if err := srv.ListenAndServe(); err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -454,8 +455,12 @@ var assetLoaderMiss = regexp.MustCompile(`if \(!n\.o\(r, e\)\) return Promise\.r
 
 const assetLoaderMissFix = `if (!n.o(r, e)) return Promise.resolve().then((() => n.t(950001, 23)));`
 
-// patchedJS memoizes rewritten bundle bytes (they are tens of MB; the
-// rewrite is byte-stable so it pays to do it once).
+// patchedJS memoizes rewritten bundle bytes - but ONLY the bundles the
+// rewrite actually changed. The pattern lives in the webpack runtime,
+// so exactly one or two files match; every other asset used to get a
+// full RAM copy anyway (tens of MB per build, held forever), which is
+// why the map is change-gated now. Unchanged files fall through to
+// http.ServeFile, which streams from disk.
 var patchedJS sync.Map
 
 func (h *assetHandler) servePatchedJS(w http.ResponseWriter, r *http.Request, name, dst string) {
@@ -468,9 +473,17 @@ func (h *assetHandler) servePatchedJS(w http.ResponseWriter, r *http.Request, na
 		http.NotFound(w, r)
 		return
 	}
-	body = assetLoaderMiss.ReplaceAll(body, []byte(assetLoaderMissFix))
-	patchedJS.Store(name, body)
-	h.writeJS(w, body)
+	patched := assetLoaderMiss.ReplaceAll(body, []byte(assetLoaderMissFix))
+	if bytes.Equal(patched, body) {
+		// Unchanged by the rewrite: no reason to pin the bytes (or the
+		// copy ReplaceAll made) in memory - serve the file from disk.
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeFile(w, r, dst)
+		return
+	}
+	patchedJS.Store(name, patched)
+	h.writeJS(w, patched)
 }
 
 func (h *assetHandler) writeJS(w http.ResponseWriter, body []byte) {

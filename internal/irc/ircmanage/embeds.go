@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -37,6 +38,17 @@ const maxMirrorBytes = 10 << 20
 // unfurl. Partial reads are fine here: image headers live up front.
 func fetchImage(u string) (data []byte, contentType string, w, h int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return fetchImageCtx(ctx, u)
+}
+
+// fetchImageCtx is fetchImage under a caller-owned deadline, so a
+// message carrying several image links pays one shared budget instead
+// of four sequential ones.
+func fetchImageCtx(ctx context.Context, u string) (data []byte, contentType string, w, h int) {
+	// Child context: the caller's deadline still bounds the whole
+	// fetch, and the stall path below can abort the body read itself.
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -91,11 +103,21 @@ const readBudget = 4 * time.Second
 // the same official build shows blank embeds against Oldcord Staging
 // too. Without a public origin (or when the remote is unreachable) no
 // rows are produced: the URL stays a plain clickable link in the text.
+//
+// The fetches run CONCURRENTLY under one shared deadline: this runs on
+// the connection's IRC event loop, where four sequential dribbling
+// hosts (4s read budget each) stalled every handler for the better
+// part of a minute - past girc's rx queue, into ping-timeout reconnect
+// loops.
 func (m *Manager) imageAttachments(content string) []any {
 	if m.publicURL == "" {
 		return nil
 	}
-	var rows []any
+	type target struct {
+		u        string
+		pathPart string
+	}
+	var targets []target
 	seen := map[string]bool{}
 	for _, tok := range strings.Fields(content) {
 		if !strings.HasPrefix(tok, "http://") && !strings.HasPrefix(tok, "https://") {
@@ -115,21 +137,49 @@ func (m *Manager) imageAttachments(content string) []any {
 			continue
 		}
 		seen[u] = true
-		data, contentType, w, h := fetchImage(u)
-		if data == nil {
+		targets = append(targets, target{u: u, pathPart: pathPart})
+		if len(targets) >= 4 {
+			break
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readBudget+2*time.Second)
+	defer cancel()
+	type result struct {
+		data        []byte
+		contentType string
+		w, h        int
+	}
+	results := make([]result, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, t target) {
+			defer wg.Done()
+			data, contentType, w, h := fetchImageCtx(ctx, t.u)
+			results[i] = result{data: data, contentType: contentType, w: w, h: h}
+		}(i, t)
+	}
+	wg.Wait()
+	var rows []any
+	for i, t := range targets {
+		r := results[i]
+		if r.data == nil {
 			continue
 		}
 		att := &storage.Attachment{
 			ID:          m.sf.New(),
-			Filename:    mirrorFilename(pathPart, contentType),
-			ContentType: contentType,
-			Size:        len(data),
-			Width:       w,
-			Height:      h,
+			Filename:    mirrorFilename(t.pathPart, r.contentType),
+			ContentType: r.contentType,
+			Size:        len(r.data),
+			Width:       r.w,
+			Height:      r.h,
 			UploadedAt:  time.Now().Unix(),
 		}
-		if err := m.store.PutAttachment(att, data); err != nil {
-			m.log.Warn("link mirror store failed", "err", err, "url", u)
+		if err := m.store.PutAttachment(att, r.data); err != nil {
+			m.log.Warn("link mirror store failed", "err", err, "url", t.u)
 			continue
 		}
 		rows = append(rows, map[string]any{
@@ -142,9 +192,6 @@ func (m *Manager) imageAttachments(content string) []any {
 			"width":        att.Width,
 			"height":       att.Height,
 		})
-		if len(rows) >= 4 {
-			break
-		}
 	}
 	return rows
 }

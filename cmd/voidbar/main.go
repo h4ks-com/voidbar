@@ -159,6 +159,10 @@ func serveCmd(args []string, log *slog.Logger) error {
 		Addr:              cfg.Server.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Reap idle keep-alives; the gateway websocket is hijacked on
+		// upgrade (gorilla clears the conn deadlines), so this only
+		// affects REST conns parked between requests.
+		IdleTimeout: 2 * time.Minute,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

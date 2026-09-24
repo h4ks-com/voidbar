@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/h4ks-com/voidbar/internal/discord/gateway"
@@ -36,7 +37,28 @@ type Service struct {
 	log     *slog.Logger
 	// publicURL is the CDN base avatar URLs are minted from (SetPublicURL).
 	publicURL string
+
+	// occMu/occ coalesce occupancy callbacks: upstream membership churn
+	// (join/part storms, netsplit QUIT bursts, WHO sweeps) fires the
+	// notifier many times per second, and each firing rebuilds every
+	// subscribed member list - a full payload per event, on the IRC
+	// event loop. Bursts within occupancyCoalesceWindow collapse into
+	// one rebuild.
+	occMu sync.Mutex
+	occ   map[string]*occPending // key: userID + "\x00" + guildID
 }
+
+// occPending is one (user, guild)'s coalescing state.
+type occPending struct {
+	all   bool             // a "" (whole-guild) notification landed
+	chans map[string]bool  // lowercased dirty IRC channel names
+	timer *time.Timer      // armed flush; nil while unarmed
+}
+
+// occupancyCoalesceWindow is how long an occupancy burst gathers before
+// the (single) rebuild runs. Short enough to feel instant, long enough
+// to absorb a netsplit's QUIT flood.
+const occupancyCoalesceWindow = 250 * time.Millisecond
 
 func NewService(store *storage.Storage, gw *gateway.Server, sf *util.Snowflake, manager *ircmanage.Manager, log *slog.Logger) *Service {
 	if log == nil {
@@ -1777,23 +1799,64 @@ func (s *Service) ircOccupants(userID, networkID string, ircNames []string) []ir
 
 // RefreshOccupancy is the ircmanage occupancy callback: an upstream
 // membership event changed who sits in ircChannel (empty = everything
-// changed, i.e. QUIT/NICK). Every member list the user's sessions
-// actually subscribed to (op 14) and that the event touches gets a
-// fresh GUILD_MEMBER_LIST_UPDATE SYNC - a full replace, so no INSERT/
-// DELETE index arithmetic against the client's flattened rows.
+// changed, i.e. QUIT/NICK). Events coalesce per (user, guild) for
+// occupancyCoalesceWindow before the rebuild runs: every member list
+// the user's sessions actually subscribed to (op 14) and that the burst
+// touches gets ONE fresh GUILD_MEMBER_LIST_UPDATE SYNC - a full
+// replace, so no INSERT/DELETE index arithmetic against the client's
+// flattened rows. The rebuild also moves OFF the IRC event loop, so a
+// busy channel's payload building can no longer stall reads into a
+// ping-timeout reconnect loop.
 func (s *Service) RefreshOccupancy(userID, guildID, ircChannel string) {
 	if s.gw == nil {
 		return
 	}
+	k := userID + "\x00" + guildID
+	s.occMu.Lock()
+	if s.occ == nil {
+		s.occ = make(map[string]*occPending)
+	}
+	p := s.occ[k]
+	if p == nil {
+		p = &occPending{chans: make(map[string]bool)}
+		s.occ[k] = p
+	}
+	if ircChannel == "" {
+		p.all = true
+	} else if !p.all {
+		p.chans[strings.ToLower(ircChannel)] = true
+	}
+	if p.timer == nil {
+		p.timer = time.AfterFunc(occupancyCoalesceWindow, func() { s.flushOccupancy(userID, guildID) })
+	}
+	s.occMu.Unlock()
+}
+
+// flushOccupancy rebuilds the member lists dirtied by one coalesced
+// burst. Semantics per spec match the un-coalesced loop: the guild-wide
+// everyone list (empty channel id) refreshes on any change; a channel
+// list refreshes only when its IRC name is dirty (or everything is).
+func (s *Service) flushOccupancy(userID, guildID string) {
+	s.occMu.Lock()
+	k := userID + "\x00" + guildID
+	p := s.occ[k]
+	if p == nil {
+		s.occMu.Unlock()
+		return
+	}
+	all, chans := p.all, p.chans
+	delete(s.occ, k)
+	s.occMu.Unlock()
+
 	specs := s.gw.RequestedMemberLists(userID)
-	s.log.Info("occupancy refresh", "user", userID, "guild", guildID, "channel", ircChannel, "subscribed", len(specs))
+	s.log.Debug("occupancy refresh", "user", userID, "guild", guildID, "subscribed", len(specs), "all", all, "dirty", len(chans))
 	for _, spec := range specs {
 		if spec.GuildID != guildID {
 			continue
 		}
-		if ircChannel != "" && spec.ChannelID != "" {
+		if !all && spec.ChannelID != "" {
 			ch, err := s.store.GetChannel(spec.ChannelID)
-			if err != nil || !strings.EqualFold(ch.IRCName, ircChannel) {
+			if err != nil || !chans[strings.ToLower(ch.IRCName)] {
 				continue
 			}
 		}
