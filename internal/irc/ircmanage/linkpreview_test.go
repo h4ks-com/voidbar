@@ -1,4 +1,4 @@
-package ircmanage
+﻿package ircmanage
 
 import (
 	"io"
@@ -111,7 +111,7 @@ func TestMessageUpdatePayloadFidelity(t *testing.T) {
 	}
 	// The replied-to peer has a mirrored avatar: the bar renders the
 	// target's avatar straight from referenced_message.author.
-	if err := store.PutPeerAvatar("u1", "peer", "peerhash9"); err != nil {
+	if err := store.PutPeerAvatar("u1", "net1", "peer", "peerhash9"); err != nil {
 		t.Fatal(err)
 	}
 	stored, ok := store.MessageByID(ch.ID, "snowB")

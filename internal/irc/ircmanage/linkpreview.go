@@ -423,10 +423,26 @@ func (m *Manager) enrichAuthor(userID string, payload map[string]any, row *stora
 	if bio := m.peerBioForUser(userID, nick); bio != "" {
 		au["bio"] = bio
 	}
-	if m.peerBotForUser(userID, nick) {
+	// Mirrored facts are network-scoped now (same nick, different
+	// networks, different people); resolve the row's channel to its
+	// network, falling back to any network that knows the nick.
+	netID := m.channelNetworkID(row.ChannelID)
+	if m.peerBotForUser(userID, netID, nick) {
 		au["bot"] = true
 	}
-	if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
+	if avatar := m.peerAvatarForUser(userID, netID, nick); avatar != nil {
 		au["avatar"] = avatar
 	}
+}
+
+// channelNetworkID resolves a buffered channel id to its network (""
+// when unknown - fact lookups then miss, which is safe).
+func (m *Manager) channelNetworkID(channelID string) string {
+	if ch, err := m.store.GetChannel(channelID); err == nil {
+		return ch.NetworkID
+	}
+	if dm, err := m.store.GetDMChannel(channelID); err == nil {
+		return dm.NetworkID
+	}
+	return ""
 }

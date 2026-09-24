@@ -1,4 +1,4 @@
-package ircmanage
+﻿package ircmanage
 
 import (
 	"strconv"
@@ -294,7 +294,7 @@ func (m *Manager) flushChatBatch(c *conn, acc *chatBatch, live bool, ceiling str
 				// for never-seen peers must resolve.
 				m.upsertMentionedPeers(c, mentionedUsers)
 			}
-			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano), c.peerBioText(f.author), m.peerAvatarForUser(c.userID, f.author), m.peerBotForUser(c.userID, f.author))
+			payload := buildMessagePayload(msgID, ch.ID, f.author, f.content, ts.Format(time.RFC3339Nano), c.peerBioText(f.author), m.peerAvatarForUser(c.userID, c.networkID, f.author), m.peerBotForUser(c.userID, c.networkID, f.author))
 			if len(f.mentions) > 0 {
 				payload["mentions"] = f.mentions
 			}

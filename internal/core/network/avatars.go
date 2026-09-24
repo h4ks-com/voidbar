@@ -71,23 +71,62 @@ func (s *Service) AuthorAvatar(userID, channelID, rawAuthorID string) any {
 		}
 		return s.globalAvatarValue(rawAuthorID)
 	}
-	return s.peerAvatarValue(userID, strings.TrimPrefix(rawAuthorID, "irc:"))
+	return s.peerAvatarValue(userID, s.channelNetworkID(channelID), strings.TrimPrefix(rawAuthorID, "irc:"))
 }
 
-// PeerAvatar returns the avatar hash shown for a remote IRC peer.
+// PeerAvatar returns the avatar hash shown for a remote IRC peer on any
+// of the user's networks (id-based lookups that carry no network
+// context, e.g. profiles resolved by user id).
 func (s *Service) PeerAvatar(userID, nick string) string {
 	if s.store == nil {
 		return ""
 	}
-	return s.store.PeerAvatar(userID, nick)
+	for _, netID := range s.userNetworkIDs(userID) {
+		if h := s.store.PeerAvatar(userID, netID, nick); h != "" {
+			return h
+		}
+	}
+	return ""
 }
 
-// peerAvatarValue is PeerAvatar in payload form (nil when unset).
-func (s *Service) peerAvatarValue(userID, nick string) any {
-	if h := s.PeerAvatar(userID, nick); h != "" {
+// peerAvatarValue is the network-scoped PeerAvatar in payload form (nil
+// when unset).
+func (s *Service) peerAvatarValue(userID, networkID, nick string) any {
+	if s.store == nil {
+		return nil
+	}
+	if h := s.store.PeerAvatar(userID, networkID, nick); h != "" {
 		return h
 	}
 	return nil
+}
+
+// userNetworkIDs lists the networks the user holds a membership on.
+func (s *Service) userNetworkIDs(userID string) []string {
+	if s.store == nil {
+		return nil
+	}
+	memberships, err := s.store.ListMembershipsForUser(userID)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(memberships))
+	for _, m := range memberships {
+		out = append(out, m.NetworkID)
+	}
+	return out
+}
+
+// channelNetworkID resolves a channel id (guild channel or DM) to its
+// network ("" unknown).
+func (s *Service) channelNetworkID(channelID string) string {
+	if ch, err := s.store.GetChannel(channelID); err == nil {
+		return ch.NetworkID
+	}
+	if dm, err := s.store.GetDMChannel(channelID); err == nil {
+		return dm.NetworkID
+	}
+	return ""
 }
 
 // globalAvatarValue is the account-wide avatar in payload form.
@@ -295,10 +334,10 @@ func (s *Service) RefreshPeerAvatar(userID, networkID, nick string) {
 			"id":            model.IrcAuthorID("irc:" + nick),
 			"username":      nick,
 			"discriminator": "0",
-			"bot":           s.peerBotValue(userID, nick),
-			"avatar":        s.peerAvatarValue(userID, nick),
+			"bot":           s.peerBotValue(userID, networkID, nick),
+			"avatar":        s.peerAvatarValue(userID, networkID, nick),
 		},
-		"roles":     s.memberRoleIDs(userID, mode, nick),
+		"roles":     s.memberRoleIDs(userID, networkID, mode, nick),
 		"joined_at": mem.JoinedAt.Format(time.RFC3339),
 	})
 }

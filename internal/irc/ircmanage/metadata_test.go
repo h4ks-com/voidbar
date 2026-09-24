@@ -168,7 +168,7 @@ func TestMetadataAvatarFlow(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("peer avatar notifier never fired")
 	}
-	if got := store.PeerAvatar("u1", "bob"); got != wantHash {
+	if got := store.PeerAvatar("u1", "net1", "bob"); got != wantHash {
 		t.Fatalf("peer avatar hash = %q, want %q", got, wantHash)
 	}
 
@@ -300,9 +300,12 @@ func TestMetadataBotColorFlow(t *testing.T) {
 			case strings.HasPrefix(line, "METADATA * SUB"):
 				w(":fake 770 " + nick + " avatar bot color\r\n")
 				// Peer facts arrive as live notifications: a bot flag in
-				// mixed case, a color without the # prefix, and junk that
-				// must be ignored.
+				// mixed case, a version-string bot flag (the IRCv3
+				// bot-metadata value IS the version - any non-empty
+				// value marks a bot), a color without the # prefix, and
+				// junk that must be ignored.
 				w(":eve!u@h METADATA eve bot * :TRUE\r\n")
+				w(":cloudy!u@h METADATA cloudy bot * :cloudbot-2.3\r\n")
 				w(":eve!u@h METADATA eve color * :1AbC9c\r\n")
 				w(":eve!u@h METADATA eve color * :not-a-color\r\n")
 			}
@@ -366,7 +369,7 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	}
 
 	seen := 0
-	for seen < 2 {
+	for seen < 3 {
 		select {
 		case <-factsNick:
 			seen++
@@ -374,16 +377,19 @@ func TestMetadataBotColorFlow(t *testing.T) {
 			t.Fatal("facts notifier never fired")
 		}
 	}
-	if !store.PeerBot("u1", "eve") {
+	if !store.PeerBot("u1", "net1", "eve") {
 		t.Fatal("bot flag not mirrored")
 	}
-	if got := store.PeerColor("u1", "eve"); got != "#1abc9c" {
+	if !store.PeerBot("u1", "net1", "cloudy") {
+		t.Fatal("version-string bot flag not mirrored (spec: any non-empty value marks a bot)")
+	}
+	if got := store.PeerColor("u1", "net1", "eve"); got != "#1abc9c" {
 		t.Fatalf("peer color = %q, want #1abc9c", got)
 	}
 
 	// WHO path: the connect-time sweep's +B mark sets the badge.
 	deadline := time.Now().Add(15 * time.Second)
-	for !store.PeerBot("u1", "beep") {
+	for !store.PeerBot("u1", "net1", "beep") {
 		if time.Now().After(deadline) {
 			mu.Lock()
 			lines := strings.Join(sent, "\n") + "\n--- server wrote ---\n" + strings.Join(wrote, "")
@@ -402,7 +408,7 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	}
 	_, _ = conn2.Write([]byte(":fake 352 " + ourNick + " #test u h s beep H :0 z\r\n"))
 	deadline = time.Now().Add(15 * time.Second)
-	for store.PeerBot("u1", "beep") {
+	for store.PeerBot("u1", "net1", "beep") {
 		if time.Now().After(deadline) {
 			t.Fatal("BOTMODE-authoritative WHO round never cleared the bot flag")
 		}

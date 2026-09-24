@@ -1,4 +1,4 @@
-package ircmanage
+﻿package ircmanage
 
 import (
 	"regexp"
@@ -64,7 +64,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 				nick: cm.Nick,
 				id:   model.IrcAuthorID("irc:" + cm.Nick),
 				bio:  cm.BioText(),
-				bot:  m.store.PeerBot(userID, cm.Nick),
+				bot:  m.store.PeerBot(userID, networkID, cm.Nick),
 				mode: cm.Mode,
 			}
 		}
@@ -74,7 +74,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 			nick: ircTarget,
 			id:   model.IrcAuthorID("irc:" + ircTarget),
 			bio:  m.PeerBioText(userID, networkID, ircTarget),
-			bot:  m.store.PeerBot(userID, ircTarget),
+			bot:  m.store.PeerBot(userID, networkID, ircTarget),
 		}
 	}
 	if members, err := m.store.ListMemberships(networkID); err == nil {
@@ -444,20 +444,20 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 	}
 	// Server-wide color metadata rides a synthetic role above the mode
 	// roles, so the peer's chosen name color always shows.
-	if color := m.peerColorForUser(c.userID, nick); color != "" {
+	if color := m.peerColorForUser(c.userID, c.networkID, nick); color != "" {
 		roles = append(roles, model.IrcColorRoleID(color))
 	}
 	user := map[string]any{
 		"id":            model.IrcAuthorID("irc:" + nick),
 		"username":      nick,
 		"discriminator": "0",
-		"bot":           m.peerBotForUser(c.userID, nick),
+		"bot":           m.peerBotForUser(c.userID, c.networkID, nick),
 	}
 	bio := c.peerBioText(nick)
 	if bio != "" {
 		user["bio"] = bio
 	}
-	if avatar := m.peerAvatarForUser(c.userID, nick); avatar != nil {
+	if avatar := m.peerAvatarForUser(c.userID, c.networkID, nick); avatar != nil {
 		user["avatar"] = avatar
 	}
 	m.gw.Dispatch(c.userID, "GUILD_MEMBER_UPDATE", map[string]any{

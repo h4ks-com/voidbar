@@ -1,4 +1,4 @@
-// Package ircmanage owns the upstream IRC connections. The invariant: one
+﻿// Package ircmanage owns the upstream IRC connections. The invariant: one
 // connection per (user, network), each with the member's own nick. This is
 // exactly how per-user BNC sessions behave - members of the same network
 // never share a socket and appear as regular distinct clients to the server.
@@ -1548,7 +1548,7 @@ func (m *Manager) registerHandlers(c *conn) {
 	})
 
 	// Upstream join failures for pending creates. IRC servers usually just
-	// create channels, but +i/+b/+R/+k/+l and bad names do reject JOINs —
+	// create channels, but +i/+b/+R/+k/+l and bad names do reject JOINs вЂ”
 	// the optimistic channel in the client must be rolled back.
 	for numeric, why := range joinErrorReasons {
 		reason := why
@@ -1576,7 +1576,7 @@ var joinErrorReasons = map[string]string{
 // rollbackJoin undoes a join the upstream refused (optimistic create or
 // auto-join on reconnect): drop the auto-join entry, CHANNEL_DELETE the
 // channel out of the client, and have Clyde explain the refusal in a DM.
-// The registry record and replay buffer are kept — if the channel becomes
+// The registry record and replay buffer are kept вЂ” if the channel becomes
 // joinable again (invite granted, ban lifted), re-adding it recovers the
 // history.
 func (m *Manager) rollbackJoin(c *conn, ircName, reason string) {
@@ -1801,7 +1801,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
-	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author), m.peerBotForUser(c.userID, author))
+	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, c.networkID, author), m.peerBotForUser(c.userID, c.networkID, author))
 	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
 		attachReplyReference(m, payload, ref, c.networkID, c.userID)
 	}
@@ -1917,12 +1917,12 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 				"id":            peerID,
 				"username":      author,
 				"discriminator": "0",
-				"bot":           m.peerBotForUser(c.userID, author),
+				"bot":           m.peerBotForUser(c.userID, c.networkID, author),
 			}
 			if bio := c.peerBioText(author); bio != "" {
 				authorObj["bio"] = bio
 			}
-			if avatar := m.peerAvatarForUser(c.userID, author); avatar != nil {
+			if avatar := m.peerAvatarForUser(c.userID, c.networkID, author); avatar != nil {
 				authorObj["avatar"] = avatar
 			}
 			return authorObj
@@ -1980,10 +1980,10 @@ func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[
 			peer["bio"] = bio
 		}
 	}
-	if avatar := m.peerAvatarForUser(userID, dm.Nick); avatar != nil {
+	if avatar := m.peerAvatarForUser(userID, dm.NetworkID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
 	}
-	if m.peerBotForUser(userID, dm.Nick) {
+	if m.peerBotForUser(userID, dm.NetworkID, dm.Nick) {
 		peer["bot"] = true
 	}
 	peerID, _ := peer["id"].(string)
@@ -2006,10 +2006,10 @@ func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]an
 	if bio := m.PeerBioText(c.userID, dm.NetworkID, dm.Nick); bio != "" {
 		peer["bio"] = bio
 	}
-	if avatar := m.peerAvatarForUser(c.userID, dm.Nick); avatar != nil {
+	if avatar := m.peerAvatarForUser(c.userID, c.networkID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
 	}
-	if m.peerBotForUser(c.userID, dm.Nick) {
+	if m.peerBotForUser(c.userID, c.networkID, dm.Nick) {
 		peer["bot"] = true
 	}
 	peerID, _ := peer["id"].(string)
@@ -2073,7 +2073,7 @@ func (m *Manager) ChannelMembers(userID, networkID, ircName string) []string {
 
 // ChannelMembersDetailed is ChannelMembers with each occupant's highest
 // channel-membership mode, resolved through the PREFIX mapping the server
-// advertised (~&@%+ → q a o h v; server-specific prefixes beyond the five
+// advertised (~&@%+ в†’ q a o h v; server-specific prefixes beyond the five
 // standard modes have no Discord role and are ignored).
 func (m *Manager) ChannelMembersDetailed(userID, networkID, ircName string) []ChannelMember {
 	m.mu.Lock()

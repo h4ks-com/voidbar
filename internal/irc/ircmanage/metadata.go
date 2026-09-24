@@ -265,14 +265,14 @@ func (m *Manager) applyPeerMeta(c *conn, client *girc.Client, nick, metaKey, val
 	}
 }
 
-// applyPeerBot mirrors the peer's `bot` flag. Truthy spellings the
-// IRCv3 ecosystem uses ("true"/"1"/"yes") all count.
+// applyPeerBot mirrors the peer's `bot` flag. Per the IRCv3 bot-metadata
+// spec the value is the bot's VERSION - any non-empty value marks a bot.
 func (m *Manager) applyPeerBot(c *conn, nick, value string) {
 	if nick == "" {
 		return
 	}
-	bot := strings.EqualFold(value, "true") || value == "1" || strings.EqualFold(value, "yes")
-	if err := m.store.PutPeerBot(c.userID, nick, bot); err != nil {
+	bot := strings.TrimSpace(value) != ""
+	if err := m.store.PutPeerBot(c.userID, c.networkID, nick, bot); err != nil {
 		m.log.Warn("peer bot persist failed", "user", c.userID, "nick", nick, "err", err)
 		return
 	}
@@ -294,7 +294,7 @@ func (m *Manager) applyPeerColor(c *conn, nick, value string) {
 		}
 		color = normalized
 	}
-	if err := m.store.PutPeerColor(c.userID, nick, color); err != nil {
+	if err := m.store.PutPeerColor(c.userID, c.networkID, nick, color); err != nil {
 		m.log.Warn("peer color persist failed", "user", c.userID, "nick", nick, "err", err)
 		return
 	}
@@ -321,7 +321,7 @@ func (m *Manager) applyPeerAvatar(c *conn, client *girc.Client, nick, url string
 		return
 	}
 	if url == "" {
-		_ = m.store.PutPeerAvatar(c.userID, nick, "")
+		_ = m.store.PutPeerAvatar(c.userID, c.networkID, nick, "")
 		m.firePeerAvatar(c, nick)
 		return
 	}
@@ -352,7 +352,7 @@ func (m *Manager) applyPeerAvatar(c *conn, client *girc.Client, nick, url string
 			m.log.Debug("peer avatar fetch failed", "user", c.userID, "network", c.networkID, "nick", nick, "url", url, "err", err)
 			return
 		}
-		if err := m.store.PutPeerAvatar(c.userID, nick, hash); err != nil {
+		if err := m.store.PutPeerAvatar(c.userID, c.networkID, nick, hash); err != nil {
 			m.log.Warn("peer avatar persist failed", "user", c.userID, "nick", nick, "err", err)
 			return
 		}
@@ -410,31 +410,31 @@ func (m *Manager) applyWhoBotFlag(c *conn, client *girc.Client, nick, flags stri
 		return
 	}
 	bot := mark
-	if bot == m.store.PeerBot(c.userID, nick) {
+	if bot == m.store.PeerBot(c.userID, c.networkID, nick) {
 		return
 	}
-	if err := m.store.PutPeerBot(c.userID, nick, bot); err != nil {
+	if err := m.store.PutPeerBot(c.userID, c.networkID, nick, bot); err != nil {
 		m.log.Warn("peer bot persist failed", "user", c.userID, "nick", nick, "err", err)
 		return
 	}
 	m.firePeerFacts(c, nick)
 }
 
-// peerBotForUser resolves a nick's mirrored bot flag for payloads.
-func (m *Manager) peerBotForUser(userID, nick string) bool {
-	return m.store.PeerBot(userID, nick)
+// peerBotForUser resolves a nick's mirrored bot flag on a network.
+func (m *Manager) peerBotForUser(userID, networkID, nick string) bool {
+	return m.store.PeerBot(userID, networkID, nick)
 }
 
-// peerColorForUser resolves a nick's mirrored color ("#rrggbb" or "").
-func (m *Manager) peerColorForUser(userID, nick string) string {
-	return m.store.PeerColor(userID, nick)
+// peerColorForUser resolves a nick's mirrored color on a network
+// ("#rrggbb" or "").
+func (m *Manager) peerColorForUser(userID, networkID, nick string) string {
+	return m.store.PeerColor(userID, networkID, nick)
 }
 
-// peerAvatarForUser resolves a nick's mirrored avatar hash across the
-// user's networks (payload form: nil when nothing is known) - the store
-// is nick-scoped exactly like the author ids the client already holds.
-func (m *Manager) peerAvatarForUser(userID, nick string) any {
-	if h := m.store.PeerAvatar(userID, nick); h != "" {
+// peerAvatarForUser resolves a nick's mirrored avatar hash on a network
+// (payload form: nil when nothing is known).
+func (m *Manager) peerAvatarForUser(userID, networkID, nick string) any {
+	if h := m.store.PeerAvatar(userID, networkID, nick); h != "" {
 		return h
 	}
 	return nil

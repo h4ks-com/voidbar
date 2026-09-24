@@ -1,4 +1,4 @@
-// Package network implements the create-or-join of IRC networks from a
+﻿// Package network implements the create-or-join of IRC networks from a
 // connection string (Voidbar's invite), membership management and the glue
 // that spawns per-user upstream connections and mirrors IRC state into
 // Discord gateway events.
@@ -583,7 +583,11 @@ func (s *Service) ReactorUserPayload(userID, reactorID string) map[string]any {
 	avatar := any(nil)
 	if nick, _, _, ok := s.PeerInfoByAuthor(userID, reactorID); ok && nick != "" {
 		username = nick
-		avatar = s.peerAvatarValue(userID, nick)
+		// Id-based lookup without a network context: first network that
+		// mirrors an avatar for the nick wins.
+		if h := s.PeerAvatar(userID, nick); h != "" {
+			avatar = h
+		}
 	}
 	return map[string]any{
 		"id": reactorID, "username": username,
@@ -861,10 +865,10 @@ func (s *Service) dmPeerFor(userID, netID, nick string) map[string]any {
 		}
 	}
 	peer := model.DMPeer(nick)
-	if h := s.peerAvatarValue(userID, nick); h != nil {
+	if h := s.peerAvatarValue(userID, netID, nick); h != nil {
 		peer["avatar"] = h
 	}
-	if s.peerBotValue(userID, nick) {
+	if s.peerBotValue(userID, netID, nick) {
 		peer["bot"] = true
 	}
 	return peer
@@ -1067,7 +1071,7 @@ func (s *Service) FindByHost(userID, host string) (*storage.Network, *storage.Me
 	return nil, nil, storage.ErrNotFound
 }
 
-// Leave removes the user's membership on a network — the Discord "leave
+// Leave removes the user's membership on a network вЂ” the Discord "leave
 // guild" action. The upstream IRC connection is dropped; when the last
 // membership on the network is gone the network itself (channels, replay
 // buffers) is garbage-collected, so an accidental join leaves no residue.
@@ -1166,7 +1170,7 @@ func (s *Service) CreateChannel(userID, guildID, rawName string) (map[string]any
 
 // RemoveChannel is the client's channel delete: PART upstream, drop the
 // auto-join entry, CHANNEL_DELETE to the client. The registry record and
-// replay buffer are kept — re-adding the channel recovers its history,
+// replay buffer are kept вЂ” re-adding the channel recovers its history,
 // matching bouncer semantics.
 func (s *Service) RemoveChannel(userID, channelID string) error {
 	ch, err := s.store.GetChannel(channelID)
@@ -1439,7 +1443,7 @@ func (s *Service) channelPayload(guildID string, ch *storage.Channel, position i
 		// Local grouping (type 4 categories): nil when ungrouped.
 		"parent_id": parentValue(ch.ParentID),
 		// COMPAT: the client resolves the member sidebar through the
-		// channel's own member_list_id (Channel.memberListId) — the lazy
+		// channel's own member_list_id (Channel.memberListId) вЂ” the lazy
 		// list map is keyed by exactly this string, and GUILD_MEMBER_LIST_
 		// UPDATE ids must match it or the rows render as shimmer
 		// placeholders forever. Per-channel, so lists don't bleed between
@@ -1697,7 +1701,7 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 		}
 	}
 	if avatar == nil {
-		avatar = s.peerAvatarValue(userID, cm.Nick)
+		avatar = s.peerAvatarValue(userID, guildID, cm.Nick)
 	}
 	status := presenceStatus(cm.Away)
 	return map[string]any{
@@ -1710,7 +1714,7 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 				"id":            uid,
 				"username":      cm.Nick,
 				"discriminator": "0",
-				"bot":           s.peerBotValue(userID, cm.Nick),
+				"bot":           s.peerBotValue(userID, guildID, cm.Nick),
 				"avatar":        avatar,
 				// Peer facts ride the user object itself: the sheet renders
 				// the store user's bio without needing the profile endpoint
@@ -1721,7 +1725,7 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 			// in a guild context (WidgetUserSheetViewModel reads it before
 			// the user bio) - the facts live here too.
 			"bio":       peerBioValue(cm.BioText()),
-			"roles":     s.memberRoleIDs(userID, mode, cm.Nick),
+			"roles":     s.memberRoleIDs(userID, guildID, mode, cm.Nick),
 			"joined_at": joinedAt,
 			// The lazy-list handler fans these presences into
 			// PRESENCE_UPDATES, whose store reads activities.length
@@ -1754,25 +1758,26 @@ func ircRoleIDsFor(mode string) []any {
 	return []any{model.IrcRoleID(mode)}
 }
 
-// peerBotValue resolves a nick's mirrored `bot` metadata flag.
-func (s *Service) peerBotValue(userID, nick string) bool {
-	return s.store != nil && s.store.PeerBot(userID, nick)
+// peerBotValue resolves a nick's mirrored `bot` metadata flag on the
+// network.
+func (s *Service) peerBotValue(userID, networkID, nick string) bool {
+	return s.store != nil && s.store.PeerBot(userID, networkID, nick)
 }
 
-// peerColorValue resolves a nick's mirrored `color` metadata value
-// ("#rrggbb" or "").
-func (s *Service) peerColorValue(userID, nick string) string {
+// peerColorValue resolves a nick's mirrored `color` metadata value on
+// the network ("#rrggbb" or "").
+func (s *Service) peerColorValue(userID, networkID, nick string) string {
 	if s.store == nil {
 		return ""
 	}
-	return s.store.PeerColor(userID, nick)
+	return s.store.PeerColor(userID, networkID, nick)
 }
 
 // memberRoleIDs builds a peer member's roles: the channel-mode role plus
-// the server-wide color-metadata role when set.
-func (s *Service) memberRoleIDs(userID, mode, nick string) []any {
+// the network's color-metadata role when set.
+func (s *Service) memberRoleIDs(userID, networkID, mode, nick string) []any {
 	roles := ircRoleIDsFor(mode)
-	if color := s.peerColorValue(userID, nick); color != "" {
+	if color := s.peerColorValue(userID, networkID, nick); color != "" {
 		roles = append(roles, model.IrcColorRoleID(color))
 	}
 	return roles
@@ -1789,7 +1794,7 @@ func (s *Service) networkColorRoles(userID, guildID string) []any {
 	seen := map[string]bool{}
 	var out []any
 	add := func(nick string) {
-		color := s.peerColorValue(userID, nick)
+		color := s.peerColorValue(userID, guildID, nick)
 		if color == "" || seen[color] {
 			return
 		}
@@ -2055,20 +2060,20 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 		if r.uid != "" {
 			avatar = s.MemberAvatarFor(r.uid, guildID)
 		} else {
-			avatar = s.peerAvatarValue(userID, r.cm.Nick)
+			avatar = s.peerAvatarValue(userID, guildID, r.cm.Nick)
 		}
 		user := map[string]any{
 			"id":            uid,
 			"username":      r.cm.Nick,
 			"discriminator": "0",
-			"bot":           s.peerBotValue(userID, r.cm.Nick),
+			"bot":           s.peerBotValue(userID, guildID, r.cm.Nick),
 			"bio":           peerBioValue(r.cm.BioText()),
 			"avatar":        avatar,
 		}
 		members = append(members, map[string]any{
 			"user":      user,
 			"bio":       peerBioValue(r.cm.BioText()),
-			"roles":     s.memberRoleIDs(userID, r.cm.Mode, r.cm.Nick),
+			"roles":     s.memberRoleIDs(userID, guildID, r.cm.Mode, r.cm.Nick),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 		status := presenceStatus(r.cm.Away)
@@ -2238,12 +2243,12 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"id":            uid,
 				"username":      cm.Nick,
 				"discriminator": "0",
-				"bot":           s.peerBotValue(m.UserID, cm.Nick),
+				"bot":           s.peerBotValue(m.UserID, net.ID, cm.Nick),
 				"bio":           peerBioValue(cm.BioText()),
-				"avatar":        s.peerAvatarValue(m.UserID, cm.Nick),
+				"avatar":        s.peerAvatarValue(m.UserID, net.ID, cm.Nick),
 			},
 			"bio":       peerBioValue(cm.BioText()),
-			"roles":     s.memberRoleIDs(m.UserID, cm.Mode, cm.Nick),
+			"roles":     s.memberRoleIDs(m.UserID, net.ID, cm.Mode, cm.Nick),
 			"joined_at": m.JoinedAt.Format(time.RFC3339),
 		})
 		presences = append(presences, presencePayload(uid, presenceStatus(cm.Away)))

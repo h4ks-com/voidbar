@@ -102,27 +102,30 @@ func (s *Storage) GetAvatar(hash string) (*Attachment, []byte, error) {
 	return att, data, nil
 }
 
-func peerAvatarKey(userID, nick string) []byte {
-	return []byte("peeravatar/" + userID + "/" + strings.ToLower(nick))
+func peerAvatarKey(userID, networkID, nick string) []byte {
+	return []byte("peeravatar/" + userID + "/" + networkID + "/" + strings.ToLower(nick))
 }
 
-// PutPeerAvatar remembers the avatar hash shown for a remote IRC user.
-// Keyed by nick (the author-id seed is "irc:"+nick, so nick-scoped is
-// exactly as unique as the ids the client already sees).
-func (s *Storage) PutPeerAvatar(userID, nick, hash string) error {
+// PutPeerAvatar remembers the avatar hash shown for a remote IRC user on
+// one network (the same nick on different networks can carry different
+// metadata - it is a different person). Keyed by nick below the author
+// id seed "irc:"+nick, so nick-scoped is exactly as unique as the ids
+// the client already sees.
+func (s *Storage) PutPeerAvatar(userID, networkID, nick, hash string) error {
 	if nick == "" {
 		return nil
 	}
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(peerAvatarKey(userID, nick), []byte(hash))
+		return txn.Set(peerAvatarKey(userID, networkID, nick), []byte(hash))
 	})
 }
 
-// PeerAvatar returns the stored avatar hash for a remote peer ("" unset).
-func (s *Storage) PeerAvatar(userID, nick string) string {
+// PeerAvatar returns the stored avatar hash for a remote peer on the
+// network ("" unset).
+func (s *Storage) PeerAvatar(userID, networkID, nick string) string {
 	var hash string
 	_ = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(peerAvatarKey(userID, nick))
+		item, err := txn.Get(peerAvatarKey(userID, networkID, nick))
 		if err != nil {
 			return nil
 		}
@@ -134,29 +137,29 @@ func (s *Storage) PeerAvatar(userID, nick string) string {
 	return hash
 }
 
-func peerFlagKey(userID, nick, kind string) []byte {
-	return []byte("peer" + kind + "/" + userID + "/" + strings.ToLower(nick))
+func peerFlagKey(userID, networkID, nick, kind string) []byte {
+	return []byte("peer" + kind + "/" + userID + "/" + networkID + "/" + strings.ToLower(nick))
 }
 
-// PutPeerBot remembers that a remote IRC user identifies as a bot (the
-// IRCv3 `bot` metadata key, mirrored server-wide by the bouncer).
-func (s *Storage) PutPeerBot(userID, nick string, bot bool) error {
+// PutPeerBot remembers that a remote IRC user identifies as a bot on the
+// network (the IRCv3 bot-metadata key or the WHO +B mark).
+func (s *Storage) PutPeerBot(userID, networkID, nick string, bot bool) error {
 	if nick == "" {
 		return nil
 	}
 	return s.db.Update(func(txn *badger.Txn) error {
 		if !bot {
-			return txn.Delete(peerFlagKey(userID, nick, "bot"))
+			return txn.Delete(peerFlagKey(userID, networkID, nick, "bot"))
 		}
-		return txn.Set(peerFlagKey(userID, nick, "bot"), []byte("1"))
+		return txn.Set(peerFlagKey(userID, networkID, nick, "bot"), []byte("1"))
 	})
 }
 
-// PeerBot reports the mirrored bot flag for a remote peer.
-func (s *Storage) PeerBot(userID, nick string) bool {
+// PeerBot reports the mirrored bot flag for a remote peer on the network.
+func (s *Storage) PeerBot(userID, networkID, nick string) bool {
 	found := false
 	_ = s.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(peerFlagKey(userID, nick, "bot"))
+		_, err := txn.Get(peerFlagKey(userID, networkID, nick, "bot"))
 		if err == nil {
 			found = true
 		}
@@ -165,25 +168,27 @@ func (s *Storage) PeerBot(userID, nick string) bool {
 	return found
 }
 
-// PutPeerColor remembers a remote IRC user's display color (the IRCv3
-// `color` metadata key, normalized "#rrggbb"; empty clears).
-func (s *Storage) PutPeerColor(userID, nick, hex string) error {
+// PutPeerColor remembers a remote IRC user's display color on the
+// network (the IRCv3 `color` metadata key, normalized "#rrggbb"; empty
+// clears).
+func (s *Storage) PutPeerColor(userID, networkID, nick, hex string) error {
 	if nick == "" {
 		return nil
 	}
 	return s.db.Update(func(txn *badger.Txn) error {
 		if hex == "" {
-			return txn.Delete(peerFlagKey(userID, nick, "color"))
+			return txn.Delete(peerFlagKey(userID, networkID, nick, "color"))
 		}
-		return txn.Set(peerFlagKey(userID, nick, "color"), []byte(hex))
+		return txn.Set(peerFlagKey(userID, networkID, nick, "color"), []byte(hex))
 	})
 }
 
-// PeerColor returns the stored display color for a remote peer ("" unset).
-func (s *Storage) PeerColor(userID, nick string) string {
+// PeerColor returns the stored display color for a remote peer on the
+// network ("" unset).
+func (s *Storage) PeerColor(userID, networkID, nick string) string {
 	var hex string
 	_ = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(peerFlagKey(userID, nick, "color"))
+		item, err := txn.Get(peerFlagKey(userID, networkID, nick, "color"))
 		if err != nil {
 			return nil
 		}
