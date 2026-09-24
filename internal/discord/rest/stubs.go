@@ -100,6 +100,7 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 	username := "user"
 	globalName := ""
 	bio := ""
+	bot := false
 	var avatar any
 	if id == u.ID {
 		username = u.Username
@@ -116,9 +117,16 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 		if nick, account, host, ok := s.net.PeerInfoByAuthor(u.ID, id); ok {
 			username = nick
 			globalName = nick
-			if h := s.net.PeerAvatar(u.ID, nick); h != "" {
+			// Guild context (the profile sheet passes ?guild_id=):
+			// prefer that network's mirrors before the any-network
+			// fallback.
+			guildID := r.URL.Query().Get("guild_id")
+			if h := s.net.PeerAvatarFor(u.ID, guildID, nick); h != "" {
 				avatar = h
 			}
+			// The badge must match the member rows: the sheet re-fetches
+			// the profile and a false here would blank it.
+			bot = s.net.PeerBotFor(u.ID, guildID, nick)
 			var lines []string
 			if account != "" {
 				lines = append(lines, "NickServ: "+account)
@@ -134,7 +142,7 @@ func (s *Server) handleUserProfile(w http.ResponseWriter, r *http.Request, u *st
 		"username":      username,
 		"discriminator": "0",
 		"avatar":        avatar,
-		"bot":           false,
+		"bot":           bot,
 		"public_flags":  0,
 		"flags":         0,
 		"premium_type":  0,

@@ -78,8 +78,20 @@ func (s *Service) AuthorAvatar(userID, channelID, rawAuthorID string) any {
 // of the user's networks (id-based lookups that carry no network
 // context, e.g. profiles resolved by user id).
 func (s *Service) PeerAvatar(userID, nick string) string {
+	return s.PeerAvatarFor(userID, "", nick)
+}
+
+// PeerAvatarFor is PeerAvatar with a preferred network: the given
+// network's mirror wins ("" = no preference), other networks back the
+// id-based lookup up.
+func (s *Service) PeerAvatarFor(userID, networkID, nick string) string {
 	if s.store == nil {
 		return ""
+	}
+	if networkID != "" {
+		if h := s.store.PeerAvatar(userID, networkID, nick); h != "" {
+			return h
+		}
 	}
 	for _, netID := range s.userNetworkIDs(userID) {
 		if h := s.store.PeerAvatar(userID, netID, nick); h != "" {
@@ -87,6 +99,24 @@ func (s *Service) PeerAvatar(userID, nick string) string {
 		}
 	}
 	return ""
+}
+
+// PeerBotFor reports the mirrored bot flag for a remote IRC peer: the
+// given network's mirror wins ("" = no preference), other networks back
+// the id-based lookup up.
+func (s *Service) PeerBotFor(userID, networkID, nick string) bool {
+	if s.store == nil {
+		return false
+	}
+	if networkID != "" && s.store.PeerBot(userID, networkID, nick) {
+		return true
+	}
+	for _, netID := range s.userNetworkIDs(userID) {
+		if s.store.PeerBot(userID, netID, nick) {
+			return true
+		}
+	}
+	return false
 }
 
 // peerAvatarValue is the network-scoped PeerAvatar in payload form (nil
