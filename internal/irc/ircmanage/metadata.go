@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
@@ -387,6 +388,36 @@ func (m *Manager) firePeerFacts(c *conn, nick string) {
 	if m.peerFacts != nil {
 		m.peerFacts(c.userID, c.networkID, nick)
 	}
+}
+
+// applyWhoBotFlag mirrors the bot mark from WHO flags: ircds with a bot
+// user mode (Unreal's +B, ircd-seven/solanum's +B) include it in the 352
+// flags field. When ISUPPORT advertises BOTMODE the mark is authoritative
+// - a missing mark clears the badge; without the token a seen mark only
+// ever sets (some ircds omit the flag entirely for humans).
+func (m *Manager) applyWhoBotFlag(c *conn, client *girc.Client, nick, flags string) {
+	if nick == "" || strings.EqualFold(nick, client.GetNick()) {
+		return
+	}
+	botMark := 'B'
+	authoritative := false
+	if bm, ok := client.GetServerOption("BOTMODE"); ok && len(bm) == 1 {
+		botMark = unicode.ToUpper(rune(bm[0]))
+		authoritative = true
+	}
+	mark := strings.ContainsRune(flags, botMark)
+	if !mark && !authoritative {
+		return
+	}
+	bot := mark
+	if bot == m.store.PeerBot(c.userID, nick) {
+		return
+	}
+	if err := m.store.PutPeerBot(c.userID, nick, bot); err != nil {
+		m.log.Warn("peer bot persist failed", "user", c.userID, "nick", nick, "err", err)
+		return
+	}
+	m.firePeerFacts(c, nick)
 }
 
 // peerBotForUser resolves a nick's mirrored bot flag for payloads.

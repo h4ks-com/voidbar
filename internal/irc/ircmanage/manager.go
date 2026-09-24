@@ -1481,6 +1481,8 @@ func (m *Manager) registerHandlers(c *conn) {
 		// The same line carries the peer's user@host - seed the facts
 		// for nicks that were in the channel before we joined.
 		c.setPeerHost(e.Params[5], e.Params[2], e.Params[3])
+		// ircds with a bot user mode flag it in WHO (+B / BOTMODE).
+		m.applyWhoBotFlag(c, client, e.Params[5], flags[1:])
 	})
 	c.client.Handlers.Add("315", func(client *girc.Client, e girc.Event) {
 		if len(e.Params) > 1 {

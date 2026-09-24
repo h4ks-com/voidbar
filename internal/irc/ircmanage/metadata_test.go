@@ -1,4 +1,4 @@
-package ircmanage
+﻿package ircmanage
 
 import (
 	"bufio"
@@ -233,6 +233,10 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 	var mu sync.Mutex
 	var sent []string
+	var wrote []string
+	var fakeConn net.Conn
+	var fakeNick string
+	whoCount := 0
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -241,7 +245,12 @@ func TestMetadataBotColorFlow(t *testing.T) {
 		defer func() { _ = conn.Close() }()
 		r := bufio.NewReader(conn)
 		nick := ""
-		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		w := func(s string) {
+			mu.Lock()
+			wrote = append(wrote, s)
+			mu.Unlock()
+			_, _ = conn.Write([]byte(s))
+		}
 		for {
 			line, err := r.ReadString('\n')
 			if err != nil {
@@ -259,10 +268,35 @@ func TestMetadataBotColorFlow(t *testing.T) {
 				w("CAP * ACK :" + req + "\r\n")
 			case strings.HasPrefix(line, "CAP END"):
 				w(":fake 001 " + nick + " :Welcome\r\n")
-			case strings.HasPrefix(line, "NICK") && nick == "":
-				nick = strings.TrimPrefix(line, "NICK ")
+				// Unreal-style: the bot user mode is advertised and its
+				// WHO mark is authoritative.
+				w(":fake 005 " + nick + " BOTMODE=B :are supported by this server\r\n")
 			case strings.HasPrefix(line, "PING"):
 				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+				mu.Lock()
+				fakeNick = nick
+				fakeConn = conn
+				mu.Unlock()
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "JOIN"):
+				w(":" + nick + "!u@h JOIN #test * :the bouncer\r\n")
+				w(":fake 353 " + nick + " = #test :" + nick + " beep\r\n")
+				w(":fake 366 " + nick + " #test :End of NAMES list\r\n")
+			case strings.HasPrefix(line, "WHO "):
+				// The connect burst sends two WHO rounds (seed sweep +
+				// occupancy sync) - both flag beep as a bot. Later
+				// away-poller rounds drop the mark, which BOTMODE makes
+				// authoritative.
+				whoCount++
+				beepFlags := "H"
+				if whoCount <= 2 {
+					beepFlags = "HB"
+				}
+				w(":fake 352 " + nick + " #test u h s beep " + beepFlags + " :0 z\r\n")
+				w(":fake 315 " + nick + " #test :End of WHO list\r\n")
 			case strings.HasPrefix(line, "METADATA * SUB"):
 				w(":fake 770 " + nick + " avatar bot color\r\n")
 				// Peer facts arrive as live notifications: a bot flag in
@@ -286,6 +320,7 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	if err := store.UpsertMembership(&storage.Membership{
 		UserID: "u1", NetworkID: "net1",
 		Nick: "metatester", Username: "m", Realname: "m",
+		AutoJoin: []string{"#test"},
 		JoinedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -294,6 +329,9 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := gateway.New(nil, nil, logger, nil, nil)
 	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	// Fast away-poller: the authoritative BOTMODE clear needs a second
+	// WHO sweep without the mark.
+	manager.awayPollInterval = 300 * time.Millisecond
 	t.Cleanup(func() { manager.Drop("u1", "net1") })
 
 	factsNick := make(chan string, 4)
@@ -341,5 +379,33 @@ func TestMetadataBotColorFlow(t *testing.T) {
 	}
 	if got := store.PeerColor("u1", "eve"); got != "#1abc9c" {
 		t.Fatalf("peer color = %q, want #1abc9c", got)
+	}
+
+	// WHO path: the connect-time sweep's +B mark sets the badge.
+	deadline := time.Now().Add(15 * time.Second)
+	for !store.PeerBot("u1", "beep") {
+		if time.Now().After(deadline) {
+			mu.Lock()
+			lines := strings.Join(sent, "\n") + "\n--- server wrote ---\n" + strings.Join(wrote, "")
+			mu.Unlock()
+			t.Fatalf("WHO +B never set the bot flag; sent:\n%s", lines)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// An unmarked WHO round (pushed here as an unsolicited 352) clears
+	// the badge: BOTMODE is advertised, so absence is authoritative.
+	mu.Lock()
+	conn2, ourNick := fakeConn, fakeNick
+	mu.Unlock()
+	if conn2 == nil || ourNick == "" {
+		t.Fatal("fake server handshake not observed")
+	}
+	_, _ = conn2.Write([]byte(":fake 352 " + ourNick + " #test u h s beep H :0 z\r\n"))
+	deadline = time.Now().Add(15 * time.Second)
+	for store.PeerBot("u1", "beep") {
+		if time.Now().After(deadline) {
+			t.Fatal("BOTMODE-authoritative WHO round never cleared the bot flag")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
