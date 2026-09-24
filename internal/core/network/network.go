@@ -477,6 +477,9 @@ func (s *Service) guildUpdatePayload(m *storage.Membership, net *storage.Network
 		count += len(all)
 	}
 	roles := append([]any{model.EveryoneRolePayload(net.ID, s.manager != nil && s.manager.ReactionsSupported(m.UserID, net.ID))}, model.IrcRolePayloads()...)
+	if colorRoles := s.networkColorRoles(m.UserID, net.ID); len(colorRoles) > 0 {
+		roles = append(roles, colorRoles...)
+	}
 	return map[string]any{
 		"id":                            net.ID,
 		"name":                          net.Name,
@@ -860,6 +863,9 @@ func (s *Service) dmPeerFor(userID, netID, nick string) map[string]any {
 	peer := model.DMPeer(nick)
 	if h := s.peerAvatarValue(userID, nick); h != nil {
 		peer["avatar"] = h
+	}
+	if s.peerBotValue(userID, nick) {
+		peer["bot"] = true
 	}
 	return peer
 }
@@ -1704,7 +1710,7 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 				"id":            uid,
 				"username":      cm.Nick,
 				"discriminator": "0",
-				"bot":           false,
+				"bot":           s.peerBotValue(userID, cm.Nick),
 				"avatar":        avatar,
 				// Peer facts ride the user object itself: the sheet renders
 				// the store user's bio without needing the profile endpoint
@@ -1714,19 +1720,19 @@ func (s *Service) memberListItem(userID, guildID string, cm ircmanage.ChannelMem
 			// The member-level bio is the sheet's PRIMARY About-me source
 			// in a guild context (WidgetUserSheetViewModel reads it before
 			// the user bio) - the facts live here too.
-		"bio":       peerBioValue(cm.BioText()),
-		"roles":     ircRoleIDsFor(mode),
-		"joined_at": joinedAt,
-		// The lazy-list handler fans these presences into
-		// PRESENCE_UPDATES, whose store reads activities.length
-		// unguarded (same crash class as the GUILD_CREATE presences).
-		"presence": map[string]any{
-			"user":          map[string]any{"id": uid},
-			"status":        status,
-			"activities":    []any{},
-			"client_status": map[string]any{},
+			"bio":       peerBioValue(cm.BioText()),
+			"roles":     s.memberRoleIDs(userID, mode, cm.Nick),
+			"joined_at": joinedAt,
+			// The lazy-list handler fans these presences into
+			// PRESENCE_UPDATES, whose store reads activities.length
+			// unguarded (same crash class as the GUILD_CREATE presences).
+			"presence": map[string]any{
+				"user":          map[string]any{"id": uid},
+				"status":        status,
+				"activities":    []any{},
+				"client_status": map[string]any{},
+			},
 		},
-	},
 	}
 }
 
@@ -1746,6 +1752,67 @@ func ircRoleIDsFor(mode string) []any {
 		return []any{}
 	}
 	return []any{model.IrcRoleID(mode)}
+}
+
+// peerBotValue resolves a nick's mirrored `bot` metadata flag.
+func (s *Service) peerBotValue(userID, nick string) bool {
+	return s.store != nil && s.store.PeerBot(userID, nick)
+}
+
+// peerColorValue resolves a nick's mirrored `color` metadata value
+// ("#rrggbb" or "").
+func (s *Service) peerColorValue(userID, nick string) string {
+	if s.store == nil {
+		return ""
+	}
+	return s.store.PeerColor(userID, nick)
+}
+
+// memberRoleIDs builds a peer member's roles: the channel-mode role plus
+// the server-wide color-metadata role when set.
+func (s *Service) memberRoleIDs(userID, mode, nick string) []any {
+	roles := ircRoleIDsFor(mode)
+	if color := s.peerColorValue(userID, nick); color != "" {
+		roles = append(roles, model.IrcColorRoleID(color))
+	}
+	return roles
+}
+
+// networkColorRoles collects the distinct color roles present among a
+// guild's occupants (IRC + bouncer members) for the guild roles array -
+// the client can only paint a name color whose role it has seen.
+func (s *Service) networkColorRoles(userID, guildID string) []any {
+	mem, err := s.store.GetMembership(guildID, userID)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []any
+	add := func(nick string) {
+		color := s.peerColorValue(userID, nick)
+		if color == "" || seen[color] {
+			return
+		}
+		seen[color] = true
+		if payload := model.IrcColorRolePayload(color); payload != nil {
+			out = append(out, payload)
+		}
+	}
+	for _, cm := range s.ircOccupants(userID, guildID, mem.AutoJoin) {
+		add(cm.Nick)
+	}
+	if all, err := s.store.ListMemberships(guildID); err == nil {
+		for _, o := range all {
+			nick := o.Nick
+			if s.manager != nil {
+				if live := s.manager.LiveNick(o.UserID, guildID); live != "" {
+					nick = live
+				}
+			}
+			add(nick)
+		}
+	}
+	return out
 }
 
 // ircOccupants returns the union of channel occupants across ircNames,
@@ -1994,14 +2061,14 @@ func (s *Service) MemberChunkPayload(userID, guildID, nonce string, userIDs []st
 			"id":            uid,
 			"username":      r.cm.Nick,
 			"discriminator": "0",
-			"bot":           false,
+			"bot":           s.peerBotValue(userID, r.cm.Nick),
 			"bio":           peerBioValue(r.cm.BioText()),
 			"avatar":        avatar,
 		}
 		members = append(members, map[string]any{
 			"user":      user,
 			"bio":       peerBioValue(r.cm.BioText()),
-			"roles":     ircRoleIDsFor(r.cm.Mode),
+			"roles":     s.memberRoleIDs(userID, r.cm.Mode, r.cm.Nick),
 			"joined_at": mem.JoinedAt.Format(time.RFC3339),
 		})
 		status := presenceStatus(r.cm.Away)
@@ -2171,12 +2238,12 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 				"id":            uid,
 				"username":      cm.Nick,
 				"discriminator": "0",
-				"bot":           false,
+				"bot":           s.peerBotValue(m.UserID, cm.Nick),
 				"bio":           peerBioValue(cm.BioText()),
 				"avatar":        s.peerAvatarValue(m.UserID, cm.Nick),
 			},
 			"bio":       peerBioValue(cm.BioText()),
-			"roles":     ircRoleIDsFor(cm.Mode),
+			"roles":     s.memberRoleIDs(m.UserID, cm.Mode, cm.Nick),
 			"joined_at": m.JoinedAt.Format(time.RFC3339),
 		})
 		presences = append(presences, presencePayload(uid, presenceStatus(cm.Away)))
@@ -2188,6 +2255,11 @@ func (s *Service) buildGuild(m *storage.Membership, net *storage.Network) any {
 	// member name colors and hoisted sidebar sections resolve. ADD_REACTIONS
 	// only where the upstream can anchor them (MSGREFTYPES msgid).
 	roles := append([]any{model.EveryoneRolePayload(net.ID, s.manager != nil && s.manager.ReactionsSupported(m.UserID, net.ID))}, model.IrcRolePayloads()...)
+	// Peer-set color-metadata roles complete the palette: a name color
+	// only renders when the client holds the role object.
+	if colorRoles := s.networkColorRoles(m.UserID, net.ID); len(colorRoles) > 0 {
+		roles = append(roles, colorRoles...)
+	}
 
 	// 2023+ web clients (guild data modes) read guild fields through a
 	// `properties` sub-object with NO null guard (e.properties.name throws

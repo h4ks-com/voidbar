@@ -134,6 +134,67 @@ func (s *Storage) PeerAvatar(userID, nick string) string {
 	return hash
 }
 
+func peerFlagKey(userID, nick, kind string) []byte {
+	return []byte("peer" + kind + "/" + userID + "/" + strings.ToLower(nick))
+}
+
+// PutPeerBot remembers that a remote IRC user identifies as a bot (the
+// IRCv3 `bot` metadata key, mirrored server-wide by the bouncer).
+func (s *Storage) PutPeerBot(userID, nick string, bot bool) error {
+	if nick == "" {
+		return nil
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		if !bot {
+			return txn.Delete(peerFlagKey(userID, nick, "bot"))
+		}
+		return txn.Set(peerFlagKey(userID, nick, "bot"), []byte("1"))
+	})
+}
+
+// PeerBot reports the mirrored bot flag for a remote peer.
+func (s *Storage) PeerBot(userID, nick string) bool {
+	found := false
+	_ = s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(peerFlagKey(userID, nick, "bot"))
+		if err == nil {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
+// PutPeerColor remembers a remote IRC user's display color (the IRCv3
+// `color` metadata key, normalized "#rrggbb"; empty clears).
+func (s *Storage) PutPeerColor(userID, nick, hex string) error {
+	if nick == "" {
+		return nil
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		if hex == "" {
+			return txn.Delete(peerFlagKey(userID, nick, "color"))
+		}
+		return txn.Set(peerFlagKey(userID, nick, "color"), []byte(hex))
+	})
+}
+
+// PeerColor returns the stored display color for a remote peer ("" unset).
+func (s *Storage) PeerColor(userID, nick string) string {
+	var hex string
+	_ = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(peerFlagKey(userID, nick, "color"))
+		if err != nil {
+			return nil
+		}
+		return item.Value(func(v []byte) error {
+			hex = string(v)
+			return nil
+		})
+	})
+	return hex
+}
+
 // SetUserAvatar sets (or clears, on "") the account-wide avatar hash.
 func (s *Storage) SetUserAvatar(userID, hash string) error {
 	return s.db.Update(func(txn *badger.Txn) error {

@@ -50,6 +50,7 @@ type Manager struct {
 	// peerAvatar (optional) is notified when a remote peer's avatar
 	// arrives or changes via draft/metadata-2.
 	peerAvatar func(userID, networkID, nick string)
+	peerFacts  func(userID, networkID, nick string)
 
 	// avatarFail (optional) is the revert hook for a rejected own-avatar
 	// METADATA SET; the network service restores the previous hash.
@@ -1798,7 +1799,7 @@ func (m *Manager) dispatchMessage(c *conn, target, author, content, ts, msgid, r
 	// Bare IRC nicks become Discord markers (pills + mentions) so
 	// highlighting works; the buffered copy keeps the markers.
 	content, mentioned, mentionChans := m.Discordize(c.userID, c.networkID, target, content)
-	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author))
+	payload := buildMessagePayload(msgID, channelID, author, content, ts, c.peerBioText(author), m.peerAvatarForUser(c.userID, author), m.peerBotForUser(c.userID, author))
 	if ref, ok := m.resolveReplyRef(c, replyMsgid); ok && ref.Snowflake != "" {
 		attachReplyReference(m, payload, ref, c.networkID, c.userID)
 	}
@@ -1914,7 +1915,7 @@ func (m *Manager) dispatchQuery(c *conn, author, content, ts, msgid, replyMsgid 
 				"id":            peerID,
 				"username":      author,
 				"discriminator": "0",
-				"bot":           false,
+				"bot":           m.peerBotForUser(c.userID, author),
 			}
 			if bio := c.peerBioText(author); bio != "" {
 				authorObj["bio"] = bio
@@ -1980,6 +1981,9 @@ func (m *Manager) dmChannelPayloadFor(userID string, dm *storage.DMChannel) map[
 	if avatar := m.peerAvatarForUser(userID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
 	}
+	if m.peerBotForUser(userID, dm.Nick) {
+		peer["bot"] = true
+	}
 	peerID, _ := peer["id"].(string)
 	return map[string]any{
 		"id":                 dm.ID,
@@ -2002,6 +2006,9 @@ func (m *Manager) dmChannelPayload(c *conn, dm *storage.DMChannel) map[string]an
 	}
 	if avatar := m.peerAvatarForUser(c.userID, dm.Nick); avatar != nil {
 		peer["avatar"] = avatar
+	}
+	if m.peerBotForUser(c.userID, dm.Nick) {
+		peer["bot"] = true
 	}
 	peerID, _ := peer["id"].(string)
 	return map[string]any{

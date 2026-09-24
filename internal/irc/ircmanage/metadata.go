@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/h4ks-com/voidbar/internal/discord/model"
 	"github.com/h4ks-com/voidbar/internal/storage"
 	"github.com/lrstanley/girc"
 )
@@ -22,11 +23,28 @@ func isMetadataCap(cap string) bool {
 // (a URL to an image).
 const metadataAvatarKey = "avatar"
 
+// metadataBotKey / metadataColorKey are the peer-flag keys the bouncer
+// mirrors: `bot` marks remote users as bots (surfaced as user.bot on the
+// Discord side), `color` sets a display color (a synthetic Discord role).
+// Both are server-wide on the upstream - one value per user, every
+// channel.
+const (
+	metadataBotKey   = "bot"
+	metadataColorKey = "color"
+)
+
 // SetPeerAvatarNotifier installs the callback fired when a remote peer's
 // avatar arrives or changes (draft/metadata-2 METADATA events and join
 // bursts). The Discord side maps it to GUILD_MEMBER_UPDATE.
 func (m *Manager) SetPeerAvatarNotifier(fn func(userID, networkID, nick string)) {
 	m.peerAvatar = fn
+}
+
+// SetPeerFactsNotifier installs the callback fired when a remote peer's
+// bot flag or color changes. Same GUILD_MEMBER_UPDATE mapping as avatars:
+// the member row the client holds re-reads everything from the store.
+func (m *Manager) SetPeerFactsNotifier(fn func(userID, networkID, nick string)) {
+	m.peerFacts = fn
 }
 
 // SetAvatar pushes the bouncer account's own avatar URL to one network's
@@ -134,8 +152,8 @@ func (m *Manager) metadataSubscribe(c *conn, client *girc.Client) {
 	if !c.metadataCapUp.Load() {
 		return
 	}
-	client.Send(&girc.Event{Command: "METADATA", Params: []string{"*", "SUB", metadataAvatarKey}})
-	m.log.Debug("metadata avatar subscribed", "user", c.userID, "network", c.networkID)
+	client.Send(&girc.Event{Command: "METADATA", Params: []string{"*", "SUB", metadataAvatarKey, metadataBotKey, metadataColorKey}})
+	m.log.Debug("metadata subscribed", "user", c.userID, "network", c.networkID)
 }
 
 // metadataSyncChannel pulls the current avatar values for everyone in a
@@ -188,26 +206,25 @@ func (m *Manager) metadataSyncRetry(c *conn, target string, retryAfter int) {
 
 // handleMetadataEvent processes an inbound `METADATA <target> <key>
 // <visibility> <value>` notification. Own-nick targets are skipped: the
-// bouncer is the source of truth for its own avatar.
+// bouncer is the source of truth for its own facts.
 func (m *Manager) handleMetadataEvent(c *conn, client *girc.Client, e *girc.Event) {
-	if len(e.Params) < 3 || e.Params[1] != metadataAvatarKey {
+	if len(e.Params) < 3 {
 		return
 	}
-	nick := e.Params[0]
-	url := ""
+	value := ""
 	if len(e.Params) > 3 {
-		url = e.Params[3]
+		value = e.Params[3]
 	}
-	m.applyPeerAvatar(c, client, nick, url)
+	m.applyPeerMeta(c, client, e.Params[0], e.Params[1], value)
 }
 
 // handleMetadataKeyValue processes 761 RPL_KEYVALUE answers (GET/LIST/
 // SYNC payloads and SET confirmations): `761 <ournick> <target> <key>
-// <visibility> :<value>`. Same avatar handling as live notifications.
+// <visibility> :<value>`. Same handling as live notifications.
 func (m *Manager) handleMetadataKeyValue(c *conn, client *girc.Client, e *girc.Event) {
 	// Params: our nick, target, key, visibility, value (last param may
 	// be absent for a removed key).
-	if len(e.Params) < 4 || e.Params[2] != metadataAvatarKey {
+	if len(e.Params) < 4 {
 		return
 	}
 	// Own-target echo of a SET we issued: the upstream accepted the
@@ -218,20 +235,69 @@ func (m *Manager) handleMetadataKeyValue(c *conn, client *girc.Client, e *girc.E
 		c.avatarSetMu.Unlock()
 		return
 	}
-	url := ""
+	value := ""
 	if len(e.Params) > 4 {
-		url = e.Params[4]
+		value = e.Params[4]
 	}
-	m.applyPeerAvatar(c, client, e.Params[1], url)
+	m.applyPeerMeta(c, client, e.Params[1], e.Params[2], value)
 }
 
 // handleMetadataNotSet processes 766 RPL_KEYNOTSET (`766 <ournick>
-// <target> <key>`): the peer has no avatar - clear any stale mirror.
+// <target> <key>`): the peer has no value - clear any stale mirror.
 func (m *Manager) handleMetadataNotSet(c *conn, client *girc.Client, e *girc.Event) {
-	if len(e.Params) < 3 || e.Params[2] != metadataAvatarKey {
+	if len(e.Params) < 3 {
 		return
 	}
-	m.applyPeerAvatar(c, client, e.Params[1], "")
+	m.applyPeerMeta(c, client, e.Params[1], e.Params[2], "")
+}
+
+// applyPeerMeta routes one peer metadata value ("" = unset) by key:
+// avatars fetch+store, bot/color flags store directly.
+func (m *Manager) applyPeerMeta(c *conn, client *girc.Client, nick, metaKey, value string) {
+	switch metaKey {
+	case metadataAvatarKey:
+		m.applyPeerAvatar(c, client, nick, value)
+	case metadataBotKey:
+		m.applyPeerBot(c, nick, value)
+	case metadataColorKey:
+		m.applyPeerColor(c, nick, value)
+	}
+}
+
+// applyPeerBot mirrors the peer's `bot` flag. Truthy spellings the
+// IRCv3 ecosystem uses ("true"/"1"/"yes") all count.
+func (m *Manager) applyPeerBot(c *conn, nick, value string) {
+	if nick == "" {
+		return
+	}
+	bot := strings.EqualFold(value, "true") || value == "1" || strings.EqualFold(value, "yes")
+	if err := m.store.PutPeerBot(c.userID, nick, bot); err != nil {
+		m.log.Warn("peer bot persist failed", "user", c.userID, "nick", nick, "err", err)
+		return
+	}
+	m.firePeerFacts(c, nick)
+}
+
+// applyPeerColor mirrors the peer's `color` value: normalized "#rrggbb"
+// or cleared on empty/invalid.
+func (m *Manager) applyPeerColor(c *conn, nick, value string) {
+	if nick == "" {
+		return
+	}
+	color := ""
+	if value != "" {
+		normalized, ok := model.ParseIrcColor(value)
+		if !ok {
+			m.log.Debug("peer color ignored", "user", c.userID, "nick", nick, "value", value)
+			return
+		}
+		color = normalized
+	}
+	if err := m.store.PutPeerColor(c.userID, nick, color); err != nil {
+		m.log.Warn("peer color persist failed", "user", c.userID, "nick", nick, "err", err)
+		return
+	}
+	m.firePeerFacts(c, nick)
 }
 
 // handleMetadataSyncLater processes 774 RPL_METADATASYNCLATER: the
@@ -315,6 +381,22 @@ func (m *Manager) firePeerAvatar(c *conn, nick string) {
 	if m.peerAvatar != nil {
 		m.peerAvatar(c.userID, c.networkID, nick)
 	}
+}
+
+func (m *Manager) firePeerFacts(c *conn, nick string) {
+	if m.peerFacts != nil {
+		m.peerFacts(c.userID, c.networkID, nick)
+	}
+}
+
+// peerBotForUser resolves a nick's mirrored bot flag for payloads.
+func (m *Manager) peerBotForUser(userID, nick string) bool {
+	return m.store.PeerBot(userID, nick)
+}
+
+// peerColorForUser resolves a nick's mirrored color ("#rrggbb" or "").
+func (m *Manager) peerColorForUser(userID, nick string) string {
+	return m.store.PeerColor(userID, nick)
 }
 
 // peerAvatarForUser resolves a nick's mirrored avatar hash across the

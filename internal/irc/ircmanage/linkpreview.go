@@ -423,6 +423,9 @@ func (m *Manager) enrichAuthor(userID string, payload map[string]any, row *stora
 	if bio := m.peerBioForUser(userID, nick); bio != "" {
 		au["bio"] = bio
 	}
+	if m.peerBotForUser(userID, nick) {
+		au["bot"] = true
+	}
 	if avatar := m.peerAvatarForUser(userID, nick); avatar != nil {
 		au["avatar"] = avatar
 	}

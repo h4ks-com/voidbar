@@ -215,3 +215,131 @@ func TestMetadataAvatarFlow(t *testing.T) {
 		t.Fatal("global avatar rejection never fired the hook")
 	}
 }
+
+// TestMetadataBotColorFlow covers the bot/color peer-flag mirroring: SUB
+// rides with avatar, inbound METADATA notifications land in the store
+// (color normalized, junk ignored), and the facts notifier fires.
+func TestMetadataBotColorFlow(t *testing.T) {
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var sent []string
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		nick := ""
+		w := func(s string) { _, _ = conn.Write([]byte(s)) }
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			mu.Lock()
+			sent = append(sent, line)
+			mu.Unlock()
+			switch {
+			case strings.HasPrefix(line, "CAP LS"):
+				w("CAP * LS :batch echo-message server-time draft/metadata-2\r\n")
+			case strings.HasPrefix(line, "CAP REQ"):
+				req := strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "CAP REQ")), ":")
+				w("CAP * ACK :" + req + "\r\n")
+			case strings.HasPrefix(line, "CAP END"):
+				w(":fake 001 " + nick + " :Welcome\r\n")
+			case strings.HasPrefix(line, "NICK") && nick == "":
+				nick = strings.TrimPrefix(line, "NICK ")
+			case strings.HasPrefix(line, "PING"):
+				w("PONG" + line[4:] + "\r\n")
+			case strings.HasPrefix(line, "METADATA * SUB"):
+				w(":fake 770 " + nick + " avatar bot color\r\n")
+				// Peer facts arrive as live notifications: a bot flag in
+				// mixed case, a color without the # prefix, and junk that
+				// must be ignored.
+				w(":eve!u@h METADATA eve bot * :TRUE\r\n")
+				w(":eve!u@h METADATA eve color * :1AbC9c\r\n")
+				w(":eve!u@h METADATA eve color * :not-a-color\r\n")
+			}
+		}
+	}()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := store.UpsertNetwork(&storage.Network{
+		ID: "net1", ConnID: "irc://127.0.0.1", Name: "Fake",
+		Host: "127.0.0.1", Port: port,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(&storage.Membership{
+		UserID: "u1", NetworkID: "net1",
+		Nick: "metatester", Username: "m", Realname: "m",
+		JoinedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := gateway.New(nil, nil, logger, nil, nil)
+	manager := New(store, gw, logger, util.NewSnowflake(0, 0))
+	t.Cleanup(func() { manager.Drop("u1", "net1") })
+
+	factsNick := make(chan string, 4)
+	manager.SetPeerFactsNotifier(func(userID, networkID, nick string) {
+		select {
+		case factsNick <- nick:
+		default:
+		}
+	})
+
+	waitLine := func(substr string) string {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			for _, l := range sent {
+				if strings.Contains(l, substr) {
+					mu.Unlock()
+					return l
+				}
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %q; sent:\n%s", substr, strings.Join(sent, "\n"))
+		return ""
+	}
+
+	manager.EnsureConn("u1", "net1")
+	if l := waitLine("METADATA * SUB"); !strings.Contains(l, "bot") || !strings.Contains(l, "color") {
+		t.Fatalf("sub line misses bot/color: %q", l)
+	}
+
+	seen := 0
+	for seen < 2 {
+		select {
+		case <-factsNick:
+			seen++
+		case <-time.After(15 * time.Second):
+			t.Fatal("facts notifier never fired")
+		}
+	}
+	if !store.PeerBot("u1", "eve") {
+		t.Fatal("bot flag not mirrored")
+	}
+	if got := store.PeerColor("u1", "eve"); got != "#1abc9c" {
+		t.Fatalf("peer color = %q, want #1abc9c", got)
+	}
+}

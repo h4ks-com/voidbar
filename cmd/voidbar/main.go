@@ -121,6 +121,9 @@ func serveCmd(args []string, log *slog.Logger) error {
 	manager.SetMemberNotifier(netSvc.RefreshMember)
 	manager.SetLinkNotifier(netSvc.OnLinkChange)
 	manager.SetPeerAvatarNotifier(netSvc.RefreshPeerAvatar)
+	// Bot flag / color metadata changes ride the same member-refresh
+	// path (the payload re-reads every peer fact from the store).
+	manager.SetPeerFactsNotifier(netSvc.RefreshPeerAvatar)
 	// A rejected own-avatar SET: global mode hides the avatar in that
 	// network's guild only (accepted networks keep it); a rejected
 	// per-guild override reverts to the previous hash.

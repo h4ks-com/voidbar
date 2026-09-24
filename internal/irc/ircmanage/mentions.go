@@ -37,6 +37,7 @@ type mentionUser struct {
 	nick   string // live IRC nick
 	id     string // Discord user id
 	bio    string // peer-facts bio; rides the mentions[] user objects too
+	bot    bool   // mirrored `bot` metadata flag
 	bounce bool   // bouncer member (client already knows their user)
 	mode   string // highest channel mode (for role colors), "" = plain
 }
@@ -63,6 +64,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 				nick: cm.Nick,
 				id:   model.IrcAuthorID("irc:" + cm.Nick),
 				bio:  cm.BioText(),
+				bot:  m.store.PeerBot(userID, cm.Nick),
 				mode: cm.Mode,
 			}
 		}
@@ -72,6 +74,7 @@ func (m *Manager) mentionUsers(userID, networkID, ircTarget string) []mentionUse
 			nick: ircTarget,
 			id:   model.IrcAuthorID("irc:" + ircTarget),
 			bio:  m.PeerBioText(userID, networkID, ircTarget),
+			bot:  m.store.PeerBot(userID, ircTarget),
 		}
 	}
 	if members, err := m.store.ListMemberships(networkID); err == nil {
@@ -295,7 +298,7 @@ func mentionUserPayload(u mentionUser) map[string]any {
 		"id":            u.id,
 		"username":      u.nick,
 		"discriminator": "0",
-		"bot":           false,
+		"bot":           u.bot,
 	}
 	if u.bio != "" {
 		out["bio"] = u.bio
@@ -439,11 +442,16 @@ func (m *Manager) dispatchPeerMember(c *conn, nick, mode, joinedAt string) {
 	if mode != "" {
 		roles = []any{model.IrcRoleID(mode)}
 	}
+	// Server-wide color metadata rides a synthetic role above the mode
+	// roles, so the peer's chosen name color always shows.
+	if color := m.peerColorForUser(c.userID, nick); color != "" {
+		roles = append(roles, model.IrcColorRoleID(color))
+	}
 	user := map[string]any{
 		"id":            model.IrcAuthorID("irc:" + nick),
 		"username":      nick,
 		"discriminator": "0",
-		"bot":           false,
+		"bot":           m.peerBotForUser(c.userID, nick),
 	}
 	bio := c.peerBioText(nick)
 	if bio != "" {

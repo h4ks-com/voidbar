@@ -271,9 +271,9 @@ func (s *Service) SetNetworkAvatar(userID, guildID, dataURI string) error {
 }
 
 // RefreshPeerAvatar is the ircmanage metadata callback: a remote peer's
-// avatar changed (or arrived with the join burst). The member rows the
-// client holds refresh through GUILD_MEMBER_UPDATE scoped to the network
-// the event came in on.
+// avatar, bot flag or color changed (or arrived with the join burst).
+// The member rows the client holds refresh through GUILD_MEMBER_UPDATE
+// scoped to the network the event came in on.
 func (s *Service) RefreshPeerAvatar(userID, networkID, nick string) {
 	if s.gw == nil || s.store == nil {
 		return
@@ -295,10 +295,10 @@ func (s *Service) RefreshPeerAvatar(userID, networkID, nick string) {
 			"id":            model.IrcAuthorID("irc:" + nick),
 			"username":      nick,
 			"discriminator": "0",
-			"bot":           false,
+			"bot":           s.peerBotValue(userID, nick),
 			"avatar":        s.peerAvatarValue(userID, nick),
 		},
-		"roles":     ircRoleIDsFor(mode),
+		"roles":     s.memberRoleIDs(userID, mode, nick),
 		"joined_at": mem.JoinedAt.Format(time.RFC3339),
 	})
 }

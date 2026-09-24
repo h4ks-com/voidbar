@@ -1,5 +1,10 @@
 package model
 
+import (
+	"strconv"
+	"strings"
+)
+
 // IRC channel-membership modes surfaced as synthetic hoisted Discord
 // roles, so channel status prefixes (~&@%+) become visible sections and
 // name colors in the member sidebar. The mapping is fixed:
@@ -54,6 +59,58 @@ func IrcModeRank(mode string) int {
 // stay in sync across restarts.
 func IrcRoleID(mode string) string {
 	return hashSnowflake("irc-role:" + mode)
+}
+
+// ParseIrcColor validates a peer-set color value (the IRCv3 `color`
+// metadata key): "#rrggbb" / "rrggbb" case-insensitive. Returns the
+// normalized "#rrggbb" form and whether the value was valid.
+func ParseIrcColor(v string) (string, bool) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	v = strings.TrimPrefix(v, "#")
+	if len(v) != 6 {
+		return "", false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", false
+		}
+	}
+	return "#" + v, true
+}
+
+// ircColorRolePosition sits above every mode role so a peer-chosen color
+// always wins the "highest colored role" name-color contest.
+const ircColorRolePosition = 6
+
+// IrcColorRoleID maps a normalized color ("#rrggbb") to a stable role
+// snowflake (same decimal-snowflake construction as IrcRoleID).
+func IrcColorRoleID(color string) string {
+	return hashSnowflake("irc-color:" + color)
+}
+
+// IrcColorRolePayload builds the synthetic role carrying a peer-set
+// color. hoist stays false: the color is a name color, not a sidebar
+// section.
+func IrcColorRolePayload(color string) map[string]any {
+	normalized, ok := ParseIrcColor(color)
+	if !ok {
+		return nil
+	}
+	cint, _ := strconv.ParseUint(strings.TrimPrefix(normalized, "#"), 16, 32)
+	return map[string]any{
+		"id":            IrcColorRoleID(normalized),
+		"name":          "Color " + strings.ToUpper(normalized),
+		"color":         int(cint),
+		"hoist":         false,
+		"icon":          nil,
+		"unicode_emoji": nil,
+		"position":      ircColorRolePosition,
+		"permissions":   "0",
+		"managed":       false,
+		"mentionable":   false,
+		"flags":         0,
+	}
 }
 
 // IrcRolePayloads returns the wire role objects in descending privilege
